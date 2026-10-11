@@ -108,6 +108,24 @@ export const run = Effect.fn("clientRuntime.connection.bearerRenewal.run")(funct
   // Server-reported expiry, by token, for tokens whose claims could not be read.
   const knownExpiry = yield* Ref.make<ReadonlyMap<string, number>>(new Map());
   const retryAfter = yield* Ref.make<ReadonlyMap<string, number>>(new Map());
+  // Tokens the server declined to renew while due: renewal is single use, so
+  // another window or device already renewed it (or it is not renewable).
+  // They are never sent again; the saved credential is re-read instead.
+  const declined = yield* Ref.make<ReadonlySet<string>>(new Set());
+
+  /** Re-reads the saved credential past any cache to pick up another window's renewal. */
+  const pickUpRenewedElsewhere = Effect.fn(
+    "clientRuntime.connection.bearerRenewal.pickUpRenewedElsewhere",
+  )(function* (environmentId: EnvironmentId, declinedToken: string) {
+    const fresh = yield* registry.savedBearerCredential(environmentId, { refresh: true });
+    if (Option.isSome(fresh) && fresh.value.token !== declinedToken) {
+      yield* Effect.logInfo("Using the bearer session renewed by another window.", {
+        environmentId,
+        connectionId: fresh.value.connectionId,
+      });
+    }
+    return fresh;
+  });
 
   const renewIfDue = Effect.fn("clientRuntime.connection.bearerRenewal.renewIfDue")(function* (
     environmentId: EnvironmentId,
@@ -116,9 +134,16 @@ export const run = Effect.fn("clientRuntime.connection.bearerRenewal.run")(funct
     if (Option.isNone(savedOption)) {
       return;
     }
-    const saved = savedOption.value;
+    let saved = savedOption.value;
     if (saved.connectionId.startsWith(DESKTOP_LOCAL_CONNECTION_ID_PREFIX)) {
       return;
+    }
+    if ((yield* Ref.get(declined)).has(saved.token)) {
+      const fresh = yield* pickUpRenewedElsewhere(environmentId, saved.token);
+      if (Option.isNone(fresh) || (yield* Ref.get(declined)).has(fresh.value.token)) {
+        return;
+      }
+      saved = fresh.value;
     }
     const nowMs = yield* Clock.currentTimeMillis;
     const expiresAtMs =
@@ -147,6 +172,18 @@ export const run = Effect.fn("clientRuntime.connection.bearerRenewal.run")(funct
         yield* Ref.update(knownExpiry, (current) =>
           new Map(current).set(saved.token, result.expiresAt.epochMilliseconds),
         );
+        const declinedWhileDue =
+          result.reason === "already_renewed" ||
+          result.reason === "not_renewable" ||
+          (result.reason === undefined &&
+            bearerRenewalDecision({
+              expiresAtMs: result.expiresAt.epochMilliseconds,
+              nowMs: yield* Clock.currentTimeMillis,
+            }) !== "not-due");
+        if (declinedWhileDue) {
+          yield* Ref.update(declined, (current) => new Set(current).add(saved.token));
+          yield* pickUpRenewedElsewhere(environmentId, saved.token);
+        }
         return;
       }
       const replaced = yield* registry.replaceBearerCredential({

@@ -115,6 +115,10 @@ export class EnvironmentRegistry extends Context.Service<
      */
     readonly savedBearerCredential: (
       environmentId: EnvironmentId,
+      options?: {
+        /** Re-read persisted state first, picking up another window's renewal. */
+        readonly refresh?: boolean;
+      },
     ) => Effect.Effect<Option.Option<SavedBearerCredential>>;
     /**
      * Persists a renewed token for a saved bearer connection through the normal
@@ -814,8 +818,12 @@ export const make = Effect.gen(function* () {
 
   const savedBearerCredential: EnvironmentRegistry["Service"]["savedBearerCredential"] = (
     environmentId,
+    options,
   ) =>
-    readSavedBearer(environmentId).pipe(
+    (options?.refresh === true && credentials.refresh !== undefined
+      ? credentials.refresh.pipe(Effect.andThen(readSavedBearer(environmentId)))
+      : readSavedBearer(environmentId)
+    ).pipe(
       Effect.map(
         Option.map((saved): SavedBearerCredential => ({
           environmentId,

@@ -41,6 +41,10 @@ export const AuthSessionRecord = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  /** The session this one renewed, if it was minted by bearer renewal. */
+  renewedFromSessionId: Schema.NullOr(AuthSessionId),
+  /** When this session minted its (single) renewal successor. */
+  renewedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
 });
 export type AuthSessionRecord = typeof AuthSessionRecord.Type;
 
@@ -52,8 +56,15 @@ export const CreateAuthSessionInput = Schema.Struct({
   client: AuthSessionClientMetadataRecord,
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
+  renewedFromSessionId: Schema.optionalKey(AuthSessionId),
 });
 export type CreateAuthSessionInput = typeof CreateAuthSessionInput.Type;
+
+export const CreateRenewalAuthSessionInput = Schema.Struct({
+  previousSessionId: AuthSessionId,
+  session: CreateAuthSessionInput,
+});
+export type CreateRenewalAuthSessionInput = typeof CreateRenewalAuthSessionInput.Type;
 
 export const CreateReplacingActiveAuthSessionInput = Schema.Struct({
   session: CreateAuthSessionInput,
@@ -66,6 +77,11 @@ export const GetAuthSessionByIdInput = Schema.Struct({
   sessionId: AuthSessionId,
 });
 export type GetAuthSessionByIdInput = typeof GetAuthSessionByIdInput.Type;
+
+export const ListAuthSessionLineageInput = Schema.Struct({
+  sessionId: AuthSessionId,
+});
+export type ListAuthSessionLineageInput = typeof ListAuthSessionLineageInput.Type;
 
 export const ListActiveAuthSessionsInput = Schema.Struct({
   now: Schema.DateTimeUtcFromString,
@@ -105,15 +121,29 @@ export class AuthSessionRepository extends Context.Service<
     readonly createIfAbsent: (
       input: CreateAuthSessionInput,
     ) => Effect.Effect<void, AuthSessionRepositoryError>;
+    /**
+     * Atomically marks `previousSessionId` as renewed and stores its successor.
+     * Returns false, storing nothing, when the previous session was already
+     * renewed, revoked, or expired: a session mints at most one successor.
+     */
+    readonly createRenewal: (
+      input: CreateRenewalAuthSessionInput,
+    ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
+    /** Every session in the renewal chain containing `sessionId`, itself included. */
+    readonly listLineage: (
+      input: ListAuthSessionLineageInput,
+    ) => Effect.Effect<ReadonlyArray<AuthSessionRecord>, AuthSessionRepositoryError>;
     readonly getById: (
       input: GetAuthSessionByIdInput,
     ) => Effect.Effect<Option.Option<AuthSessionRecord>, AuthSessionRepositoryError>;
     readonly listActive: (
       input: ListActiveAuthSessionsInput,
     ) => Effect.Effect<ReadonlyArray<AuthSessionRecord>, AuthSessionRepositoryError>;
+    /** Revokes the session and its whole renewal chain; returns the ids revoked now. */
     readonly revoke: (
       input: RevokeAuthSessionInput,
-    ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
+    ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
+    /** Spares the current session's renewal chain. */
     readonly revokeAllExcept: (
       input: RevokeOtherAuthSessionsInput,
     ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
@@ -138,6 +168,8 @@ const AuthSessionDbRow = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  renewedFromSessionId: Schema.NullOr(AuthSessionId),
+  renewedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
 });
 
 const AuthSessionRawDbRow = Schema.Struct({
@@ -155,6 +187,8 @@ const AuthSessionRawDbRow = Schema.Struct({
   expiresAt: Schema.Unknown,
   lastConnectedAt: Schema.Unknown,
   revokedAt: Schema.Unknown,
+  renewedFromSessionId: Schema.Unknown,
+  renewedAt: Schema.Unknown,
 });
 
 const decodeAuthSessionDbRow = Schema.decodeUnknownEffect(AuthSessionDbRow);
@@ -177,6 +211,8 @@ function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): AuthSessionReco
     expiresAt: row.expiresAt,
     lastConnectedAt: row.lastConnectedAt,
     revokedAt: row.revokedAt,
+    renewedFromSessionId: row.renewedFromSessionId,
+    renewedAt: row.renewedAt,
   };
 }
 
@@ -217,7 +253,8 @@ export const make = Effect.gen(function* () {
           client_browser,
           issued_at,
           expires_at,
-          revoked_at
+          revoked_at,
+          renewed_from_session_id
         )
         VALUES (
           ${input.sessionId},
@@ -232,7 +269,8 @@ export const make = Effect.gen(function* () {
           ${input.client.browser},
           ${input.issuedAt},
           ${input.expiresAt},
-          NULL
+          NULL,
+          ${input.renewedFromSessionId ?? null}
         )
         ${ignoreExisting ? sql`ON CONFLICT(session_id) DO NOTHING` : sql``}
       `,
@@ -259,9 +297,82 @@ export const make = Effect.gen(function* () {
           issued_at AS "issuedAt",
           expires_at AS "expiresAt",
           last_connected_at AS "lastConnectedAt",
-          revoked_at AS "revokedAt"
+          revoked_at AS "revokedAt",
+          renewed_from_session_id AS "renewedFromSessionId",
+          renewed_at AS "renewedAt"
         FROM auth_sessions
         WHERE session_id = ${sessionId}
+      `,
+  });
+
+  // Renewal chains are linear (one successor per session), so walking up to the
+  // root and then down from every ancestor yields exactly the chain.
+  const lineageIds = (sessionId: string) => sql`
+    WITH RECURSIVE
+      lineage_ancestors(id) AS (
+        SELECT ${sessionId}
+        UNION
+        SELECT parent.renewed_from_session_id
+        FROM auth_sessions parent
+        JOIN lineage_ancestors ON parent.session_id = lineage_ancestors.id
+        WHERE parent.renewed_from_session_id IS NOT NULL
+      ),
+      lineage(id) AS (
+        SELECT id FROM lineage_ancestors
+        UNION
+        SELECT child.session_id
+        FROM auth_sessions child
+        JOIN lineage ON child.renewed_from_session_id = lineage.id
+      )
+    SELECT id FROM lineage
+  `;
+
+  const listLineageRows = SqlSchema.findAll({
+    Request: ListAuthSessionLineageInput,
+    Result: AuthSessionRawDbRow,
+    execute: ({ sessionId }) =>
+      sql`
+        SELECT
+          session_id AS "sessionId",
+          subject AS "subject",
+          scopes AS "scopes",
+          method AS "method",
+          client_label AS "clientLabel",
+          client_ip_address AS "clientIpAddress",
+          client_user_agent AS "clientUserAgent",
+          client_device_type AS "clientDeviceType",
+          client_os AS "clientOs",
+          client_browser AS "clientBrowser",
+          issued_at AS "issuedAt",
+          expires_at AS "expiresAt",
+          last_connected_at AS "lastConnectedAt",
+          revoked_at AS "revokedAt",
+          renewed_from_session_id AS "renewedFromSessionId",
+          renewed_at AS "renewedAt"
+        FROM auth_sessions
+        WHERE session_id IN (${lineageIds(sessionId)})
+        ORDER BY issued_at ASC, session_id ASC
+      `,
+  });
+
+  // The conditional update is the single-use gate: only one caller can flip
+  // `renewed_at` from NULL, and the successor is inserted in the same
+  // transaction. The unique index on renewed_from_session_id backs it up.
+  const markSessionRenewed = SqlSchema.findAll({
+    Request: Schema.Struct({
+      sessionId: AuthSessionId,
+      renewedAt: Schema.DateTimeUtcFromString,
+    }),
+    Result: Schema.Struct({ sessionId: AuthSessionId }),
+    execute: ({ sessionId, renewedAt }) =>
+      sql`
+        UPDATE auth_sessions
+        SET renewed_at = ${renewedAt}
+        WHERE session_id = ${sessionId}
+          AND renewed_at IS NULL
+          AND revoked_at IS NULL
+          AND expires_at > ${renewedAt}
+        RETURNING session_id AS "sessionId"
       `,
   });
 
@@ -299,7 +410,9 @@ export const make = Effect.gen(function* () {
           issued_at AS "issuedAt",
           expires_at AS "expiresAt",
           last_connected_at AS "lastConnectedAt",
-          revoked_at AS "revokedAt"
+          revoked_at AS "revokedAt",
+          renewed_from_session_id AS "renewedFromSessionId",
+          renewed_at AS "renewedAt"
         FROM auth_sessions
         WHERE revoked_at IS NULL
           AND (expires_at > ${now} OR ${sql.in("session_id", connectedSessionIds)})
@@ -329,7 +442,7 @@ export const make = Effect.gen(function* () {
       sql`
         UPDATE auth_sessions
         SET revoked_at = ${revokedAt}
-        WHERE session_id = ${sessionId}
+        WHERE session_id IN (${lineageIds(sessionId)})
           AND revoked_at IS NULL
         RETURNING session_id AS "sessionId"
       `,
@@ -342,7 +455,7 @@ export const make = Effect.gen(function* () {
       sql`
         UPDATE auth_sessions
         SET revoked_at = ${revokedAt}
-        WHERE session_id <> ${currentSessionId}
+        WHERE session_id NOT IN (${lineageIds(currentSessionId)})
           AND revoked_at IS NULL
         RETURNING session_id AS "sessionId"
       `,
@@ -389,6 +502,58 @@ export const make = Effect.gen(function* () {
           "AuthSessionRepository.createIfAbsent:query",
           "AuthSessionRepository.createIfAbsent:encodeRequest",
           { sessionId: input.sessionId },
+        ),
+      ),
+    );
+
+  const createRenewal: AuthSessionRepository["Service"]["createRenewal"] = (input) =>
+    sql
+      .withTransaction(
+        markSessionRenewed({
+          sessionId: input.previousSessionId,
+          renewedAt: input.session.issuedAt,
+        }).pipe(
+          Effect.flatMap((marked) =>
+            marked.length === 0
+              ? Effect.succeed(false)
+              : createSessionRow({
+                  ...input.session,
+                  renewedFromSessionId: input.previousSessionId,
+                }).pipe(Effect.as(true)),
+          ),
+        ),
+      )
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "AuthSessionRepository.createRenewal:query",
+            "AuthSessionRepository.createRenewal:encodeRequest",
+            { sessionId: input.session.sessionId },
+          ),
+        ),
+      );
+
+  const listLineage: AuthSessionRepository["Service"]["listLineage"] = (input) =>
+    listLineageRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthSessionRepository.listLineage:query",
+          "AuthSessionRepository.listLineage:decodeRows",
+          { sessionId: input.sessionId },
+        ),
+      ),
+      Effect.flatMap((rows) =>
+        Effect.forEach(rows, (row) =>
+          decodeAuthSessionDbRow(row).pipe(
+            Effect.mapError((cause) =>
+              PersistenceDecodeError.fromSchemaError(
+                "AuthSessionRepository.listLineage:decodeRows",
+                cause,
+                { sessionId: row.sessionId },
+              ),
+            ),
+            Effect.map(toAuthSessionRecord),
+          ),
         ),
       ),
     );
@@ -453,7 +618,7 @@ export const make = Effect.gen(function* () {
           { sessionId: input.sessionId },
         ),
       ),
-      Effect.map((rows) => rows.length > 0),
+      Effect.map((rows) => rows.map((row) => row.sessionId)),
     );
 
   const revokeAllExcept: AuthSessionRepository["Service"]["revokeAllExcept"] = (input) =>
@@ -483,6 +648,8 @@ export const make = Effect.gen(function* () {
     create,
     createReplacingActive,
     createIfAbsent,
+    createRenewal,
+    listLineage,
     getById,
     listActive,
     revoke,

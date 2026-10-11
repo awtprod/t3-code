@@ -198,6 +198,7 @@ it.effect("renews only bearer sessions through the HTTP route", () =>
           expect(bearerResponse.headers.get("cache-control")).toBe("no-store");
           const bearerBody = (await bearerResponse.json()) as Record<string, unknown>;
           expect(bearerBody.renewed).toBe(false);
+          expect(bearerBody.reason).toBe("not_due");
           expect(typeof bearerBody.expiresAt).toBe("string");
           expect(bearerBody).not.toHaveProperty("access_token");
 

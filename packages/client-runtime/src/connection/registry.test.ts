@@ -167,6 +167,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
   );
   const profileReadCount = yield* Ref.make(0);
   const storedCredentials = yield* Ref.make(new Map(initialCredentials));
+  const credentialRefreshes = yield* Ref.make(0);
   const storedRemoteTokens = yield* Ref.make(
     new Map([
       [
@@ -324,6 +325,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
       }),
   });
   const credentialStore = ConnectionCredentialStore.ConnectionCredentialStore.of({
+    refresh: Ref.update(credentialRefreshes, (count) => count + 1),
     get: (connectionId) =>
       Ref.get(storedCredentials).pipe(
         Effect.map((current) => Option.fromUndefinedOr(current.get(connectionId))),
@@ -431,6 +433,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     storedProfiles,
     profileReadCount,
     storedCredentials,
+    credentialRefreshes,
     storedRemoteTokens,
     storedDisabled,
     disconnectedSshTargets,
@@ -1965,6 +1968,20 @@ describe("EnvironmentRegistry saved bearer renewal", () => {
           Option.getOrThrow(yield* registry.savedBearerCredential(BEARER_TARGET.environmentId))
             .token,
         ).toBe("renewed-token");
+        expect(yield* Ref.get(harness.credentialRefreshes)).toBe(0);
+        // Another window may have renewed: a refreshing read bypasses the cache.
+        yield* Ref.update(harness.storedCredentials, (current) =>
+          new Map(current).set(
+            BEARER_TARGET.connectionId,
+            new BearerConnectionCredential({ token: "other-window-token" }),
+          ),
+        );
+        expect(
+          Option.getOrThrow(
+            yield* registry.savedBearerCredential(BEARER_TARGET.environmentId, { refresh: true }),
+          ).token,
+        ).toBe("other-window-token");
+        expect(yield* Ref.get(harness.credentialRefreshes)).toBe(1);
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
   );

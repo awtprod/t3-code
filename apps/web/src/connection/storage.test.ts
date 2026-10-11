@@ -1,4 +1,5 @@
 import {
+  BearerConnectionCredential,
   ConnectionTransientError,
   PrimaryConnectionTarget,
 } from "@t3tools/client-runtime/connection";
@@ -49,6 +50,47 @@ describe("makeCatalogStore", () => {
       expect(quarantined).toEqual(["{not-json"]);
       expect(writes).toHaveLength(1);
       expect(decodeCatalog(writes[0]!)).toEqual(emptyCatalog);
+    }),
+  );
+
+  it.effect("keeps another window's saved credential instead of writing a stale copy", () =>
+    Effect.gen(function* () {
+      const credential = (token: string) => ({
+        connectionId: "remote",
+        credential: new BearerConnectionCredential({ token }),
+      });
+      const tokens = (document: { readonly credentials: ReadonlyArray<{ credential: unknown }> }) =>
+        document.credentials.map((entry) => (entry.credential as BearerConnectionCredential).token);
+      let persisted = encodeCatalog({ ...emptyCatalog, credentials: [credential("old-token")] });
+      const backend = {
+        read: Effect.sync(() => persisted),
+        write: (raw: string) =>
+          Effect.sync(() => {
+            persisted = raw;
+          }),
+      };
+      const winner = yield* makeCatalogStore(backend);
+      const loser = yield* makeCatalogStore(backend);
+      expect(tokens(yield* loser.read)).toEqual(["old-token"]);
+
+      yield* winner.update((document) => ({
+        ...document,
+        credentials: [credential("renewed-token")],
+      }));
+      // The loser's cache is stale until it refreshes...
+      expect(tokens(yield* loser.read)).toEqual(["old-token"]);
+      yield* loser.refresh;
+      expect(tokens(yield* loser.read)).toEqual(["renewed-token"]);
+
+      // ...and an unrelated write from a stale window keeps the renewed token.
+      const stale = yield* makeCatalogStore(backend);
+      yield* stale.read;
+      yield* winner.update((document) => ({
+        ...document,
+        credentials: [credential("renewed-again")],
+      }));
+      yield* stale.update((document) => ({ ...document, disabledEnvironmentIds: [] }));
+      expect(tokens(decodeCatalog(persisted))).toEqual(["renewed-again"]);
     }),
   );
 

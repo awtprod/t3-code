@@ -220,9 +220,23 @@ export type AuthAccessTokenResult = typeof AuthAccessTokenResult.Type;
  */
 export const AuthBearerSessionRenewalWindowMs = 10 * 24 * 60 * 60 * 1000;
 
+/**
+ * - `not_due`: outside the renewal window.
+ * - `not_renewable`: issued for no longer than the window; it simply expires.
+ * - `already_renewed`: this session already minted its single successor.
+ *   The presented token keeps working until `expiresAt`.
+ */
+export const AuthBearerSessionNotRenewedReason = Schema.Literals([
+  "not_due",
+  "not_renewable",
+  "already_renewed",
+]);
+export type AuthBearerSessionNotRenewedReason = typeof AuthBearerSessionNotRenewedReason.Type;
+
 export const AuthBearerSessionNotRenewedResult = Schema.Struct({
   renewed: Schema.Literal(false),
   expiresAt: Schema.DateTimeUtc,
+  reason: Schema.optionalKey(AuthBearerSessionNotRenewedReason),
 });
 export type AuthBearerSessionNotRenewedResult = typeof AuthBearerSessionNotRenewedResult.Type;
 

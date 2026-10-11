@@ -1107,12 +1107,24 @@ export const make = Effect.gen(function* () {
       );
     };
 
+  const currentLineage = (currentSessionId: AuthSessionId) =>
+    sessions
+      .listLineageIds(currentSessionId)
+      .pipe(Effect.map((ids) => new Set<AuthSessionId>([currentSessionId, ...ids])));
+
   const listClientSessions: EnvironmentAuth["Service"]["listClientSessions"] = (currentSessionId) =>
-    listSessions().pipe(
-      Effect.map((clientSessions) =>
+    Effect.all([
+      listSessions(),
+      currentLineage(currentSessionId).pipe(
+        Effect.mapError((cause) => new ServerAuthSessionsListError({ cause })),
+      ),
+    ]).pipe(
+      Effect.map(([clientSessions, current]) =>
+        // A renewed client may still be on its previous token, which Settings
+        // folds into the successor's entry.
         clientSessions.map((clientSession): AuthClientSession => ({
           ...clientSession,
-          current: clientSession.sessionId === currentSessionId,
+          current: current.has(clientSession.sessionId),
         })),
       ),
       Effect.withSpan("EnvironmentAuth.listClientSessions"),
@@ -1121,7 +1133,12 @@ export const make = Effect.gen(function* () {
   const revokeClientSession: EnvironmentAuth["Service"]["revokeClientSession"] = Effect.fn(
     "EnvironmentAuth.revokeClientSession",
   )(function* (currentSessionId, targetSessionId) {
-    if (currentSessionId === targetSessionId) {
+    // Revocation covers the whole renewal chain, so a session of the caller's
+    // own chain is the caller's own session.
+    const current = yield* currentLineage(currentSessionId).pipe(
+      Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })),
+    );
+    if (current.has(targetSessionId)) {
       return yield* new ServerAuthForbiddenOperationError({});
     }
     return yield* revokeSession(targetSessionId);
@@ -1205,7 +1222,7 @@ export const make = Effect.gen(function* () {
     const remainingMs = expiresAt.epochMilliseconds - now.epochMilliseconds;
     const windowMs = Duration.toMillis(SESSION_RENEWAL_WINDOW);
     if (remainingMs > windowMs) {
-      return notRenewed;
+      return { ...notRenewed, reason: "not_due" } satisfies AuthBearerSessionRenewResult;
     }
     const defaultLifetimeMs = Duration.toMillis(SessionStore.DEFAULT_SESSION_TTL);
     const lifetimeMs =
@@ -1215,11 +1232,10 @@ export const make = Effect.gen(function* () {
     // A session issued for no longer than the window was meant to be
     // short-lived (an explicit CLI TTL); renewing it would defeat that.
     if (lifetimeMs <= windowMs) {
-      return notRenewed;
+      return { ...notRenewed, reason: "not_renewable" } satisfies AuthBearerSessionRenewResult;
     }
-    const issued = yield* sessions
-      .issue({
-        method: "bearer-access-token",
+    const renewal = yield* sessions
+      .issueRenewal(session.sessionId, {
         subject: session.subject,
         scopes: session.scopes,
         // Never longer than the original grant, never longer than the default.
@@ -1227,6 +1243,16 @@ export const make = Effect.gen(function* () {
         client: renewalClientMetadata(session.client, requestMetadata),
       })
       .pipe(Effect.mapError((cause) => new ServerAuthSessionRenewalIssueError({ cause })));
+    if (Option.isNone(renewal)) {
+      // Single use: this session already minted its successor (another window
+      // or device won the race). The presented token stays valid until its own
+      // expiry; the winner saved the successor where this client can read it.
+      yield* Effect.logInfo("Declined a repeated bearer session renewal.").pipe(
+        Effect.annotateLogs({ sessionId: session.sessionId }),
+      );
+      return { ...notRenewed, reason: "already_renewed" } satisfies AuthBearerSessionRenewResult;
+    }
+    const issued = renewal.value;
     yield* Effect.logInfo("Renewed bearer session.").pipe(
       Effect.annotateLogs({
         previousSessionId: session.sessionId,

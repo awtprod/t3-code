@@ -93,7 +93,11 @@ describe("remote environment authorization", () => {
   it.effect("renews a bearer session with the Authorization header and decodes both answers", () =>
     Effect.gen(function* () {
       const fetch = recordedFetch(
-        Response.json({ renewed: false, expiresAt: "2026-11-01T00:00:00.000Z" }),
+        Response.json({
+          renewed: false,
+          expiresAt: "2026-11-01T00:00:00.000Z",
+          reason: "already_renewed",
+        }),
         Response.json({
           renewed: true,
           access_token: "renewed-bearer-token",
@@ -113,7 +117,7 @@ describe("remote environment authorization", () => {
         bearerToken: "current-bearer-token",
       }).pipe(provideRemoteHttp(fetch.fetchFn));
 
-      expect(early.renewed).toBe(false);
+      expect(early).toMatchObject({ renewed: false, reason: "already_renewed" });
       expect(early.expiresAt.epochMilliseconds).toBe(Date.parse("2026-11-01T00:00:00.000Z"));
       expect(renewed).toMatchObject({ renewed: true, access_token: "renewed-bearer-token" });
       expectFetchCall(fetch.calls, 1, {

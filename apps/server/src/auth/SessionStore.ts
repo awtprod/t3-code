@@ -382,6 +382,20 @@ export class SessionStore extends Context.Service<
        */
       readonly replaceActiveForSubjectAndMethod?: boolean;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
+    /**
+     * Mints the single renewal successor of `previousSessionId`, recording the
+     * lineage atomically. `None` when that session was already renewed (or was
+     * revoked or expired meanwhile): a session never mints a second successor.
+     */
+    readonly issueRenewal: (
+      previousSessionId: AuthSessionId,
+      input: {
+        readonly ttl: Duration.Duration;
+        readonly subject: string;
+        readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+        readonly client: AuthClientMetadata;
+      },
+    ) => Effect.Effect<Option.Option<IssuedSession>, SessionCredentialInternalError>;
     readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
     readonly issueWebSocketToken: (
       sessionId: AuthSessionId,
@@ -409,6 +423,10 @@ export class SessionStore extends Context.Service<
     readonly revokeAllExcept: (
       sessionId: AuthSessionId,
     ) => Effect.Effect<number, SessionCredentialInternalError>;
+    /** Ids of every session in the renewal chain containing `sessionId`. */
+    readonly listLineageIds: (
+      sessionId: AuthSessionId,
+    ) => Effect.Effect<ReadonlyArray<AuthSessionId>, SessionCredentialInternalError>;
     readonly markConnected: (
       sessionId: AuthSessionId,
       client?: {
@@ -479,6 +497,64 @@ function toAuthClientSession(input: Omit<AuthClientSession, "current">): AuthCli
   };
 }
 
+/**
+ * One Settings entry for a renewal chain: the newest live session, connected
+ * when a client is still on any live session of the chain.
+ */
+function toCollapsedClientSession(
+  newest: AuthSessions.AuthSessionRecord,
+  chain: ReadonlyArray<AuthSessions.AuthSessionRecord>,
+  connectedSessions: ReadonlyMap<AuthSessionId, number>,
+): AuthClientSession {
+  const lastConnectedAt = chain.reduce<DateTime.Utc | null>(
+    (latest, row) =>
+      row.lastConnectedAt !== null &&
+      (latest === null || row.lastConnectedAt.epochMilliseconds > latest.epochMilliseconds)
+        ? row.lastConnectedAt
+        : latest,
+    null,
+  );
+  return toAuthClientSession({
+    sessionId: newest.sessionId,
+    subject: newest.subject,
+    scopes: newest.scopes,
+    method: newest.method,
+    client: toClientMetadata(newest.client),
+    issuedAt: newest.issuedAt,
+    expiresAt: newest.expiresAt,
+    lastConnectedAt,
+    connected: chain.some((row) => connectedSessions.has(row.sessionId)),
+  });
+}
+
+/** Folds each renewal chain among the active rows into its newest session. */
+function collapseRenewalChains(
+  rows: ReadonlyArray<AuthSessions.AuthSessionRecord>,
+  connectedSessions: ReadonlyMap<AuthSessionId, number>,
+): ReadonlyArray<AuthClientSession> {
+  const byId = new Map(rows.map((row) => [row.sessionId, row] as const));
+  const renewedIds = new Set(
+    rows.flatMap((row) =>
+      row.renewedFromSessionId !== null && byId.has(row.renewedFromSessionId)
+        ? [row.renewedFromSessionId]
+        : [],
+    ),
+  );
+  return rows
+    .filter((row) => !renewedIds.has(row.sessionId))
+    .map((newest) => {
+      const chain = [newest];
+      let previous = newest.renewedFromSessionId;
+      while (previous !== null) {
+        const row = byId.get(previous);
+        if (row === undefined || chain.includes(row)) break;
+        chain.push(row);
+        previous = row.renewedFromSessionId;
+      }
+      return toCollapsedClientSession(newest, chain, connectedSessions);
+    });
+}
+
 export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const serverConfig = yield* ServerConfig.ServerConfig;
@@ -536,33 +612,53 @@ export const make = Effect.gen(function* () {
       sessionId,
     }).pipe(Effect.asVoid);
 
-  const loadActiveSession = (sessionId: AuthSessionId) =>
+  /**
+   * The Settings entry for the renewal chain containing `sessionId`: its newest
+   * live session, connected if a client is still on any live session of the
+   * chain. `hiddenSessionIds` are the chain's older live sessions it stands for.
+   */
+  const resolveVisibleSession = (sessionId: AuthSessionId) =>
     Effect.gen(function* () {
-      const row = yield* authSessions.getById({ sessionId });
-      if (Option.isNone(row) || row.value.revokedAt !== null) {
-        return Option.none<AuthClientSession>();
-      }
-
+      const lineage = yield* authSessions.listLineage({ sessionId });
       const connectedSessions = yield* Ref.get(connectedSessionsRef);
-      const connected = connectedSessions.has(row.value.sessionId);
       const now = yield* DateTime.now;
-      if (!connected && row.value.expiresAt.epochMilliseconds <= now.epochMilliseconds) {
-        return Option.none<AuthClientSession>();
-      }
-      return Option.some(
-        toAuthClientSession({
-          sessionId: row.value.sessionId,
-          subject: row.value.subject,
-          scopes: row.value.scopes,
-          method: row.value.method,
-          client: toClientMetadata(row.value.client),
-          issuedAt: row.value.issuedAt,
-          expiresAt: row.value.expiresAt,
-          lastConnectedAt: row.value.lastConnectedAt,
-          connected,
-        }),
+      const live = lineage.filter(
+        (row) =>
+          row.revokedAt === null &&
+          (connectedSessions.has(row.sessionId) ||
+            row.expiresAt.epochMilliseconds > now.epochMilliseconds),
       );
+      const newest = live.at(-1);
+      if (newest === undefined) {
+        return {
+          visible: Option.none<AuthClientSession>(),
+          hiddenSessionIds: [] as ReadonlyArray<AuthSessionId>,
+        };
+      }
+      return {
+        visible: Option.some(toCollapsedClientSession(newest, live, connectedSessions)),
+        hiddenSessionIds: live
+          .filter((row) => row.sessionId !== newest.sessionId)
+          .map((row) => row.sessionId),
+      };
     });
+
+  const publishLineage = (
+    sessionId: AuthSessionId,
+    options?: { readonly removeIfGone?: boolean },
+  ) =>
+    resolveVisibleSession(sessionId).pipe(
+      Effect.flatMap(({ visible, hiddenSessionIds }) =>
+        Effect.gen(function* () {
+          yield* Effect.forEach(hiddenSessionIds, emitRemoved, { discard: true });
+          if (Option.isSome(visible)) {
+            yield* emitUpsert(visible.value);
+          } else if (options?.removeIfGone === true) {
+            yield* emitRemoved(sessionId);
+          }
+        }),
+      ),
+    );
 
   const markConnected: SessionStore["Service"]["markConnected"] = (sessionId, client = {}) =>
     Ref.modify(connectedSessionsRef, (current) => {
@@ -593,10 +689,7 @@ export const make = Effect.gen(function* () {
             )
           : Effect.void,
       ),
-      Effect.flatMap(() => loadActiveSession(sessionId)),
-      Effect.flatMap((session) =>
-        Option.isSome(session) ? emitUpsert(session.value) : Effect.void,
-      ),
+      Effect.flatMap(() => publishLineage(sessionId)),
       Effect.catchCause((cause) =>
         Effect.logError("Failed to publish connected-session auth update.").pipe(
           Effect.annotateLogs({
@@ -619,10 +712,7 @@ export const make = Effect.gen(function* () {
       }
       return next;
     }).pipe(
-      Effect.flatMap(() => loadActiveSession(sessionId)),
-      Effect.flatMap((session) =>
-        Option.isSome(session) ? emitUpsert(session.value) : emitRemoved(sessionId),
-      ),
+      Effect.flatMap(() => publishLineage(sessionId, { removeIfGone: true })),
       Effect.catchCause((cause) =>
         Effect.logError("Failed to publish disconnected-session auth update.").pipe(
           Effect.annotateLogs({
@@ -635,61 +725,82 @@ export const make = Effect.gen(function* () {
     );
 
   const encodeClaims = Schema.encodeEffect(Schema.fromJsonString(SessionClaims));
+  type IssueInput = Parameters<SessionStore["Service"]["issue"]>[0];
+  /** Builds the signed token and its storage record without persisting either. */
+  const prepareSession = Effect.fn("SessionStore.prepareSession")(function* (input: IssueInput) {
+    const sessionId = AuthSessionId.make(
+      yield* crypto.randomUUIDv4.pipe(
+        Effect.mapError((cause) => new SessionCredentialIssueError({ cause })),
+      ),
+    );
+    const issuedAt = yield* DateTime.now;
+    const expiresAt = DateTime.add(issuedAt, {
+      milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
+    });
+    const claims: SessionClaims = {
+      v: 1,
+      kind: "session",
+      sid: sessionId,
+      sub: input?.subject ?? "browser",
+      scopes: input?.scopes ?? AuthStandardClientScopes,
+      method: input?.method ?? "browser-session-cookie",
+      ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
+      iat: issuedAt.epochMilliseconds,
+      exp: expiresAt.epochMilliseconds,
+    };
+
+    const encodedPayload = yield* encodeClaims(claims).pipe(
+      Effect.map(base64UrlEncode),
+      Effect.mapError(
+        (cause) =>
+          new SessionCredentialIssueError({
+            sessionId,
+            cause: new SessionClaimsEncodingError({
+              sessionId,
+              operation: "encode_session_claims",
+              cause,
+            }),
+          }),
+      ),
+    );
+    const signature = signPayload(encodedPayload, signingSecret);
+    const client = input?.client ?? createDefaultClientMetadata();
+    const sessionRecord = {
+      sessionId,
+      subject: claims.sub,
+      scopes: claims.scopes,
+      method: claims.method,
+      client: {
+        label: client.label ?? null,
+        ipAddress: client.ipAddress ?? null,
+        userAgent: client.userAgent ?? null,
+        deviceType: client.deviceType,
+        os: client.os ?? null,
+        browser: client.browser ?? null,
+      },
+      issuedAt,
+      expiresAt,
+    } satisfies AuthSessions.CreateAuthSessionInput;
+    return {
+      sessionRecord,
+      claims,
+      client,
+      issued: {
+        sessionId,
+        token: `${encodedPayload}.${signature}`,
+        method: claims.method,
+        client,
+        expiresAt,
+        scopes: claims.scopes,
+        ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
+      } satisfies IssuedSession,
+    };
+  });
+
   const issue: SessionStore["Service"]["issue"] = Effect.fn("SessionStore.issue")(
     function* (input) {
-      const sessionId = AuthSessionId.make(
-        yield* crypto.randomUUIDv4.pipe(
-          Effect.mapError((cause) => new SessionCredentialIssueError({ cause })),
-        ),
-      );
-      const issuedAt = yield* DateTime.now;
-      const expiresAt = DateTime.add(issuedAt, {
-        milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
-      });
-      const claims: SessionClaims = {
-        v: 1,
-        kind: "session",
-        sid: sessionId,
-        sub: input?.subject ?? "browser",
-        scopes: input?.scopes ?? AuthStandardClientScopes,
-        method: input?.method ?? "browser-session-cookie",
-        ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
-        iat: issuedAt.epochMilliseconds,
-        exp: expiresAt.epochMilliseconds,
-      };
-
-      const encodedPayload = yield* encodeClaims(claims).pipe(
-        Effect.map(base64UrlEncode),
-        Effect.mapError(
-          (cause) =>
-            new SessionCredentialIssueError({
-              sessionId,
-              cause: new SessionClaimsEncodingError({
-                sessionId,
-                operation: "encode_session_claims",
-                cause,
-              }),
-            }),
-        ),
-      );
-      const signature = signPayload(encodedPayload, signingSecret);
-      const client = input?.client ?? createDefaultClientMetadata();
-      const sessionRecord = {
-        sessionId,
-        subject: claims.sub,
-        scopes: claims.scopes,
-        method: claims.method,
-        client: {
-          label: client.label ?? null,
-          ipAddress: client.ipAddress ?? null,
-          userAgent: client.userAgent ?? null,
-          deviceType: client.deviceType,
-          os: client.os ?? null,
-          browser: client.browser ?? null,
-        },
-        issuedAt,
-        expiresAt,
-      } satisfies AuthSessions.CreateAuthSessionInput;
+      const { sessionRecord, claims, client, issued } = yield* prepareSession(input);
+      const { sessionId, issuedAt, expiresAt } = sessionRecord;
       const replacedSessionIds = yield* (
         input?.replaceActiveForSubjectAndMethod
           ? authSessions.createReplacingActive({ session: sessionRecord, revokedAt: issuedAt })
@@ -722,17 +833,39 @@ export const make = Effect.gen(function* () {
         }),
       );
 
-      return {
-        sessionId,
-        token: `${encodedPayload}.${signature}`,
-        method: claims.method,
-        client,
-        expiresAt: expiresAt,
-        scopes: claims.scopes,
-        ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
-      } satisfies IssuedSession;
+      return issued;
     },
   );
+
+  const issueRenewal: SessionStore["Service"]["issueRenewal"] = Effect.fn(
+    "SessionStore.issueRenewal",
+  )(function* (previousSessionId, input) {
+    const { sessionRecord, issued } = yield* prepareSession({
+      ...input,
+      method: "bearer-access-token",
+    });
+    const stored = yield* authSessions
+      .createRenewal({ previousSessionId, session: sessionRecord })
+      .pipe(
+        Effect.mapError(
+          (cause) => new SessionCredentialIssueError({ sessionId: issued.sessionId, cause }),
+        ),
+      );
+    if (!stored) {
+      return Option.none<IssuedSession>();
+    }
+    // Settings shows a renewal chain as one entry: the successor, carrying the
+    // connection state of a client still on the previous token. Publishing the
+    // lineage removes the previous entry and upserts the successor.
+    yield* publishLineage(issued.sessionId).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logError("Failed to publish renewed-session auth update.").pipe(
+          Effect.annotateLogs({ sessionId: issued.sessionId, cause }),
+        ),
+      ),
+    );
+    return Option.some(issued);
+  });
 
   const verify: SessionStore["Service"]["verify"] = Effect.fn("SessionStore.verify")(
     function* (token) {
@@ -950,19 +1083,7 @@ export const make = Effect.gen(function* () {
         connectedSessionIds: Array.from(connectedSessions.keys()),
       });
 
-      return rows.map((row) =>
-        toAuthClientSession({
-          sessionId: row.sessionId,
-          subject: row.subject,
-          scopes: row.scopes,
-          method: row.method,
-          client: toClientMetadata(row.client),
-          issuedAt: row.issuedAt,
-          expiresAt: row.expiresAt,
-          lastConnectedAt: row.lastConnectedAt,
-          connected: connectedSessions.has(row.sessionId),
-        }),
-      );
+      return collapseRenewalChains(rows, connectedSessions);
     },
     Effect.mapError((cause) => new ActiveSessionsListError({ cause })),
   );
@@ -970,23 +1091,34 @@ export const make = Effect.gen(function* () {
   const revoke: SessionStore["Service"]["revoke"] = Effect.fn("SessionStore.revoke")(
     function* (sessionId) {
       const revokedAt = yield* DateTime.now;
-      const revoked = yield* authSessions
+      // Revoking any session of a renewal chain revokes the whole chain, so a
+      // renewed credential cannot outlive the revocation of its predecessor.
+      const revokedSessionIds = yield* authSessions
         .revoke({
           sessionId,
           revokedAt,
         })
         .pipe(Effect.mapError((cause) => new SessionRevocationError({ sessionId, cause })));
-      if (revoked) {
+      if (revokedSessionIds.length > 0) {
         yield* Ref.update(connectedSessionsRef, (current) => {
           const next = new Map(current);
-          next.delete(sessionId);
+          for (const revokedSessionId of revokedSessionIds) {
+            next.delete(revokedSessionId);
+          }
           return next;
         });
-        yield* emitRemoved(sessionId);
+        yield* Effect.forEach(revokedSessionIds, emitRemoved, { discard: true });
       }
-      return revoked;
+      return revokedSessionIds.length > 0;
     },
   );
+
+  const listLineageIds: SessionStore["Service"]["listLineageIds"] = (sessionId) =>
+    authSessions.listLineage({ sessionId }).pipe(
+      Effect.map((rows) => rows.map((row) => row.sessionId)),
+      Effect.mapError((cause) => new ActiveSessionsListError({ cause })),
+      Effect.withSpan("SessionStore.listLineageIds"),
+    );
 
   const revokeAllExcept: SessionStore["Service"]["revokeAllExcept"] = Effect.fn(
     "SessionStore.revokeAllExcept",
@@ -1026,6 +1158,7 @@ export const make = Effect.gen(function* () {
     cookieName,
     legacyCookieName,
     issue,
+    issueRenewal,
     verify,
     issueWebSocketToken,
     verifyWebSocketToken,
@@ -1035,6 +1168,7 @@ export const make = Effect.gen(function* () {
     },
     revoke,
     revokeAllExcept,
+    listLineageIds,
     markConnected,
     markDisconnected,
   });

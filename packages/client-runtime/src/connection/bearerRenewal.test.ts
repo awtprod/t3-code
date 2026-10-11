@@ -64,7 +64,11 @@ const makeHarness = Effect.fn("test.bearerRenewal.makeHarness")(function* (input
     new Map([[ENVIRONMENT_ID, { target, profile: Option.none(), enabled: true }]]),
   );
   const state = yield* SubscriptionRef.make<SupervisorConnectionState>(CONNECTING);
+  // `savedToken` is this window's view; `persistedToken` is what storage holds,
+  // which another window may change. A refreshing read copies it over.
   const savedToken = yield* Ref.make(input.token);
+  const persistedToken = yield* Ref.make(input.token);
+  const refreshes = yield* Ref.make(0);
   const replacements = yield* Ref.make<ReadonlyArray<string>>([]);
   const calls: Array<FetchCall> = [];
   const wakeups = yield* Queue.unbounded<ConnectionWakeups.ConnectionWakeup>();
@@ -79,8 +83,15 @@ const makeHarness = Effect.fn("test.bearerRenewal.makeHarness")(function* (input
     remove: () => Effect.die("unused"),
     removeRelayEnvironments: () => Effect.die("unused"),
     retryNow: () => Effect.void,
-    savedBearerCredential: (environmentId) =>
-      Ref.get(savedToken).pipe(
+    savedBearerCredential: (environmentId, options) =>
+      (options?.refresh === true
+        ? Ref.update(refreshes, (count) => count + 1).pipe(
+            Effect.andThen(Ref.get(persistedToken)),
+            Effect.flatMap((token) => Ref.set(savedToken, token)),
+          )
+        : Effect.void
+      ).pipe(
+        Effect.andThen(Ref.get(savedToken)),
         Effect.map((token) =>
           environmentId === ENVIRONMENT_ID
             ? Option.some({ environmentId, connectionId, httpBaseUrl: HTTP_BASE_URL, token })
@@ -91,6 +102,7 @@ const makeHarness = Effect.fn("test.bearerRenewal.makeHarness")(function* (input
       Effect.gen(function* () {
         if ((yield* Ref.get(savedToken)) !== replacement.previousToken) return false;
         yield* Ref.set(savedToken, replacement.token);
+        yield* Ref.set(persistedToken, replacement.token);
         yield* Ref.update(replacements, (current) => [...current, replacement.token]);
         return true;
       }),
@@ -121,7 +133,7 @@ const makeHarness = Effect.fn("test.bearerRenewal.makeHarness")(function* (input
     Effect.forkScoped,
   );
 
-  return { start, state, savedToken, replacements, calls, wakeups };
+  return { start, state, savedToken, persistedToken, refreshes, replacements, calls, wakeups };
 });
 
 /** Lets forked fibers and the fake fetch promises run without moving the clock. */
@@ -329,6 +341,74 @@ describe("bearer session renewal", () => {
       release?.();
       yield* settle;
       expect(yield* Ref.get(harness.replacements)).toEqual([newToken]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("picks up another window's renewal after the server declines a second one", () =>
+    Effect.gen(function* () {
+      const oldToken = sessionToken(5 * DAY_MS, "old");
+      const winnerToken = sessionToken(35 * DAY_MS, "winner");
+      const harness = yield* makeHarness({
+        token: oldToken,
+        respond: () =>
+          Promise.resolve(
+            Response.json({
+              renewed: false,
+              expiresAt: isoAt(5 * DAY_MS),
+              reason: "already_renewed",
+            }),
+          ),
+      });
+      // The other window renewed first and saved its token.
+      yield* Ref.set(harness.persistedToken, winnerToken);
+      yield* harness.start;
+      yield* SubscriptionRef.set(harness.state, CONNECTED);
+      yield* settle;
+
+      expect(harness.calls).toHaveLength(1);
+      expect(yield* Ref.get(harness.replacements)).toEqual([]);
+      expect(yield* Ref.get(harness.savedToken)).toBe(winnerToken);
+
+      yield* Queue.offer(harness.wakeups, "application-active");
+      yield* TestClock.adjust(Duration.hours(2));
+      yield* settle;
+      expect(harness.calls).toHaveLength(1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("never resends a declined token and adopts a renewal saved later", () =>
+    Effect.gen(function* () {
+      const oldToken = sessionToken(5 * DAY_MS, "old");
+      const winnerToken = sessionToken(35 * DAY_MS, "winner");
+      const harness = yield* makeHarness({
+        token: oldToken,
+        respond: () =>
+          Promise.resolve(
+            Response.json({
+              renewed: false,
+              expiresAt: isoAt(5 * DAY_MS),
+              reason: "already_renewed",
+            }),
+          ),
+      });
+      yield* harness.start;
+      yield* SubscriptionRef.set(harness.state, CONNECTED);
+      yield* settle;
+      expect(harness.calls).toHaveLength(1);
+      expect(yield* Ref.get(harness.savedToken)).toBe(oldToken);
+
+      // Still declined: later checks only re-read storage.
+      yield* Queue.offer(harness.wakeups, "application-active");
+      yield* settle;
+      expect(harness.calls).toHaveLength(1);
+
+      // The winning window's write lands; the next check adopts it.
+      yield* Ref.set(harness.persistedToken, winnerToken);
+      yield* Queue.offer(harness.wakeups, "application-active");
+      yield* settle;
+      expect(yield* Ref.get(harness.savedToken)).toBe(winnerToken);
+      expect(harness.calls).toHaveLength(1);
+      expect(yield* Ref.get(harness.replacements)).toEqual([]);
     }).pipe(Effect.scoped),
   );
 });

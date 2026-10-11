@@ -16,6 +16,12 @@ export class ConnectionCredentialStore extends Context.Service<
       credential: ConnectionCredential,
     ) => Effect.Effect<void, ConnectionAttemptError>;
     readonly remove: (connectionId: string) => Effect.Effect<void, ConnectionAttemptError>;
+    /**
+     * Drops any in-memory view of saved credentials so the next `get` reads
+     * what another window or tab persisted. Optional: single-process stores
+     * have nothing to refresh.
+     */
+    readonly refresh?: Effect.Effect<void, ConnectionAttemptError>;
   }
 >()("@t3tools/client-runtime/connection/credentialStore/ConnectionCredentialStore") {}
 

@@ -4,9 +4,11 @@ import { expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -896,5 +898,209 @@ it.layer(NodeServices.layer)("EnvironmentAuth bearer session renewal", (it) => {
       expect(expiredError._tag).toBe("ServerAuthInvalidCredentialError");
       expect(yield* serverAuth.listSessions()).toHaveLength(0);
     }).pipe(Effect.provide(makeRenewalLayer())),
+  );
+});
+
+it.layer(NodeServices.layer)("EnvironmentAuth bearer session renewal lineage", (it) => {
+  const renewOrFail = Effect.fn("test.renewOrFail")(function* (token: string) {
+    const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+    const result = yield* serverAuth.renewBearerSession(makeBearerRequest(token), renewalMetadata);
+    if (!result.renewed) {
+      return yield* Effect.die(new Error(`expected a renewal, got ${result.reason ?? "none"}`));
+    }
+    return result.access_token;
+  });
+
+  const adminSessionId = Effect.fn("test.adminSessionId")(function* () {
+    const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+    const sessions = yield* SessionStore.SessionStore;
+    const browser = yield* serverAuth.createBrowserSession(
+      "desktop-bootstrap-token",
+      requestMetadata,
+    );
+    return (yield* serverAuth.authenticateHttpRequest(
+      makeCookieRequest(sessions.cookieName, browser.sessionToken),
+    )).sessionId;
+  });
+
+  it.effect("renews a session at most once, even when renewals race", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const paired = yield* pairBearerClient();
+      yield* TestClock.adjust(Duration.days(25));
+
+      const results = yield* Effect.all(
+        Array.from({ length: 5 }, () =>
+          serverAuth.renewBearerSession(makeBearerRequest(paired.token), renewalMetadata),
+        ),
+        { concurrency: "unbounded" },
+      );
+      const renewed = results.filter((result) => result.renewed);
+      const declined = results.filter((result) => !result.renewed);
+
+      expect(renewed).toHaveLength(1);
+      expect(declined).toHaveLength(4);
+      for (const result of declined) {
+        expect(result).toMatchObject({ renewed: false, reason: "already_renewed" });
+        expect(result.expiresAt.epochMilliseconds).toBe(
+          paired.session.expiresAt?.epochMilliseconds,
+        );
+      }
+
+      // A later retry with the old token still does not mint, and the old
+      // token keeps working until its own expiry.
+      const retry = yield* serverAuth.renewBearerSession(
+        makeBearerRequest(paired.token),
+        renewalMetadata,
+      );
+      expect(retry).toMatchObject({ renewed: false, reason: "already_renewed" });
+      expect(
+        (yield* serverAuth.authenticateHttpRequest(makeBearerRequest(paired.token))).sessionId,
+      ).toBe(paired.session.sessionId);
+      // One chain, one Settings entry.
+      expect(yield* serverAuth.listSessions()).toHaveLength(1);
+    }).pipe(Effect.provide(makeRenewalLayer())),
+  );
+
+  it.effect("lets the successor renew in turn, forming a chain", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const paired = yield* pairBearerClient();
+      yield* TestClock.adjust(Duration.days(25));
+      const second = yield* renewOrFail(paired.token);
+      yield* TestClock.adjust(Duration.days(25));
+      const third = yield* renewOrFail(second);
+      const sessions = yield* SessionStore.SessionStore;
+      const thirdSession = yield* serverAuth.authenticateHttpRequest(makeBearerRequest(third));
+
+      expect(yield* sessions.listLineageIds(thirdSession.sessionId)).toHaveLength(3);
+      expect(yield* serverAuth.listSessions()).toHaveLength(1);
+    }).pipe(Effect.provide(makeRenewalLayer())),
+  );
+
+  for (const end of ["original", "successor"] as const) {
+    it.effect(`revoking the ${end} revokes the whole renewal chain`, () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const admin = yield* adminSessionId();
+        const paired = yield* pairBearerClient();
+        const bystander = yield* pairBearerClient();
+        yield* TestClock.adjust(Duration.days(25));
+        const second = yield* renewOrFail(paired.token);
+        yield* TestClock.adjust(Duration.days(1));
+        const secondSession = yield* serverAuth.authenticateHttpRequest(makeBearerRequest(second));
+
+        const target = end === "original" ? paired.session.sessionId : secondSession.sessionId;
+        expect(yield* serverAuth.revokeClientSession(admin, target)).toBe(true);
+
+        for (const token of [paired.token, second]) {
+          const error = yield* serverAuth
+            .authenticateHttpRequest(makeBearerRequest(token))
+            .pipe(Effect.flip);
+          expect(error._tag).toBe("ServerAuthInvalidCredentialError");
+        }
+        expect(
+          (yield* serverAuth.authenticateHttpRequest(makeBearerRequest(bystander.token))).sessionId,
+        ).toBe(bystander.session.sessionId);
+        const remaining = (yield* serverAuth.listSessions()).map((entry) => entry.sessionId);
+        expect(remaining).toContain(admin);
+        expect(remaining).toContain(bystander.session.sessionId);
+        expect(remaining).not.toContain(paired.session.sessionId);
+        expect(remaining).not.toContain(secondSession.sessionId);
+      }).pipe(Effect.provide(makeRenewalLayer())),
+    );
+  }
+
+  it.effect("revokes a session renewed twice from its root", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const paired = yield* pairBearerClient();
+      yield* TestClock.adjust(Duration.days(21));
+      const second = yield* renewOrFail(paired.token);
+      yield* TestClock.adjust(Duration.days(21));
+      const third = yield* renewOrFail(second);
+
+      // The root has expired by now, but its revocation still reaches the chain.
+      expect(yield* serverAuth.revokeSession(paired.session.sessionId)).toBe(true);
+      const error = yield* serverAuth
+        .authenticateHttpRequest(makeBearerRequest(third))
+        .pipe(Effect.flip);
+      expect(error._tag).toBe("ServerAuthInvalidCredentialError");
+    }).pipe(Effect.provide(makeRenewalLayer())),
+  );
+
+  it.effect("shows a renewed pair as one entry that follows the client's connection", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const paired = yield* pairBearerClient();
+      yield* TestClock.adjust(Duration.days(25));
+      // The client's socket is still on the previous token while it renews.
+      yield* sessions.markConnected(paired.session.sessionId);
+      const second = yield* renewOrFail(paired.token);
+      const secondSession = yield* serverAuth.authenticateHttpRequest(makeBearerRequest(second));
+
+      const listed = yield* serverAuth.listClientSessions(paired.session.sessionId);
+      expect(listed).toHaveLength(1);
+      expect(listed[0]).toMatchObject({
+        sessionId: secondSession.sessionId,
+        connected: true,
+        current: true,
+      });
+      expect(listed[0]?.lastConnectedAt).not.toBeNull();
+
+      // Either token of the caller's own chain counts as the caller's session.
+      const ownError = yield* serverAuth
+        .revokeClientSession(paired.session.sessionId, secondSession.sessionId)
+        .pipe(Effect.flip);
+      expect(ownError._tag).toBe("ServerAuthForbiddenOperationError");
+
+      yield* sessions.markDisconnected(paired.session.sessionId);
+      const afterDisconnect = yield* serverAuth.listClientSessions(secondSession.sessionId);
+      expect(afterDisconnect).toHaveLength(1);
+      expect(afterDisconnect[0]).toMatchObject({ connected: false, current: true });
+    }).pipe(Effect.provide(makeRenewalLayer())),
+  );
+
+  it.effect("keeps the caller's own renewal chain when revoking other clients", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const paired = yield* pairBearerClient();
+      const other = yield* pairBearerClient();
+      yield* TestClock.adjust(Duration.days(25));
+      const second = yield* renewOrFail(paired.token);
+      const secondSession = yield* serverAuth.authenticateHttpRequest(makeBearerRequest(second));
+
+      expect(yield* serverAuth.revokeOtherClientSessions(secondSession.sessionId)).toBe(1);
+      expect(
+        (yield* serverAuth.authenticateHttpRequest(makeBearerRequest(paired.token))).sessionId,
+      ).toBe(paired.session.sessionId);
+      const otherError = yield* serverAuth
+        .authenticateHttpRequest(makeBearerRequest(other.token))
+        .pipe(Effect.flip);
+      expect(otherError._tag).toBe("ServerAuthInvalidCredentialError");
+    }).pipe(Effect.provide(makeRenewalLayer())),
+  );
+
+  it.effect("publishes a renewal as one replaced Settings entry", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const paired = yield* pairBearerClient();
+      yield* TestClock.adjust(Duration.days(25));
+      const changes = yield* Stream.runCollect(Stream.take(sessions.streamChanges, 2)).pipe(
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      const second = yield* renewOrFail(paired.token);
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const secondSession = yield* serverAuth.authenticateHttpRequest(makeBearerRequest(second));
+
+      const events = [...(yield* Fiber.join(changes))];
+      expect(events.map((event) => event.type)).toEqual(["clientRemoved", "clientUpserted"]);
+      expect(events[0]).toMatchObject({ sessionId: paired.session.sessionId });
+      expect(events[1]).toMatchObject({
+        clientSession: { sessionId: secondSession.sessionId },
+      });
+    }).pipe(Effect.provide(makeRenewalLayer()), Effect.scoped),
   );
 });
