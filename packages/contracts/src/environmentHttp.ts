@@ -10,6 +10,7 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import {
   AuthAccessTokenResult,
+  AuthBearerSessionRenewResult,
   AuthBrowserSessionRequest,
   AuthBrowserSessionResult,
   AuthClientSession,
@@ -78,6 +79,7 @@ export type EnvironmentAuthInvalidReason = typeof EnvironmentAuthInvalidReason.T
 
 export const EnvironmentOperationForbiddenReason = Schema.Literals([
   "current_session_revoke_not_allowed",
+  "bearer_session_required",
 ]);
 export type EnvironmentOperationForbiddenReason = typeof EnvironmentOperationForbiddenReason.Type;
 
@@ -86,6 +88,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "browser_session_issuance_failed",
   "browser_session_cookie_failed",
   "access_token_issuance_failed",
+  "session_renewal_failed",
   "websocket_ticket_issuance_failed",
   "pairing_credential_issuance_failed",
   "pairing_links_load_failed",
@@ -308,6 +311,11 @@ const EnvironmentSessionCreationErrors = [
 const EnvironmentTokenExchangeErrors = [
   EnvironmentRequestInvalidError,
   EnvironmentAuthInvalidError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentSessionRenewalErrors = [
+  EnvironmentAuthInvalidError,
+  EnvironmentOperationForbiddenError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentScopedOperationErrors = [
@@ -539,6 +547,15 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       payload: AuthTokenExchangeRequest,
       success: AuthAccessTokenResult,
       error: EnvironmentTokenExchangeErrors,
+    }),
+  )
+  .add(
+    // Bearer-only: see EnvironmentAuth.renewBearerSession. Authenticates in the
+    // handler so it can tell which credential carried the session.
+    HttpApiEndpoint.post("renewSession", "/api/auth/session/renew", {
+      headers: OptionalBearerHeaders,
+      success: AuthBearerSessionRenewResult,
+      error: EnvironmentSessionRenewalErrors,
     }),
   )
   .add(

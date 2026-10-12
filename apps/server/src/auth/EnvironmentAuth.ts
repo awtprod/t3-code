@@ -2,8 +2,10 @@ import {
   AuthAccessTokenType,
   AuthAccessWriteScope,
   AuthAdministrativeScopes,
+  AuthBearerSessionRenewalWindowMs,
   AuthStandardClientScopes,
   type AuthAccessTokenResult,
+  type AuthBearerSessionRenewResult,
   type AuthBrowserSessionResult,
   type AuthClientMetadata,
   type AuthClientSession,
@@ -328,6 +330,17 @@ export class ServerAuthCloudHealthJwtSigningError extends Schema.TaggedError<Ser
   }
 }
 
+export class ServerAuthSessionRenewalIssueError extends Schema.TaggedError<ServerAuthSessionRenewalIssueError>()(
+  "ServerAuthSessionRenewalIssueError",
+  {
+    ...serverAuthInternalErrorContext,
+  },
+) {
+  override get message(): string {
+    return "Failed to issue the renewed bearer session.";
+  }
+}
+
 export class ServerAuthCloudMintJwtSigningError extends Schema.TaggedError<ServerAuthCloudMintJwtSigningError>()(
   "ServerAuthCloudMintJwtSigningError",
   {
@@ -362,6 +375,7 @@ export const ServerAuthInternalError = Schema.Union([
   ServerAuthCloudRelayIssuerMissingError,
   ServerAuthCloudHealthJwtSigningError,
   ServerAuthCloudMintJwtSigningError,
+  ServerAuthSessionRenewalIssueError,
 ]);
 export type ServerAuthInternalError = typeof ServerAuthInternalError.Type;
 export const isServerAuthInternalError = Schema.is(ServerAuthInternalError);
@@ -432,6 +446,23 @@ export const serverAuthInvalidRequestReason = (
   error: ServerAuthInvalidRequestError,
 ): "invalid_scope" | "scope_not_granted" =>
   error._tag === "ServerAuthInvalidScopeError" ? "invalid_scope" : "scope_not_granted";
+
+/**
+ * Session renewal is only offered to bearer access tokens presented in the
+ * Authorization header. Cookie sessions renew by re-pairing in the browser,
+ * DPoP tokens are short-lived and refresh through their own grant, and
+ * websocket tickets are single-purpose.
+ */
+export class ServerAuthBearerSessionRequiredError extends Schema.TaggedError<ServerAuthBearerSessionRequiredError>()(
+  "ServerAuthBearerSessionRequiredError",
+  {
+    presented: Schema.Literals(["cookie", "dpop", "dpop-bound-bearer", "non-bearer-session"]),
+  },
+) {
+  override get message(): string {
+    return "Only bearer access tokens sent in the Authorization header can be renewed.";
+  }
+}
 
 export class ServerAuthForbiddenOperationError extends Schema.TaggedError<ServerAuthForbiddenOperationError>()(
   "ServerAuthForbiddenOperationError",
@@ -526,6 +557,19 @@ export class EnvironmentAuth extends Context.Service<
     readonly issueWebSocketTicket: (
       session: Pick<AuthenticatedSession, "sessionId">,
     ) => Effect.Effect<AuthWebSocketTicketResult, ServerAuthInternalError>;
+    /**
+     * Mints a successor for the bearer session presented in the request's
+     * Authorization header once it is inside the renewal window. Outside the
+     * window the current expiry is returned and nothing is minted. The
+     * presented session stays valid until its own expiry.
+     */
+    readonly renewBearerSession: (
+      request: HttpServerRequest.HttpServerRequest,
+      requestMetadata: AuthClientMetadata,
+    ) => Effect.Effect<
+      AuthBearerSessionRenewResult,
+      ServerAuthCredentialError | ServerAuthBearerSessionRequiredError | ServerAuthInternalError
+    >;
     readonly issueStartupPairingUrl: (
       baseUrl: string,
     ) => Effect.Effect<string, ServerAuthInternalError>;
@@ -538,6 +582,26 @@ type BootstrapExchangeResult = {
   readonly cookieName?: string;
   readonly expireNormalCookie?: boolean;
 };
+
+/** Remaining lifetime at or below which a bearer session may be renewed. */
+const SESSION_RENEWAL_WINDOW = Duration.millis(AuthBearerSessionRenewalWindowMs);
+
+/**
+ * The successor keeps the session's label and fills gaps from the old
+ * session, while network and user-agent details describe the renewing request,
+ * as they do when a pairing credential is exchanged.
+ */
+function renewalClientMetadata(
+  previous: AuthClientMetadata,
+  request: AuthClientMetadata,
+): AuthClientMetadata {
+  return {
+    ...previous,
+    ...request,
+    ...(previous.label ? { label: previous.label } : {}),
+    deviceType: request.deviceType === "unknown" ? previous.deviceType : request.deviceType,
+  };
+}
 
 const AUTHORIZATION_PREFIX = "Bearer ";
 const DPOP_AUTHORIZATION_PREFIX = "DPoP ";
@@ -1043,12 +1107,24 @@ export const make = Effect.gen(function* () {
       );
     };
 
+  const currentLineage = (currentSessionId: AuthSessionId) =>
+    sessions
+      .listLineageIds(currentSessionId)
+      .pipe(Effect.map((ids) => new Set<AuthSessionId>([currentSessionId, ...ids])));
+
   const listClientSessions: EnvironmentAuth["Service"]["listClientSessions"] = (currentSessionId) =>
-    listSessions().pipe(
-      Effect.map((clientSessions) =>
+    Effect.all([
+      listSessions(),
+      currentLineage(currentSessionId).pipe(
+        Effect.mapError((cause) => new ServerAuthSessionsListError({ cause })),
+      ),
+    ]).pipe(
+      Effect.map(([clientSessions, current]) =>
+        // A renewed client may still be on its previous token, which Settings
+        // folds into the successor's entry.
         clientSessions.map((clientSession): AuthClientSession => ({
           ...clientSession,
-          current: clientSession.sessionId === currentSessionId,
+          current: current.has(clientSession.sessionId),
         })),
       ),
       Effect.withSpan("EnvironmentAuth.listClientSessions"),
@@ -1057,7 +1133,12 @@ export const make = Effect.gen(function* () {
   const revokeClientSession: EnvironmentAuth["Service"]["revokeClientSession"] = Effect.fn(
     "EnvironmentAuth.revokeClientSession",
   )(function* (currentSessionId, targetSessionId) {
-    if (currentSessionId === targetSessionId) {
+    // Revocation covers the whole renewal chain, so a session of the caller's
+    // own chain is the caller's own session.
+    const current = yield* currentLineage(currentSessionId).pipe(
+      Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })),
+    );
+    if (current.has(targetSessionId)) {
       return yield* new ServerAuthForbiddenOperationError({});
     }
     return yield* revokeSession(targetSessionId);
@@ -1094,6 +1175,104 @@ export const make = Effect.gen(function* () {
       ),
       Effect.withSpan("EnvironmentAuth.issueWebSocketTicket"),
     );
+
+  const renewBearerSession: EnvironmentAuth["Service"]["renewBearerSession"] = Effect.fn(
+    "EnvironmentAuth.renewBearerSession",
+  )(function* (request, requestMetadata) {
+    // Read the Authorization header directly instead of the usual cookie-first
+    // selection: a browser cookie for the same origin must neither renew nor
+    // mask the bearer token the client asked to renew.
+    const bearerToken = parseBearerToken(request);
+    if (bearerToken === null) {
+      const other = selectRequestCredential(
+        request,
+        sessions.cookieName,
+        sessions.legacyCookieName,
+      );
+      const devCookie = devAuth ? request.cookies[devAuth.cookieName] : undefined;
+      if (other === undefined && devCookie === undefined) {
+        return yield* new ServerAuthMissingCredentialError({});
+      }
+      return yield* new ServerAuthBearerSessionRequiredError({
+        presented: other?.source === "dpop" ? "dpop" : "cookie",
+      });
+    }
+    const session = yield* sessions.verify(bearerToken).pipe(
+      Effect.tapError((cause) =>
+        SessionStore.isSessionCredentialInvalidError(cause)
+          ? Effect.logWarning("Rejected bearer session renewal credential.").pipe(
+              Effect.annotateLogs({ reason: cause.message }),
+            )
+          : Effect.void,
+      ),
+      mapSessionVerificationErrors,
+    );
+    if (session.proofKeyThumbprint !== undefined) {
+      return yield* new ServerAuthBearerSessionRequiredError({ presented: "dpop-bound-bearer" });
+    }
+    if (session.method !== "bearer-access-token" || devAuth?.matches(bearerToken)) {
+      return yield* new ServerAuthBearerSessionRequiredError({ presented: "non-bearer-session" });
+    }
+    const now = yield* DateTime.now;
+    const expiresAt = session.expiresAt ?? now;
+    const notRenewed = {
+      renewed: false,
+      expiresAt: DateTime.toUtc(expiresAt),
+    } satisfies AuthBearerSessionRenewResult;
+    const remainingMs = expiresAt.epochMilliseconds - now.epochMilliseconds;
+    const windowMs = Duration.toMillis(SESSION_RENEWAL_WINDOW);
+    if (remainingMs > windowMs) {
+      return { ...notRenewed, reason: "not_due" } satisfies AuthBearerSessionRenewResult;
+    }
+    const defaultLifetimeMs = Duration.toMillis(SessionStore.DEFAULT_SESSION_TTL);
+    const lifetimeMs =
+      session.issuedAt === undefined
+        ? defaultLifetimeMs
+        : expiresAt.epochMilliseconds - session.issuedAt.epochMilliseconds;
+    // A session issued for no longer than the window was meant to be
+    // short-lived (an explicit CLI TTL); renewing it would defeat that.
+    if (lifetimeMs <= windowMs) {
+      return { ...notRenewed, reason: "not_renewable" } satisfies AuthBearerSessionRenewResult;
+    }
+    const renewal = yield* sessions
+      .issueRenewal(session.sessionId, {
+        subject: session.subject,
+        scopes: session.scopes,
+        // Never longer than the original grant, never longer than the default.
+        ttl: Duration.millis(Math.min(lifetimeMs, defaultLifetimeMs)),
+        client: renewalClientMetadata(session.client, requestMetadata),
+      })
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionRenewalIssueError({ cause })));
+    if (Option.isNone(renewal)) {
+      // Single use: this session already minted its successor (another window
+      // or device won the race). The presented token stays valid until its own
+      // expiry; the winner saved the successor where this client can read it.
+      yield* Effect.logInfo("Declined a repeated bearer session renewal.").pipe(
+        Effect.annotateLogs({ sessionId: session.sessionId }),
+      );
+      return { ...notRenewed, reason: "already_renewed" } satisfies AuthBearerSessionRenewResult;
+    }
+    const issued = renewal.value;
+    yield* Effect.logInfo("Renewed bearer session.").pipe(
+      Effect.annotateLogs({
+        previousSessionId: session.sessionId,
+        sessionId: issued.sessionId,
+        previousExpiresAt: DateTime.formatIso(expiresAt),
+        expiresAt: DateTime.formatIso(issued.expiresAt),
+      }),
+    );
+    return {
+      renewed: true,
+      access_token: issued.token,
+      token_type: "Bearer",
+      expires_in: Math.max(
+        0,
+        Math.floor((issued.expiresAt.epochMilliseconds - now.epochMilliseconds) / 1000),
+      ),
+      expiresAt: DateTime.toUtc(issued.expiresAt),
+      scope: encodeOAuthScope(issued.scopes),
+    } satisfies AuthBearerSessionRenewResult;
+  });
 
   const authenticateHttpRequest: EnvironmentAuth["Service"]["authenticateHttpRequest"] = (
     request,
@@ -1143,6 +1322,7 @@ export const make = Effect.gen(function* () {
     authenticateHttpRequest,
     authenticateWebSocketUpgrade,
     issueWebSocketTicket,
+    renewBearerSession,
     issueStartupPairingUrl,
   });
 });

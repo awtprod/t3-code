@@ -14,6 +14,9 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import {
+  BearerConnectionCredential,
+  BearerConnectionProfile,
+  BearerConnectionRegistration,
   type ConnectionCatalogEntry,
   type ConnectionRegistration,
   type PlatformConnectionRegistration,
@@ -41,6 +44,16 @@ import {
 } from "./githubRoutingPermissions.ts";
 
 const isSshConnectionProfile = Schema.is(SshConnectionProfile);
+const isBearerConnectionProfile = Schema.is(BearerConnectionProfile);
+const isBearerConnectionCredential = Schema.is(BearerConnectionCredential);
+
+/** A saved bearer connection as the session renewer needs it. */
+export interface SavedBearerCredential {
+  readonly environmentId: EnvironmentId;
+  readonly connectionId: string;
+  readonly httpBaseUrl: string;
+  readonly token: string;
+}
 
 export class EnvironmentNotRegisteredError extends Schema.TaggedError<EnvironmentNotRegisteredError>()(
   "EnvironmentNotRegisteredError",
@@ -95,6 +108,30 @@ export class EnvironmentRegistry extends Context.Service<
       | PlatformEnvironmentRemovalError
     >;
     readonly retryNow: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    /**
+     * The user-saved bearer connection for an environment, including the
+     * desktop remote primary's preserved recovery bearer. Platform-managed
+     * bearers (desktop-local secondaries) are not saved and never returned.
+     */
+    readonly savedBearerCredential: (
+      environmentId: EnvironmentId,
+      options?: {
+        /** Re-read persisted state first, picking up another window's renewal. */
+        readonly refresh?: boolean;
+      },
+    ) => Effect.Effect<Option.Option<SavedBearerCredential>>;
+    /**
+     * Persists a renewed token for a saved bearer connection through the normal
+     * registration path, only while the saved token is still `previousToken`.
+     * The running connection is left alone: its token stays valid until it
+     * expires, and the next connection attempt reads the renewed one.
+     */
+    readonly replaceBearerCredential: (input: {
+      readonly environmentId: EnvironmentId;
+      readonly connectionId: string;
+      readonly previousToken: string;
+      readonly token: string;
+    }) => Effect.Effect<boolean, Persistence.ConnectionPersistenceError>;
     /**
      * Switches a saved environment on or off. Off drops the socket, stops the
      * retry ladder, and persists so the next launch stays off. Registration,
@@ -758,6 +795,91 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  const readSavedBearer = Effect.fn("EnvironmentRegistry.readSavedBearer")(function* (
+    environmentId: EnvironmentId,
+  ) {
+    const target = (yield* Ref.get(persistedTargetsByEnvironment)).get(environmentId);
+    if (target?._tag !== "BearerConnectionTarget") {
+      return Option.none();
+    }
+    const profile = yield* profiles.get(target.connectionId);
+    const credential = yield* credentials.get(target.connectionId);
+    if (
+      Option.isNone(profile) ||
+      !isBearerConnectionProfile(profile.value) ||
+      profile.value.environmentId !== environmentId ||
+      Option.isNone(credential) ||
+      !isBearerConnectionCredential(credential.value)
+    ) {
+      return Option.none();
+    }
+    return Option.some({ target, profile: profile.value, credential: credential.value });
+  });
+
+  const savedBearerCredential: EnvironmentRegistry["Service"]["savedBearerCredential"] = (
+    environmentId,
+    options,
+  ) =>
+    (options?.refresh === true && credentials.refresh !== undefined
+      ? credentials.refresh.pipe(Effect.andThen(readSavedBearer(environmentId)))
+      : readSavedBearer(environmentId)
+    ).pipe(
+      Effect.map(
+        Option.map((saved): SavedBearerCredential => ({
+          environmentId,
+          connectionId: saved.target.connectionId,
+          httpBaseUrl: saved.profile.httpBaseUrl,
+          token: saved.credential.token,
+        })),
+      ),
+      Effect.catch((error) =>
+        Effect.logWarning("Could not read a saved bearer credential.", {
+          environmentId,
+          error,
+        }).pipe(Effect.as(Option.none<SavedBearerCredential>())),
+      ),
+    );
+
+  const replaceBearerCredential = Effect.fn("EnvironmentRegistry.replaceBearerCredential")(
+    function* (input: {
+      readonly environmentId: EnvironmentId;
+      readonly connectionId: string;
+      readonly previousToken: string;
+      readonly token: string;
+    }) {
+      return yield* withLeaseLock(
+        input.environmentId,
+        Effect.gen(function* () {
+          const saved = yield* readSavedBearer(input.environmentId).pipe(
+            Effect.mapError(
+              (error) =>
+                new Persistence.ConnectionPersistenceError({
+                  operation: "register-connection",
+                  message: error.message,
+                }),
+            ),
+          );
+          // A re-pair, edit, or removal since the renewal started wins.
+          if (
+            Option.isNone(saved) ||
+            saved.value.target.connectionId !== input.connectionId ||
+            saved.value.credential.token !== input.previousToken
+          ) {
+            return false;
+          }
+          yield* registrations.register(
+            new BearerConnectionRegistration({
+              target: saved.value.target,
+              profile: saved.value.profile,
+              credential: new BearerConnectionCredential({ token: input.token }),
+            }),
+          );
+          return true;
+        }),
+      );
+    },
+  );
+
   const retryNow = (environmentId: EnvironmentId) =>
     acquireSupervisor(environmentId).pipe(
       Effect.flatMap((supervisor) => supervisor.retryNow),
@@ -902,6 +1024,8 @@ export const make = Effect.gen(function* () {
     remove,
     removeRelayEnvironments,
     retryNow,
+    savedBearerCredential,
+    replaceBearerCredential,
     setEnabled,
     setCompatibility,
     state,

@@ -85,6 +85,8 @@ const connectionSessionRecord = (
   expiresAt: DateTime.makeUnsafe("2100-01-01T00:00:00.000Z"),
   lastConnectedAt,
   revokedAt: null,
+  renewedFromSessionId: null,
+  renewedAt: null,
 });
 
 const makeConnectionRepositoryHarness = (connectionFailure?: PersistenceSqlError) =>
@@ -96,9 +98,11 @@ const makeConnectionRepositoryHarness = (connectionFailure?: PersistenceSqlError
       create: () => Effect.void,
       createReplacingActive: () => Effect.succeed([]),
       createIfAbsent: () => Effect.void,
+      createRenewal: () => Effect.succeed(false),
+      listLineage: () => readRecord.pipe(Effect.map((record) => [record])),
       getById: () => readRecord.pipe(Effect.map(Option.some)),
       listActive: () => readRecord.pipe(Effect.map((record) => [record])),
-      revoke: () => Effect.succeed(false),
+      revoke: () => Effect.succeed([]),
       revokeAllExcept: () => Effect.succeed([]),
       setConnection: (input) =>
         Ref.update(writes, (current) => [...current, input]).pipe(
@@ -157,6 +161,8 @@ const failingSessionLookupRepositoryLayer = Layer.succeed(AuthSessions.AuthSessi
   create: () => Effect.void,
   createReplacingActive: () => Effect.succeed([]),
   createIfAbsent: () => Effect.void,
+  createRenewal: () => Effect.fail(repositoryFailure),
+  listLineage: () => Effect.fail(repositoryFailure),
   getById: () => Effect.fail(repositoryFailure),
   listActive: () => Effect.succeed([]),
   revoke: () => Effect.fail(repositoryFailure),

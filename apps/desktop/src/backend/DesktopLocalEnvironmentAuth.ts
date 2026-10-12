@@ -60,6 +60,13 @@ export class DesktopLocalEnvironmentAuth extends Context.Service<
     readonly recoverRemotePrimarySession: (
       expectedHttpBaseUrl: string,
     ) => Effect.Effect<AuthSessionState, DesktopSavedEnvironmentRecoveryError>;
+    /**
+     * The renderer rewrote the saved connection catalog (for example after
+     * renewing the remote primary's bearer). Forget the cached remote-mode
+     * token so the next `getBearerToken` re-ranks the saved credentials. A
+     * local-mode token is kept: re-minting it would revoke the current one.
+     */
+    readonly invalidateSavedRemoteToken: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/backend/DesktopLocalEnvironmentAuth") {}
 
@@ -92,6 +99,12 @@ function readSessionTokenExpiry(token: string): number | null {
     onNone: () => null,
     onSome: (decoded) => decoded.exp,
   });
+}
+
+interface CachedBearerToken {
+  readonly token: string;
+  /** `remote`: read from the saved catalog. `local`: minted from the bootstrap seed. */
+  readonly source: "remote" | "local";
 }
 
 interface SavedRemoteCredential {
@@ -156,7 +169,9 @@ export const make = Effect.gen(function* () {
   const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
   const connectionCatalogStore = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
   const httpClient = yield* HttpClient.HttpClient;
-  const tokenRef = yield* Ref.make(Option.none<string>());
+  const tokenRef = yield* Ref.make(Option.none<CachedBearerToken>());
+  // Bumped on every catalog write so a read that raced the write is not cached.
+  const catalogGeneration = yield* Ref.make(0);
   const mutex = yield* Semaphore.make(1);
 
   const readSavedRemoteCredentials = Effect.fn(
@@ -182,7 +197,7 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const cached = yield* Ref.get(tokenRef);
         if (Option.isSome(cached)) {
-          return cached.value;
+          return cached.value.token;
         }
 
         const settings = yield* appSettings.get;
@@ -193,9 +208,12 @@ export const make = Effect.gen(function* () {
           if (remoteHttpBaseUrl === null) {
             return null;
           }
+          const generation = yield* Ref.get(catalogGeneration);
           const [best] = yield* readSavedRemoteCredentials(remoteHttpBaseUrl);
           if (best === undefined) return null;
-          yield* Ref.set(tokenRef, Option.some(best.token));
+          if ((yield* Ref.get(catalogGeneration)) === generation) {
+            yield* Ref.set(tokenRef, Option.some({ token: best.token, source: "remote" }));
+          }
           return best.token;
         }
 
@@ -226,7 +244,7 @@ export const make = Effect.gen(function* () {
               }),
           ),
         );
-        yield* Ref.set(tokenRef, Option.some(session.access_token));
+        yield* Ref.set(tokenRef, Option.some({ token: session.access_token, source: "local" }));
         return session.access_token;
       }),
     )
@@ -238,6 +256,7 @@ export const make = Effect.gen(function* () {
     return yield* mutex.withPermits(1)(
       Effect.gen(function* () {
         yield* Ref.set(tokenRef, Option.none());
+        const generation = yield* Ref.get(catalogGeneration);
         const settings = yield* appSettings.get;
         if (settings.primaryBackendMode !== "remote" || isLocalExecutionOverride()) {
           return yield* new DesktopSavedEnvironmentRecoveryError({
@@ -312,7 +331,11 @@ export const make = Effect.gen(function* () {
               message: "The selected server changed during verification. Recovery stopped.",
             });
           }
-          yield* Ref.set(tokenRef, Option.some(candidate.token));
+          // A catalog write during verification may have saved a newer bearer;
+          // leave it to the next read instead of pinning this one.
+          if ((yield* Ref.get(catalogGeneration)) === generation) {
+            yield* Ref.set(tokenRef, Option.some({ token: candidate.token, source: "remote" }));
+          }
           return session.value;
         }
         return yield* new DesktopSavedEnvironmentRecoveryError({
@@ -324,7 +347,21 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  return DesktopLocalEnvironmentAuth.of({ getBearerToken, recoverRemotePrimarySession });
+  const invalidateSavedRemoteToken: DesktopLocalEnvironmentAuth["Service"]["invalidateSavedRemoteToken"] =
+    Ref.update(catalogGeneration, (generation) => generation + 1).pipe(
+      Effect.andThen(
+        Ref.update(tokenRef, (cached) =>
+          Option.isSome(cached) && cached.value.source === "remote" ? Option.none() : cached,
+        ),
+      ),
+      Effect.withSpan("desktop.localEnvironmentAuth.invalidateSavedRemoteToken"),
+    );
+
+  return DesktopLocalEnvironmentAuth.of({
+    getBearerToken,
+    recoverRemotePrimarySession,
+    invalidateSavedRemoteToken,
+  });
 });
 
 export const layer = Layer.effect(DesktopLocalEnvironmentAuth, make);

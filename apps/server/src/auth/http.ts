@@ -17,6 +17,7 @@ import {
   EnvironmentInternalError,
   type EnvironmentInternalErrorReason,
   EnvironmentOperationForbiddenError,
+  type EnvironmentOperationForbiddenReason,
   EnvironmentRequestInvalidError,
   type EnvironmentRequestInvalidReason,
   EnvironmentResourceNotFoundError,
@@ -138,7 +139,7 @@ export function failEnvironmentScopeRequired(requiredScope: AuthEnvironmentScope
   );
 }
 
-function failEnvironmentOperationForbidden(reason: "current_session_revoke_not_allowed") {
+function failEnvironmentOperationForbidden(reason: EnvironmentOperationForbiddenReason) {
   return currentEnvironmentTraceId.pipe(
     Effect.flatMap((traceId) =>
       Effect.fail(
@@ -386,6 +387,29 @@ export const authHttpApiLayer = HttpApiBuilder.group(
           ),
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("access_token_issuance_failed", error),
+          ),
+        ),
+      )
+      .handle(
+        "renewSession",
+        Effect.fn("environment.auth.renewSession")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            yield* appendCredentialResponseHeaders;
+            return yield* serverAuth.renewBearerSession(
+              request,
+              deriveAuthClientMetadata({ request }),
+            );
+          },
+          Effect.catchTag("ServerAuthBearerSessionRequiredError", () =>
+            failEnvironmentOperationForbidden("bearer_session_required"),
+          ),
+          Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
+            failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
+          ),
+          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+            failEnvironmentInternal("session_renewal_failed", error),
           ),
         ),
       )

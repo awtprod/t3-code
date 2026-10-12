@@ -158,6 +158,31 @@ export const fetchRemoteSessionState = Effect.fn(
   );
 });
 
+/**
+ * Asks the environment to renew the bearer session behind `bearerToken`. The
+ * server only mints a successor inside its renewal window; earlier calls
+ * return `{ renewed: false, expiresAt }`. The presented token keeps working
+ * until its own expiry either way.
+ */
+export const renewRemoteBearerSession = Effect.fn(
+  "clientRuntime.authorization.renewRemoteBearerSession",
+)(function* (input: {
+  readonly httpBaseUrl: string;
+  readonly bearerToken: string;
+  readonly timeoutMs?: number;
+}) {
+  const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
+  return yield* executeEnvironmentHttpRequest(
+    environmentEndpointUrl(input.httpBaseUrl, "/api/auth/session/renew"),
+    input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
+    client.renewSession({
+      headers: {
+        authorization: `Bearer ${input.bearerToken}`,
+      },
+    }),
+  );
+});
+
 export const issueRemoteWebSocketTicket = Effect.fn(
   "clientRuntime.authorization.issueRemoteWebSocketTicket",
 )(function* (input: {

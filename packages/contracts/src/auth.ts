@@ -213,6 +213,49 @@ export const AuthAccessTokenResult = Schema.Struct({
 });
 export type AuthAccessTokenResult = typeof AuthAccessTokenResult.Type;
 
+/**
+ * Remaining lifetime at or below which a bearer access token may be renewed
+ * through `POST /api/auth/session/renew`. Earlier calls are answered without
+ * minting a session, so clients can check freely.
+ */
+export const AuthBearerSessionRenewalWindowMs = 10 * 24 * 60 * 60 * 1000;
+
+/**
+ * - `not_due`: outside the renewal window.
+ * - `not_renewable`: issued for no longer than the window; it simply expires.
+ * - `already_renewed`: this session already minted its single successor.
+ *   The presented token keeps working until `expiresAt`.
+ */
+export const AuthBearerSessionNotRenewedReason = Schema.Literals([
+  "not_due",
+  "not_renewable",
+  "already_renewed",
+]);
+export type AuthBearerSessionNotRenewedReason = typeof AuthBearerSessionNotRenewedReason.Type;
+
+export const AuthBearerSessionNotRenewedResult = Schema.Struct({
+  renewed: Schema.Literal(false),
+  expiresAt: Schema.DateTimeUtc,
+  reason: Schema.optionalKey(AuthBearerSessionNotRenewedReason),
+});
+export type AuthBearerSessionNotRenewedResult = typeof AuthBearerSessionNotRenewedResult.Type;
+
+export const AuthBearerSessionRenewedResult = Schema.Struct({
+  renewed: Schema.Literal(true),
+  access_token: TrimmedNonEmptyString,
+  token_type: Schema.Literal("Bearer"),
+  expires_in: Schema.Number,
+  expiresAt: Schema.DateTimeUtc,
+  scope: TrimmedNonEmptyString,
+});
+export type AuthBearerSessionRenewedResult = typeof AuthBearerSessionRenewedResult.Type;
+
+export const AuthBearerSessionRenewResult = Schema.Union([
+  AuthBearerSessionNotRenewedResult,
+  AuthBearerSessionRenewedResult,
+]);
+export type AuthBearerSessionRenewResult = typeof AuthBearerSessionRenewResult.Type;
+
 export const AuthWebSocketTicketResult = Schema.Struct({
   ticket: TrimmedNonEmptyString,
   expiresAt: Schema.DateTimeUtc,

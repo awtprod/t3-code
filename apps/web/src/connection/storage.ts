@@ -312,6 +312,8 @@ export function makeCatalogBackend(database: IDBDatabase): CatalogBackend {
 
 interface CatalogStore {
   readonly read: Effect.Effect<ConnectionCatalogDocumentType, ConnectionTransientError>;
+  /** Forgets the cached document so the next read sees other windows' writes. */
+  readonly refresh: Effect.Effect<void>;
   readonly update: (
     transform: (catalog: ConnectionCatalogDocumentType) => ConnectionCatalogDocumentType,
   ) => Effect.Effect<void, ConnectionTransientError>;
@@ -364,10 +366,15 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
   });
 
   const read = lock.withPermits(1)(loadUnlocked());
+  const refresh = lock.withPermits(1)(Ref.set(state, Option.none()));
   const update: CatalogStore["update"] = Effect.fn("web.connectionStorage.updateCatalog")(
     function* (transform) {
       yield* lock.withPermits(1)(
         Effect.gen(function* () {
+          // Transform the persisted document, not this window's cached copy:
+          // another window may have saved since (for example a renewed bearer
+          // token), and writing a stale copy back would undo it.
+          yield* Ref.set(state, Option.none());
           const next = transform(yield* loadUnlocked());
           yield* backend.write(yield* encodeCatalog(next));
           yield* Ref.set(state, Option.some(next));
@@ -376,7 +383,7 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
     },
   );
 
-  return { read, update } satisfies CatalogStore;
+  return { read, refresh, update } satisfies CatalogStore;
 });
 
 const GITHUB_ROUTING_KEY_PREFIX = "t3code:github-routing:";
@@ -553,6 +560,7 @@ export const connectionStorageLayer = Layer.effectContext(
             credential,
           }),
         })),
+      refresh: catalog.refresh,
       remove: (connectionId) =>
         catalog.update((document) => ({
           ...document,

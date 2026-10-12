@@ -3,6 +3,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as DesktopConnectionCatalogStore from "../../app/DesktopConnectionCatalogStore.ts";
+import * as DesktopLocalEnvironmentAuth from "../../backend/DesktopLocalEnvironmentAuth.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 
@@ -22,7 +23,10 @@ export const setConnectionCatalog = DesktopIpc.makeIpcMethod({
   result: Schema.Boolean,
   handler: Effect.fn("desktop.ipc.connectionCatalog.set")(function* (catalog) {
     const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
-    return yield* store.set(catalog);
+    const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+    // The renderer owns catalog writes (pairing, renewal). The remote primary's
+    // cached bearer must follow them rather than pin the token read at launch.
+    return yield* store.set(catalog).pipe(Effect.ensuring(localAuth.invalidateSavedRemoteToken));
   }),
 });
 
@@ -32,6 +36,7 @@ export const clearConnectionCatalog = DesktopIpc.makeIpcMethod({
   result: Schema.Void,
   handler: Effect.fn("desktop.ipc.connectionCatalog.clear")(function* () {
     const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
-    yield* store.clear;
+    const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+    yield* store.clear.pipe(Effect.ensuring(localAuth.invalidateSavedRemoteToken));
   }),
 });

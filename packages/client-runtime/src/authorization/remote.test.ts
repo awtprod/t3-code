@@ -15,6 +15,7 @@ import {
   issueRemoteWebSocketTicket,
   RemoteEnvironmentAuthInvalidJsonError,
   RemoteEnvironmentAuthTimeoutError,
+  renewRemoteBearerSession,
   resolveRemoteWebSocketConnectionUrl,
 } from "./remote.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
@@ -89,6 +90,44 @@ const expectFetchCall = (
 };
 
 describe("remote environment authorization", () => {
+  it.effect("renews a bearer session with the Authorization header and decodes both answers", () =>
+    Effect.gen(function* () {
+      const fetch = recordedFetch(
+        Response.json({
+          renewed: false,
+          expiresAt: "2026-11-01T00:00:00.000Z",
+          reason: "already_renewed",
+        }),
+        Response.json({
+          renewed: true,
+          access_token: "renewed-bearer-token",
+          token_type: "Bearer",
+          expires_in: 2_592_000,
+          expiresAt: "2026-12-01T00:00:00.000Z",
+          scope: "orchestration:read",
+        }),
+      );
+
+      const early = yield* renewRemoteBearerSession({
+        httpBaseUrl: "https://remote.example.test/",
+        bearerToken: "current-bearer-token",
+      }).pipe(provideRemoteHttp(fetch.fetchFn));
+      const renewed = yield* renewRemoteBearerSession({
+        httpBaseUrl: "https://remote.example.test/",
+        bearerToken: "current-bearer-token",
+      }).pipe(provideRemoteHttp(fetch.fetchFn));
+
+      expect(early).toMatchObject({ renewed: false, reason: "already_renewed" });
+      expect(early.expiresAt.epochMilliseconds).toBe(Date.parse("2026-11-01T00:00:00.000Z"));
+      expect(renewed).toMatchObject({ renewed: true, access_token: "renewed-bearer-token" });
+      expectFetchCall(fetch.calls, 1, {
+        url: "https://remote.example.test/api/auth/session/renew",
+        method: "POST",
+        headers: { authorization: "Bearer current-bearer-token" },
+      });
+    }),
+  );
+
   it.effect("bootstraps bearer auth against a remote backend", () =>
     Effect.gen(function* () {
       const fetch = recordedFetch(

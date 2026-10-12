@@ -167,6 +167,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
   );
   const profileReadCount = yield* Ref.make(0);
   const storedCredentials = yield* Ref.make(new Map(initialCredentials));
+  const credentialRefreshes = yield* Ref.make(0);
   const storedRemoteTokens = yield* Ref.make(
     new Map([
       [
@@ -324,6 +325,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
       }),
   });
   const credentialStore = ConnectionCredentialStore.ConnectionCredentialStore.of({
+    refresh: Ref.update(credentialRefreshes, (count) => count + 1),
     get: (connectionId) =>
       Ref.get(storedCredentials).pipe(
         Effect.map((current) => Option.fromUndefinedOr(current.get(connectionId))),
@@ -431,6 +433,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     storedProfiles,
     profileReadCount,
     storedCredentials,
+    credentialRefreshes,
     storedRemoteTokens,
     storedDisabled,
     disconnectedSshTargets,
@@ -1903,6 +1906,170 @@ describe("EnvironmentRegistry", () => {
         );
         expect(yield* Ref.get(harness.disconnectedSshTargets)).toEqual([SSH_TARGET]);
       }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+});
+
+describe("EnvironmentRegistry saved bearer renewal", () => {
+  it.effect("replaces the saved token in place without restarting the connection", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [BEARER_TARGET],
+        [BEARER_PROFILE],
+        [[BEARER_TARGET.connectionId, BEARER_CREDENTIAL]],
+        { initialDisabled: [] },
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(
+          registry,
+          BEARER_TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+        const generation = (yield* registry.state(BEARER_TARGET.environmentId)).generation;
+
+        expect(
+          Option.getOrThrow(yield* registry.savedBearerCredential(BEARER_TARGET.environmentId)),
+        ).toEqual({
+          environmentId: BEARER_TARGET.environmentId,
+          connectionId: BEARER_TARGET.connectionId,
+          httpBaseUrl: BEARER_PROFILE.httpBaseUrl,
+          token: BEARER_CREDENTIAL.token,
+        });
+
+        const stale = yield* registry.replaceBearerCredential({
+          environmentId: BEARER_TARGET.environmentId,
+          connectionId: BEARER_TARGET.connectionId,
+          previousToken: "some-other-token",
+          token: "renewed-token",
+        });
+        const replaced = yield* registry.replaceBearerCredential({
+          environmentId: BEARER_TARGET.environmentId,
+          connectionId: BEARER_TARGET.connectionId,
+          previousToken: BEARER_CREDENTIAL.token,
+          token: "renewed-token",
+        });
+
+        expect(stale).toBe(false);
+        expect(replaced).toBe(true);
+        expect((yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId)).toEqual(
+          new BearerConnectionCredential({ token: "renewed-token" }),
+        );
+        expect((yield* Ref.get(harness.storedProfiles)).get(BEARER_TARGET.connectionId)).toEqual(
+          BEARER_PROFILE,
+        );
+        expect(yield* Ref.get(harness.releasedSessions)).toBe(0);
+        const after = yield* registry.state(BEARER_TARGET.environmentId);
+        expect(after.phase).toBe("connected");
+        expect(after.generation).toBe(generation);
+        expect(
+          Option.getOrThrow(yield* registry.savedBearerCredential(BEARER_TARGET.environmentId))
+            .token,
+        ).toBe("renewed-token");
+        expect(yield* Ref.get(harness.credentialRefreshes)).toBe(0);
+        // Another window may have renewed: a refreshing read bypasses the cache.
+        yield* Ref.update(harness.storedCredentials, (current) =>
+          new Map(current).set(
+            BEARER_TARGET.connectionId,
+            new BearerConnectionCredential({ token: "other-window-token" }),
+          ),
+        );
+        expect(
+          Option.getOrThrow(
+            yield* registry.savedBearerCredential(BEARER_TARGET.environmentId, { refresh: true }),
+          ).token,
+        ).toBe("other-window-token");
+        expect(yield* Ref.get(harness.credentialRefreshes)).toBe(1);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  it.effect("exposes the desktop remote primary's preserved recovery bearer", () =>
+    Effect.gen(function* () {
+      const remotePrimary = new PrimaryConnectionTarget({
+        environmentId: BEARER_TARGET.environmentId,
+        label: BEARER_TARGET.label,
+        httpBaseUrl: BEARER_PROFILE.httpBaseUrl,
+        wsBaseUrl: BEARER_PROFILE.wsBaseUrl,
+      });
+      const harness = yield* makeHarness(
+        [BEARER_TARGET],
+        [BEARER_PROFILE],
+        [[BEARER_TARGET.connectionId, BEARER_CREDENTIAL]],
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.registerPlatform(
+          new PrimaryConnectionRegistration({ target: remotePrimary }),
+        );
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(remotePrimary.environmentId)?.target,
+        ).toEqual(remotePrimary);
+
+        const saved = yield* registry.savedBearerCredential(remotePrimary.environmentId);
+        expect(Option.getOrThrow(saved).connectionId).toBe(BEARER_TARGET.connectionId);
+        expect(
+          yield* registry.replaceBearerCredential({
+            environmentId: remotePrimary.environmentId,
+            connectionId: BEARER_TARGET.connectionId,
+            previousToken: BEARER_CREDENTIAL.token,
+            token: "renewed-primary-token",
+          }),
+        ).toBe(true);
+        expect((yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId)).toEqual(
+          new BearerConnectionCredential({ token: "renewed-primary-token" }),
+        );
+        expect((yield* Ref.get(harness.storedTargets)).get(remotePrimary.environmentId)).toEqual(
+          BEARER_TARGET,
+        );
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  it.effect("never offers platform-managed or non-bearer connections for renewal", () =>
+    Effect.gen(function* () {
+      const localSecondary = new BearerConnectionTarget({
+        environmentId: EnvironmentId.make("environment-local-secondary"),
+        label: "Local secondary",
+        connectionId: "local:secondary",
+      });
+      const harness = yield* makeHarness([SSH_CONNECTION, RELAY_TARGET], [SSH_PROFILE]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.reconcilePlatform([
+          new BearerConnectionRegistration({
+            target: localSecondary,
+            profile: new BearerConnectionProfile({
+              connectionId: localSecondary.connectionId,
+              environmentId: localSecondary.environmentId,
+              label: localSecondary.label,
+              httpBaseUrl: "http://127.0.0.1:3774",
+              wsBaseUrl: "ws://127.0.0.1:3774",
+            }),
+            credential: new BearerConnectionCredential({ token: "local-token" }),
+          }),
+        ]);
+
+        for (const environmentId of [
+          localSecondary.environmentId,
+          SSH_CONNECTION.environmentId,
+          RELAY_TARGET.environmentId,
+        ]) {
+          expect(Option.isNone(yield* registry.savedBearerCredential(environmentId))).toBe(true);
+        }
+        expect(
+          yield* registry.replaceBearerCredential({
+            environmentId: localSecondary.environmentId,
+            connectionId: localSecondary.connectionId,
+            previousToken: "local-token",
+            token: "renewed-local-token",
+          }),
+        ).toBe(false);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
   );
 });
