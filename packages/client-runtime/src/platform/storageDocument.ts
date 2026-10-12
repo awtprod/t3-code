@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
+  type BearerConnectionProfile,
   type ConnectionRegistration,
   ConnectionCredential,
   ConnectionProfile,
@@ -106,6 +107,113 @@ function removeConnectionMetadata(
   };
 }
 
+/**
+ * Normalizes a saved bearer URL the way the desktop main process does when it
+ * looks up the remote primary's credential: http(s) only, no userinfo, query or
+ * fragment, trailing slashes collapsed to one. Anything else never matches.
+ */
+function normalizeSavedBearerUrl(value: string): string | null {
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (url.username || url.password || url.search || url.hash) return null;
+    url.pathname = url.pathname.replace(/\/*$/, "/");
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when `candidate` is another bearer profile for the same environment and
+ * the same server URL as `current`. Such a profile can only hold an older bearer
+ * for that exact server: the renderer resolves the target's connection, and the
+ * desktop main process matches the remote primary by URL, so keeping it lets a
+ * stale token be sent in place of the current one.
+ *
+ * Profiles for the same environment at a different URL are kept on purpose.
+ * The main process can still be pointed at that URL, and one environment may be
+ * reachable over several routes.
+ */
+function isSupersededBearerProfile(
+  candidate: ConnectionCatalogDocument["profiles"][number],
+  current: BearerConnectionProfile,
+): boolean {
+  if (
+    candidate._tag !== "BearerConnectionProfile" ||
+    candidate.connectionId === current.connectionId ||
+    candidate.environmentId !== current.environmentId
+  ) {
+    return false;
+  }
+  const currentUrl = normalizeSavedBearerUrl(current.httpBaseUrl);
+  return currentUrl !== null && normalizeSavedBearerUrl(candidate.httpBaseUrl) === currentUrl;
+}
+
+/**
+ * Drops the bearer profiles, and their credentials, that `current` supersedes.
+ * A connection that any saved target references is never dropped.
+ */
+function dropSupersededBearerConnections(
+  document: ConnectionCatalogDocument,
+  current: BearerConnectionProfile,
+): { readonly document: ConnectionCatalogDocument; readonly dropped: ReadonlyArray<string> } {
+  const referenced = new Set(
+    document.targets.flatMap((target) =>
+      target._tag === "BearerConnectionTarget" || target._tag === "SshConnectionTarget"
+        ? [target.connectionId]
+        : [],
+    ),
+  );
+  const dropped = new Set(
+    document.profiles
+      .filter(
+        (profile) =>
+          isSupersededBearerProfile(profile, current) && !referenced.has(profile.connectionId),
+      )
+      .map((profile) => profile.connectionId),
+  );
+  if (dropped.size === 0) {
+    return { document, dropped: [] };
+  }
+  return {
+    document: {
+      ...document,
+      profiles: document.profiles.filter((profile) => !dropped.has(profile.connectionId)),
+      credentials: document.credentials.filter((entry) => !dropped.has(entry.connectionId)),
+    },
+    dropped: [...dropped],
+  };
+}
+
+/**
+ * Removes orphaned bearer connections that older builds left behind: for each
+ * saved bearer target, every other bearer profile (and its credential) for the
+ * same environment and URL that no target references. Returns the input
+ * document itself when there is nothing to remove.
+ */
+export function pruneSupersededBearerConnections(document: ConnectionCatalogDocument): {
+  readonly document: ConnectionCatalogDocument;
+  readonly dropped: ReadonlyArray<string>;
+} {
+  let next = document;
+  const dropped: Array<string> = [];
+  for (const target of document.targets) {
+    if (target._tag !== "BearerConnectionTarget") continue;
+    const current = next.profiles.find(
+      (profile): profile is BearerConnectionProfile =>
+        profile._tag === "BearerConnectionProfile" &&
+        profile.connectionId === target.connectionId &&
+        profile.environmentId === target.environmentId,
+    );
+    if (current === undefined) continue;
+    const result = dropSupersededBearerConnections(next, current);
+    next = result.document;
+    dropped.push(...result.dropped);
+  }
+  return { document: next, dropped };
+}
+
 export function registerConnectionInCatalog(
   document: ConnectionCatalogDocument,
   registration: ConnectionRegistration,
@@ -126,19 +234,25 @@ export function registerConnectionInCatalog(
   switch (registration._tag) {
     case "RelayConnectionRegistration":
       return next;
-    case "BearerConnectionRegistration":
+    case "BearerConnectionRegistration": {
+      // Removing only the previous target's connection leaves any other bearer
+      // saved for this server behind (for example one whose target was already
+      // gone), and the desktop main process could pick its stale token. The new
+      // bearer supersedes every unreferenced one for the same environment and URL.
+      const pruned = dropSupersededBearerConnections(next, registration.profile).document;
       return {
-        ...next,
+        ...pruned,
         profiles: replaceCatalogValue(
-          next.profiles,
+          pruned.profiles,
           (value) => value.connectionId,
           registration.profile,
         ),
-        credentials: replaceCatalogValue(next.credentials, (value) => value.connectionId, {
+        credentials: replaceCatalogValue(pruned.credentials, (value) => value.connectionId, {
           connectionId: registration.target.connectionId,
           credential: registration.credential,
         }),
       };
+    }
     case "SshConnectionRegistration":
       return {
         ...next,

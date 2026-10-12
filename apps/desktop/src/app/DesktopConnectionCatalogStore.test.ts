@@ -27,6 +27,11 @@ const textEncoder = new TextEncoder();
 const decodeConnectionCatalog = Schema.decodeEffect(
   Schema.fromJsonString(ConnectionCatalogDocument),
 );
+const encodeConnectionCatalog = Schema.encodeEffect(
+  Schema.fromJsonString(ConnectionCatalogDocument),
+);
+const decodeUnknownConnectionCatalog = Schema.decodeUnknownEffect(ConnectionCatalogDocument);
+const encodeUnknownJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const encodeLegacySavedEnvironments = Schema.encodeEffect(
   Schema.fromJsonString(
     Schema.Struct({ version: Schema.Literal(1), records: Schema.Array(Schema.Unknown) }),
@@ -478,5 +483,94 @@ describe("DesktopConnectionCatalogStore", () => {
         assert.deepStrictEqual(yield* store.get, Option.none());
         assert.equal(yield* fileSystem.readFileString(catalogPath), preservedCatalog);
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+  it.effect("hides bearers a newer pairing superseded without rewriting the catalog file", () =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+        const environmentId = EnvironmentId.make("remote-environment");
+        const bearerProfile = (connectionId: string, httpBaseUrl: string) => ({
+          _tag: "BearerConnectionProfile" as const,
+          connectionId,
+          environmentId,
+          label: "Remote",
+          httpBaseUrl,
+          wsBaseUrl: httpBaseUrl.replace(/^http/, "ws"),
+        });
+        const bearerCredential = (connectionId: string, token: string) => ({
+          connectionId,
+          credential: { _tag: "BearerConnectionCredential" as const, token },
+        });
+        const catalog = yield* decodeUnknownConnectionCatalog({
+          schemaVersion: 1,
+          targets: [
+            {
+              _tag: "BearerConnectionTarget",
+              environmentId,
+              label: "Remote",
+              connectionId: "bearer:remote-environment",
+            },
+          ],
+          profiles: [
+            bearerProfile("legacy-orphan", "https://remote.example.test"),
+            bearerProfile("other-route", "https://lan.remote.example.test/"),
+            bearerProfile("bearer:remote-environment", "https://remote.example.test/"),
+          ],
+          credentials: [
+            bearerCredential("legacy-orphan", "expired-token"),
+            bearerCredential("other-route", "route-token"),
+            bearerCredential("local:wsl:default", "local-token"),
+            bearerCredential("bearer:remote-environment", "fresh-token"),
+          ],
+          remoteDpopTokens: [],
+          disabledEnvironmentIds: [],
+        });
+        const stored = yield* encodeConnectionCatalog(catalog);
+        assert.isTrue(yield* store.set(stored));
+
+        const current = yield* store.get;
+        assert.isTrue(Option.isSome(current));
+        if (Option.isNone(current)) return;
+        const read = yield* decodeConnectionCatalog(current.value);
+        assert.deepStrictEqual(
+          read.profiles.map((profile) => profile.connectionId),
+          ["other-route", "bearer:remote-environment"],
+        );
+        assert.deepStrictEqual(
+          read.credentials.map((entry) => entry.connectionId),
+          ["other-route", "local:wsl:default", "bearer:remote-environment"],
+        );
+        assert.deepStrictEqual(read.targets, catalog.targets);
+
+        // The file keeps what the renderer wrote; only its next save drops the orphan.
+        assert.deepStrictEqual(yield* store.getExisting, Option.some(stored));
+      }),
+    ),
+  );
+
+  it.effect("returns a catalog with nothing to prune exactly as stored", () =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+        const stored = encodeUnknownJson({
+          schemaVersion: 1,
+          targets: [],
+          profiles: [
+            {
+              _tag: "BearerConnectionProfile",
+              connectionId: "untargeted",
+              environmentId: "remote-environment",
+              label: "Remote",
+              httpBaseUrl: "https://remote.example.test/",
+              wsBaseUrl: "wss://remote.example.test/",
+            },
+          ],
+          credentials: [],
+          remoteDpopTokens: [],
+        });
+        assert.isTrue(yield* store.set(stored));
+        assert.deepStrictEqual(yield* store.get, Option.some(stored));
+      }),
+    ),
   );
 });
