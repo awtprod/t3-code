@@ -437,6 +437,9 @@ describe("OrchestrationEngine", () => {
               threads: [],
               updatedAt: projectionSnapshot.updatedAt,
             }),
+          listSandboxThreads: () => Effect.die("unused"),
+          getSandboxThreadById: () => Effect.die("unused"),
+          getProjectWorkspaceById: () => Effect.die("unused"),
           getDeletedWorktreeThreads: () => Effect.die("unused"),
           listThreadsWithPullRequests: () => Effect.die("unused"),
           getArchivedShellSnapshot: () =>

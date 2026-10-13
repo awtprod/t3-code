@@ -208,6 +208,9 @@ describe("StalledTurnWatchdog", () => {
         Layer.succeed(ProjectionSnapshotQuery, {
           getUserInputActivity: () => Effect.die("unused"),
           listThreadsWithPullRequests: () => Effect.die("unused"),
+          listSandboxThreads: () => Effect.die("unused"),
+          getSandboxThreadById: () => Effect.die("unused"),
+          getProjectWorkspaceById: () => Effect.die("unused"),
           getDeletedWorktreeThreads: () => Effect.die("unused"),
           listActivitiesByKind: () => Effect.die("unused"),
           getEventReplayStats: () => Effect.die("unused"),

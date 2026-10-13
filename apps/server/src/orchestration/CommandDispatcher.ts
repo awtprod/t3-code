@@ -618,14 +618,17 @@ const make = Effect.gen(function* () {
           ? resolvedCommand.threadId
           : undefined;
       if (targetThreadId === undefined) return resolvedCommand;
-      const snapshot = yield* projectionSnapshotQuery
-        .getSnapshot()
-        .pipe(
-          Effect.mapError((cause) =>
-            toDispatchCommandError(cause, "Failed to load project for sandbox creation"),
+      // Every thread.create passes through here; read only the project row
+      // rather than the full snapshot.
+      const project = Option.getOrUndefined(
+        yield* projectionSnapshotQuery
+          .getProjectWorkspaceById(create.projectId)
+          .pipe(
+            Effect.mapError((cause) =>
+              toDispatchCommandError(cause, "Failed to load project for sandbox creation"),
+            ),
           ),
-        );
-      const project = snapshot.projects.find((item) => item.id === create.projectId);
+      );
       if (!project)
         return yield* new OrchestrationDispatchCommandError({
           message: `Project '${create.projectId}' was not found.`,

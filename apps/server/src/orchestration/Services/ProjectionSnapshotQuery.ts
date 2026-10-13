@@ -67,6 +67,30 @@ export interface ProjectionFullThreadDiffContext {
   readonly toCheckpointRef: CheckpointRef | null;
 }
 
+/**
+ * A thread's recorded sandbox, read without hydrating the thread body.
+ *
+ * Deleted threads are included: their projection row -- and any sandbox it
+ * still records -- survives deletion, and teardown, reconcile, and expiry all
+ * have to see it.
+ */
+export interface ProjectionSandboxThread {
+  readonly id: ThreadId;
+  readonly projectId: ProjectId;
+  readonly deletedAt: OrchestrationThread["deletedAt"];
+  readonly sandbox: SandboxState;
+}
+
+/**
+ * The project fields sandbox orchestration reads. Deleted projects are
+ * included, matching a lookup in `getSnapshot().projects`.
+ */
+export interface ProjectionProjectWorkspace {
+  readonly id: ProjectId;
+  readonly workspaceRoot: string;
+  readonly deletedAt: OrchestrationProject["deletedAt"];
+}
+
 /** The thread fields pull request sync reads, for a thread with at least one link. */
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationThreadShell,
@@ -117,6 +141,31 @@ export interface ProjectionSnapshotQueryShape {
    * projector cursor state.
    */
   readonly getSnapshot: () => Effect.Effect<OrchestrationReadModel, ProjectionRepositoryError>;
+
+  /**
+   * Read every thread that records a sandbox, deleted threads included, in
+   * snapshot thread order. Reads only `projection_threads`, so periodic
+   * sandbox sweeps never decode messages or activities.
+   */
+  readonly listSandboxThreads: () => Effect.Effect<
+    ReadonlyArray<ProjectionSandboxThread>,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * Read one thread's recorded sandbox by id, deleted threads included. None
+   * when the thread does not exist or records no sandbox.
+   */
+  readonly getSandboxThreadById: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<ProjectionSandboxThread>, ProjectionRepositoryError>;
+
+  /**
+   * Read a project's workspace root by id, deleted projects included.
+   */
+  readonly getProjectWorkspaceById: (
+    projectId: ProjectId,
+  ) => Effect.Effect<Option.Option<ProjectionProjectWorkspace>, ProjectionRepositoryError>;
 
   /**
    * Read the latest orchestration shell snapshot.

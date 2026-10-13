@@ -145,13 +145,18 @@ export const make = Effect.gen(function* () {
    * server never provisioned. Undefined when the project's sandbox image cannot
    * be resolved, since the image digest is part of the label signature that
    * proves the container belongs to this thread.
+   *
+   * Takes only the fields it reads, so callers can pass a detail thread or a
+   * narrow sandbox row (`listSandboxThreads` / `getSandboxThreadById`) without
+   * hydrating the full snapshot.
    */
   const adoptionHint = Effect.fn("SandboxLifecycleReactor.adoptionHint")(function* (
-    thread: OrchestrationThread,
+    thread: Pick<OrchestrationThread, "projectId" | "sandbox" | "sandboxConfig">,
   ) {
     if (thread.sandbox == null) return undefined;
-    const snapshot = yield* snapshots.getSnapshot();
-    const project = snapshot.projects.find((item) => item.id === thread.projectId);
+    const project = Option.getOrUndefined(
+      yield* snapshots.getProjectWorkspaceById(thread.projectId),
+    );
     if (!project) return undefined;
     const projectFile = Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot));
     const image = resolveSandboxImage(projectFile);
@@ -204,8 +209,11 @@ export const make = Effect.gen(function* () {
     const deletedThread =
       detail !== undefined
         ? undefined
-        : (yield* snapshots.getSnapshot()).threads.find(
-            (item) => item.id === threadId && item.deletedAt !== null,
+        : Option.getOrUndefined(
+            Option.filter(
+              yield* snapshots.getSandboxThreadById(threadId),
+              (item) => item.deletedAt !== null,
+            ),
           );
     const thread = detail ?? deletedThread;
     // No thread, or no sandbox projection: `stopping` is a state OF the
@@ -248,8 +256,9 @@ export const make = Effect.gen(function* () {
     if (event.type === "sandbox.provision-requested") {
       const thread = yield* getThread(event.payload.threadId);
       if (!thread) return;
-      const snapshot = yield* snapshots.getSnapshot();
-      const project = snapshot.projects.find((item) => item.id === thread.projectId);
+      const project = Option.getOrUndefined(
+        yield* snapshots.getProjectWorkspaceById(thread.projectId),
+      );
       if (!project)
         return yield* new SandboxManagerError({
           message: `project '${thread.projectId}' was not found`,
@@ -466,8 +475,9 @@ export const make = Effect.gen(function* () {
           });
         }
       }
-      const snapshot = yield* snapshots.getSnapshot();
-      const project = snapshot.projects.find((item) => item.id === parent.projectId);
+      const project = Option.getOrUndefined(
+        yield* snapshots.getProjectWorkspaceById(parent.projectId),
+      );
       if (!project)
         return yield* new SandboxManagerError({
           message: `project '${parent.projectId}' was not found`,
@@ -770,9 +780,12 @@ export const make = Effect.gen(function* () {
   );
 
   const reconcile = Effect.fn("SandboxLifecycleReactor.reconcile")(function* () {
-    const snapshot = yield* snapshots.getSnapshot();
+    // Only threads that record a sandbox matter here, and they are all this
+    // reads -- deleted ones included, since their containers survive deletion.
+    // The full snapshot would decode every message and activity on the server.
+    const sandboxThreads = yield* snapshots.listSandboxThreads();
     for (const runtime of ["docker", "podman"] as const) {
-      const expectedThreads = snapshot.threads.filter(
+      const expectedThreads = sandboxThreads.filter(
         (thread) =>
           thread.sandbox?.runtime === runtime &&
           !["stopped", "expired", "deleted"].includes(thread.sandbox.lifecycle),
@@ -793,7 +806,7 @@ export const make = Effect.gen(function* () {
         .pipe(Effect.option);
       if (Option.isNone(result)) continue;
       for (const threadId of result.value.activeThreadIds) {
-        const thread = snapshot.threads.find((item) => item.id === threadId);
+        const thread = sandboxThreads.find((item) => item.id === threadId);
         desktopGateway.setServiceStatus(
           threadId,
           (thread?.sandbox?.services ?? []).map((service) => ({
@@ -801,7 +814,10 @@ export const make = Effect.gen(function* () {
             healthy: service.status === "healthy",
           })),
         );
-        const project = snapshot.projects.find((item) => item.id === thread?.projectId);
+        const project =
+          thread === undefined
+            ? undefined
+            : Option.getOrUndefined(yield* snapshots.getProjectWorkspaceById(thread.projectId));
         const declaration =
           project === undefined
             ? undefined
@@ -837,12 +853,12 @@ export const make = Effect.gen(function* () {
        * Threads whose work this pass exported.
        *
        * Their projected sandbox now carries a `lastExport` written by the
-       * export's own command -- something `snapshot`, read at the top of this
-       * function and therefore from before the export, cannot know about.
+       * export's own command -- something `sandboxThreads`, read at the top of
+       * this function and therefore from before the export, cannot know about.
        */
       const drainedThreadIds = new Set<string>();
       for (const threadId of result.value.unresumableThreadIds ?? []) {
-        const thread = snapshot.threads.find((item) => item.id === threadId);
+        const thread = sandboxThreads.find((item) => item.id === threadId);
         if (thread?.sandbox == null) continue;
         if (
           yield* exportBranch(thread.id).pipe(
@@ -872,17 +888,18 @@ export const make = Effect.gen(function* () {
           );
       }
       for (const threadId of result.value.missingThreadIds) {
-        const thread = snapshot.threads.find((item) => item.id === threadId);
+        const thread = sandboxThreads.find((item) => item.id === threadId);
         if (!thread?.sandbox) continue;
         // The command below REPLACES the whole sandbox value, so it must be
-        // built on the CURRENT projection, not on the pre-export `snapshot`.
-        // A thread the drain above exported has a fresh `lastExport` that
-        // `snapshot` predates: publishing the stale copy erased the pointer to
-        // that export moments after the container and its volume were already
-        // destroyed, and the next provision then seeded from the project's base
-        // commit instead of the user's exported work. Re-read for exactly the
-        // threads that exported; a deleted thread is invisible to the detail
-        // query, and its recorded sandbox is the only copy there is.
+        // built on the CURRENT projection, not on the pre-export
+        // `sandboxThreads`. A thread the drain above exported has a fresh
+        // `lastExport` that `sandboxThreads` predates: publishing the stale
+        // copy erased the pointer to that export moments after the container
+        // and its volume were already destroyed, and the next provision then
+        // seeded from the project's base commit instead of the user's exported
+        // work. Re-read for exactly the threads that exported; a deleted thread
+        // is invisible to the detail query, and its recorded sandbox is the
+        // only copy there is.
         const sandbox = drainedThreadIds.has(threadId)
           ? ((yield* getThread(thread.id).pipe(Effect.orElseSucceed(() => undefined)))?.sandbox ??
             thread.sandbox)
@@ -914,7 +931,10 @@ export const make = Effect.gen(function* () {
   });
 
   const expire = Effect.fn("SandboxLifecycleReactor.expire")(function* () {
-    const snapshot = yield* snapshots.getSnapshot();
+    // Runs every minute: read only the threads that record a sandbox, never
+    // the full snapshot, which decodes every message and activity on the
+    // server and holds the database connection while it does.
+    const sandboxThreads = yield* snapshots.listSandboxThreads();
     // Piggybacks on the periodic pass rather than owning a timer: exported
     // artifact sets for threads that settled long ago (or were deleted
     // out-of-band) otherwise accumulate forever. Threads whose sandbox is
@@ -925,7 +945,7 @@ export const make = Effect.gen(function* () {
     yield* Effect.suspend(() =>
       runtimes.sweepExpiredArtifacts(
         new Set(
-          snapshot.threads
+          sandboxThreads
             .filter(
               (thread) =>
                 thread.sandbox != null &&
@@ -943,7 +963,7 @@ export const make = Effect.gen(function* () {
     const activeSessions = new Set(
       (yield* providers.listSessions()).map((session) => session.threadId),
     );
-    for (const thread of snapshot.threads) {
+    for (const thread of sandboxThreads) {
       const sandbox = thread.sandbox;
       if (!sandbox || !["ready", "paused"].includes(sandbox.lifecycle)) continue;
       const activeAt = activeSessions.has(thread.id) ? yield* nowIso : sandbox.lastActiveAt;

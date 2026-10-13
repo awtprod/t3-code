@@ -40,6 +40,7 @@ import {
   type OrchestrationEngineShape,
 } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { sandboxSnapshotQueries } from "../testUtils/sandboxSnapshotQueries.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import {
   logCleanupCauseUnlessInterrupted,
@@ -140,9 +141,7 @@ const runReactor = (threads: ReadonlyArray<OrchestrationThread>) =>
           close: () => Effect.void,
         } as unknown as TerminalManager.TerminalManager["Service"]),
       ),
-      Layer.provide(
-        Layer.mock(ProjectionSnapshotQuery)({ getSnapshot: () => Effect.succeed(snapshot) }),
-      ),
+      Layer.provide(Layer.mock(ProjectionSnapshotQuery)({ ...sandboxSnapshotQueries(snapshot) })),
       Layer.provide(
         Layer.succeed(SandboxRuntimeManager, {
           removeThreadArtifacts: (threadId: string) =>
@@ -349,8 +348,10 @@ describe("ThreadDeletionReactor drain", () => {
         // sandbox, so both are inert here.
         Layer.provide(
           Layer.mock(ProjectionSnapshotQuery)({
-            getSnapshot: () =>
-              Effect.succeed({ threads: [], projects: [] } as unknown as OrchestrationReadModel),
+            ...sandboxSnapshotQueries({
+              threads: [],
+              projects: [],
+            } as unknown as OrchestrationReadModel),
           }),
         ),
         Layer.provide(

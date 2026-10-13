@@ -41,6 +41,10 @@ import type {
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  FULL_SNAPSHOT_FORBIDDEN,
+  sandboxSnapshotQueries,
+} from "../testUtils/sandboxSnapshotQueries.ts";
 import { SandboxLifecycleReactor } from "../Services/SandboxLifecycleReactor.ts";
 import { make } from "./SandboxLifecycleReactor.ts";
 
@@ -207,7 +211,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.mock(ProjectionSnapshotQuery)({
-            getSnapshot: () => Effect.succeed(snapshot),
+            ...sandboxSnapshotQueries(snapshot),
             getThreadDetailById: (id) =>
               Effect.succeed(id === threadId ? Option.some(snapshot.threads[0]!) : Option.none()),
           }),
@@ -368,7 +372,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
             ),
             Layer.provide(
               Layer.mock(ProjectionSnapshotQuery)({
-                getSnapshot: () => Effect.succeed(snapshot),
+                ...sandboxSnapshotQueries(snapshot),
                 getThreadDetailById: (id) =>
                   Effect.succeed(
                     id === threadId ? Option.some(snapshot.threads[0]!) : Option.none(),
@@ -506,7 +510,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.mock(ProjectionSnapshotQuery)({
-            getSnapshot: () => Effect.succeed(snapshot),
+            ...sandboxSnapshotQueries(snapshot),
             getThreadDetailById: (id) =>
               Effect.succeed(id === threadId ? Option.some(snapshot.threads[0]!) : Option.none()),
           }),
@@ -625,7 +629,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           ),
           Layer.provide(
             Layer.mock(ProjectionSnapshotQuery)({
-              getSnapshot: () => Effect.succeed(snapshot),
+              ...sandboxSnapshotQueries(snapshot),
               getThreadDetailById: (id) =>
                 Effect.succeed(id === threadId ? Option.some(snapshot.threads[0]!) : Option.none()),
             }),
@@ -724,7 +728,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.mock(ProjectionSnapshotQuery)({
-            getSnapshot: () => Effect.succeed(snapshot),
+            ...sandboxSnapshotQueries(snapshot),
             getThreadDetailById: (id) =>
               Effect.succeed(id === threadId ? Option.some(sandboxThread) : Option.none()),
           }),
@@ -822,7 +826,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.mock(ProjectionSnapshotQuery)({
-            getSnapshot: () => Effect.succeed(snapshot),
+            ...sandboxSnapshotQueries(snapshot),
             getThreadDetailById: (id) =>
               Effect.succeed(id === threadId ? Option.some(unprovisionedStopping) : Option.none()),
           }),
@@ -935,7 +939,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.mock(ProjectionSnapshotQuery)({
-            getSnapshot: () => Effect.succeed(snapshot),
+            ...sandboxSnapshotQueries(snapshot),
             getThreadDetailById: (id) =>
               Effect.succeed(id === threadId ? Option.some(stoppingThread) : Option.none()),
           }),
@@ -1032,7 +1036,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.mock(ProjectionSnapshotQuery)({
-            getSnapshot: () => Effect.succeed(snapshot),
+            ...sandboxSnapshotQueries(snapshot),
             getThreadDetailById: (id) =>
               Effect.succeed(id === threadId ? Option.some(snapshot.threads[0]!) : Option.none()),
           }),
@@ -1136,8 +1140,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.mock(ProjectionSnapshotQuery)({
-            getSnapshot: () =>
-              Effect.succeed({ ...snapshot, threads: [deletedThread] } as typeof snapshot),
+            ...sandboxSnapshotQueries({ ...snapshot, threads: [deletedThread] } as typeof snapshot),
             // The detail query behaves exactly as production does for a
             // deleted thread: not found.
             getThreadDetailById: () => Effect.succeed(Option.none()),
@@ -1277,11 +1280,10 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           ),
           Layer.provide(
             Layer.mock(ProjectionSnapshotQuery)({
-              getSnapshot: () =>
-                Effect.succeed({
-                  ...snapshot,
-                  threads: [activeThread, backgroundThread, expiredThread, stoppedThread],
-                } as typeof snapshot),
+              ...sandboxSnapshotQueries({
+                ...snapshot,
+                threads: [activeThread, backgroundThread, expiredThread, stoppedThread],
+              } as typeof snapshot),
               getThreadDetailById: () => Effect.succeed(Option.none()),
             }),
           ),
@@ -1318,6 +1320,113 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           .filter((command) => command.type === "sandbox.expire")
           .map((command) => command.threadId);
         expect(expiryTargets).toEqual([expiredThread.id]);
+      }),
+  );
+
+  it.effect(
+    "reconcile and the periodic expiry pass read only sandbox rows, never the full snapshot",
+    () =>
+      Effect.gen(function* () {
+        // `getSnapshot` decodes every message and activity on the server and
+        // holds its only database connection while it does; the expiry pass
+        // runs every minute. Both sweeps must make do with the narrow sandbox
+        // rows -- including a deleted thread's, whose container outlives it.
+        let fullSnapshotReads = 0;
+        let sandboxRowReads = 0;
+        const reconciled: Array<ReadonlySet<string>> = [];
+        const swept = yield* Deferred.make<ReadonlySet<string>>();
+        const sampled = yield* Deferred.make<string>();
+        const readySandbox = {
+          lifecycle: "ready" as const,
+          runtime: "podman" as const,
+          branch: { branchName: "t3/thread/x", baseCommit: "a".repeat(40) },
+          limits: DEFAULT_SANDBOX_RESOURCE_LIMITS,
+          desktop: { status: "unavailable" as const },
+          services: [],
+          controller: { kind: "none" as const },
+          createdAt: NOW,
+          lastActiveAt: NOW,
+        };
+        const deletedThread = {
+          ...snapshot.threads[0]!,
+          id: ThreadId.make("thread-deleted-sandbox"),
+          deletedAt: NOW,
+          sandbox: readySandbox,
+        };
+        const plainThread = { ...snapshot.threads[0]!, id: ThreadId.make("thread-plain") };
+        const queries = sandboxSnapshotQueries({
+          ...snapshot,
+          threads: [plainThread, deletedThread],
+        } as typeof snapshot);
+        const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+          Layer.provide(NodeServices.layer),
+          Layer.provide(Layer.mock(GitWorkflowService)({})),
+          Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+          Layer.provide(sessionDirectory().layer),
+          Layer.provide(
+            Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
+          ),
+          Layer.provide(
+            Layer.succeed(SandboxRuntimeManager, {
+              reconcile: (_runtime: string, expected: ReadonlySet<string>) =>
+                Effect.sync(() => {
+                  reconciled.push(new Set(expected));
+                  return { activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] };
+                }),
+              sweepExpiredArtifacts: (protectedThreadIds: ReadonlySet<string>) =>
+                Deferred.succeed(swept, protectedThreadIds).pipe(Effect.as(0)),
+              sampleUsage: (_runtime: string, id: string) =>
+                Deferred.succeed(sampled, id).pipe(
+                  Effect.andThen(Effect.fail(new SandboxManagerError({ message: "no container" }))),
+                ),
+            } as never),
+          ),
+          Layer.provide(
+            Layer.mock(ProjectionSnapshotQuery)({
+              ...queries,
+              // Fails the awaited sweep too, so a regression fails fast here
+              // instead of hanging on a deferred the dead pass never resolves.
+              getSnapshot: () =>
+                Effect.suspend(() => {
+                  fullSnapshotReads += 1;
+                  return Deferred.die(swept, FULL_SNAPSHOT_FORBIDDEN).pipe(
+                    Effect.andThen(queries.getSnapshot()),
+                  );
+                }),
+              listSandboxThreads: () =>
+                Effect.suspend(() => {
+                  sandboxRowReads += 1;
+                  return queries.listSandboxThreads();
+                }),
+              getThreadDetailById: () => Effect.succeed(Option.none()),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(OrchestrationEngineService)({
+              dispatch: () => Effect.succeed({ sequence: 1 }),
+              streamDomainEvents: Stream.empty,
+            }),
+          ),
+        );
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const reactor = yield* SandboxLifecycleReactor;
+            yield* reactor.start();
+            const protectedIds = yield* Deferred.await(swept).pipe(Effect.timeout("5 seconds"));
+            expect([...protectedIds]).toEqual([deletedThread.id]);
+            expect(yield* Deferred.await(sampled).pipe(Effect.timeout("5 seconds"))).toBe(
+              deletedThread.id,
+            );
+            yield* reactor.drain;
+          }).pipe(Effect.provide(layer)),
+        );
+
+        // Reconcile still expects the deleted thread's container, and skips
+        // the thread that never had a sandbox.
+        expect(reconciled.map((expected) => [...expected])).toEqual([[], [deletedThread.id]]);
+        expect(sandboxRowReads).toBeGreaterThanOrEqual(2);
+        expect(fullSnapshotReads).toBe(0);
       }),
   );
 
@@ -1420,7 +1529,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.mock(ProjectionSnapshotQuery)({
-            getSnapshot: () => Effect.succeed(workerReadModel),
+            ...sandboxSnapshotQueries(workerReadModel),
             getThreadDetailById: (id) =>
               Effect.succeed(
                 id === threadId
@@ -1569,8 +1678,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
       ),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery)({
-          getSnapshot: () =>
-            Effect.succeed({ ...snapshot, threads: [sandboxThread] } as typeof snapshot),
+          ...sandboxSnapshotQueries({ ...snapshot, threads: [sandboxThread] } as typeof snapshot),
           getThreadDetailById: (id) =>
             Effect.succeed(id === threadId ? Option.some(sandboxThread) : Option.none()),
         }),

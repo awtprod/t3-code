@@ -12,6 +12,8 @@ import {
   TurnId,
   ProviderInstanceId,
   OrchestrationMessageContext,
+  DEFAULT_SANDBOX_RESOURCE_LIMITS,
+  SandboxState,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -3797,3 +3799,132 @@ projectionSnapshotLayer("ProjectionSnapshotQuery activities by kind", (it) => {
     }),
   );
 });
+
+it.effect(
+  "reads sandbox threads and project workspaces without hydrating the snapshot, matching it",
+  () => {
+    const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
+      Layer.provide(ThreadBackgroundLiveness.layer),
+      Layer.provide(ThreadPlanProgress.layer),
+      Layer.provide(
+        Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+          resolveRemoteKeys: () => Effect.succeed([]),
+          resolve: () => Effect.succeed(null),
+        }),
+      ),
+      Layer.provideMerge(SqlitePersistenceMemory),
+    );
+    const sandboxOf = (lifecycle: SandboxState["lifecycle"]): SandboxState => ({
+      lifecycle,
+      runtime: "podman",
+      runtimeRef: `t3-sandbox-${lifecycle}`,
+      branch: { branchName: `t3/thread/${lifecycle}`, baseCommit: "a".repeat(40) },
+      limits: DEFAULT_SANDBOX_RESOURCE_LIMITS,
+      desktop: { status: "unavailable" },
+      services: [],
+      controller: { kind: "none" },
+      createdAt: "2026-09-01T00:00:00.000Z",
+      lastActiveAt: "2026-09-01T00:00:00.000Z",
+    });
+    const encodeSandbox = Schema.encodeSync(Schema.fromJsonString(SandboxState));
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      yield* sql`INSERT INTO projection_projects
+        (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at)
+        VALUES
+        ('acme-live', 'Live', '/acme/live', '[]', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', NULL),
+        ('acme-gone', 'Gone', '/acme/gone', '[]', '2026-09-02T00:00:00Z', '2026-09-02T00:00:00Z', '2026-09-03T00:00:00Z')`;
+      const modelSelection = '{"instanceId":"codex","model":"gpt-5.4"}';
+      yield* sql`INSERT INTO projection_threads
+        (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, sandbox_json, created_at, updated_at, deleted_at)
+        VALUES
+        ('t-ready', 'acme-live', 'Ready', ${modelSelection}, 'full-access', 'default', ${encodeSandbox(sandboxOf("ready"))}, '2026-09-01T00:00:01Z', '2026-09-01T00:00:01Z', NULL),
+        ('t-plain', 'acme-live', 'Plain', ${modelSelection}, 'full-access', 'default', NULL, '2026-09-01T00:00:02Z', '2026-09-01T00:00:02Z', NULL),
+        ('t-deleted', 'acme-gone', 'Deleted', ${modelSelection}, 'full-access', 'default', ${encodeSandbox(sandboxOf("paused"))}, '2026-09-01T00:00:03Z', '2026-09-01T00:00:03Z', '2026-09-04T00:00:00Z'),
+        ('t-deleted-plain', 'acme-gone', 'Deleted plain', ${modelSelection}, 'full-access', 'default', NULL, '2026-09-01T00:00:04Z', '2026-09-01T00:00:04Z', '2026-09-04T00:00:00Z')`;
+      // Payload the narrow reads must never touch: invalid JSON here would
+      // fail them if they decoded activities.
+      yield* sql`INSERT INTO projection_thread_activities
+        (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at)
+        VALUES ('a1', 't-ready', NULL, 'info', 'note', 'Note', 'not-json', '2026-09-01T00:00:05Z')`;
+
+      const counter = makeSqlStatementCounter();
+      const sandboxThreads = yield* query
+        .listSandboxThreads()
+        .pipe(Effect.withTracer(counter.tracer));
+      assert.strictEqual(counter.count(), 1);
+      // Deleted threads with a sandbox are included, threads without one are
+      // not, and the sandbox JSON is decoded -- in snapshot thread order.
+      assert.deepStrictEqual(sandboxThreads, [
+        {
+          id: ThreadId.make("t-ready"),
+          projectId: asProjectId("acme-live"),
+          deletedAt: null,
+          sandbox: sandboxOf("ready"),
+        },
+        {
+          id: ThreadId.make("t-deleted"),
+          projectId: asProjectId("acme-gone"),
+          deletedAt: "2026-09-04T00:00:00Z",
+          sandbox: sandboxOf("paused"),
+        },
+      ]);
+      assert.deepStrictEqual(
+        yield* query.getSandboxThreadById(ThreadId.make("t-deleted")),
+        Option.some(sandboxThreads[1]!),
+      );
+      for (const threadId of ["t-plain", "t-deleted-plain", "t-missing"]) {
+        assert.deepStrictEqual(
+          yield* query.getSandboxThreadById(ThreadId.make(threadId)),
+          Option.none(),
+        );
+      }
+      // Deleted projects resolve, as they did through `getSnapshot().projects`.
+      assert.deepStrictEqual(
+        yield* query.getProjectWorkspaceById(asProjectId("acme-gone")),
+        Option.some({
+          id: asProjectId("acme-gone"),
+          workspaceRoot: "/acme/gone",
+          deletedAt: "2026-09-03T00:00:00Z",
+        }),
+      );
+      assert.deepStrictEqual(
+        yield* query.getProjectWorkspaceById(asProjectId("acme-missing")),
+        Option.none(),
+      );
+
+      // The full snapshot does decode that payload, and fails on it.
+      assert.strictEqual((yield* Effect.exit(query.getSnapshot()))._tag, "Failure");
+      // Parity with the full snapshot these reads replace, once its activity
+      // payload decodes again.
+      yield* sql`UPDATE projection_thread_activities SET payload_json = '{}'`;
+      const snapshot = yield* query.getSnapshot();
+      assert.deepStrictEqual(
+        sandboxThreads,
+        snapshot.threads.flatMap((thread) =>
+          thread.sandbox == null
+            ? []
+            : [
+                {
+                  id: thread.id,
+                  projectId: thread.projectId,
+                  deletedAt: thread.deletedAt,
+                  sandbox: thread.sandbox,
+                },
+              ],
+        ),
+      );
+      for (const project of snapshot.projects) {
+        assert.deepStrictEqual(
+          yield* query.getProjectWorkspaceById(project.id),
+          Option.some({
+            id: project.id,
+            workspaceRoot: project.workspaceRoot,
+            deletedAt: project.deletedAt,
+          }),
+        );
+      }
+    }).pipe(Effect.provide(layer));
+  },
+);
