@@ -1361,6 +1361,22 @@ export function createServerEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.threadId, input.turnItemId]),
       },
     }),
+    scanHostDiskUsage: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:scan-host-disk-usage",
+      tag: WS_METHODS.serverScanHostDiskUsage,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId }) => environmentId,
+      },
+    }),
+    reclaimHostDiskArtifacts: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:reclaim-host-disk-artifacts",
+      tag: WS_METHODS.serverReclaimHostDiskArtifacts,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input]),
+      },
+    }),
     refreshUsageRates: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:refresh-usage-rates",
       tag: WS_METHODS.serverRefreshUsageRates,
