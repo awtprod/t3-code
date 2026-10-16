@@ -51,6 +51,20 @@ const WINDOWS_SHELL_META_CHARS = /([()\][%!^"`<>&|;, *?])/g;
  * cmd.exe parsing and the target program's `CommandLineToArgvW` parsing.
  * Mirrors cross-spawn's argument escaping.
  */
+/**
+ * Escapes the executable for `cmd.exe` shell mode. Unlike an argument, the
+ * command must NOT be wrapped in quotes: cmd strips the outer quote pair added
+ * by Node's `shell: true` handling, then treats any remaining `^"` as a literal
+ * quote character rather than a grouping delimiter. Quoting here would leave
+ * cmd searching for a program whose name literally starts with `"`. Escaping
+ * the meta characters alone is enough, since an escaped space does not split
+ * the token. Mirrors cross-spawn's `escapeCommand`. (Command Center fork fix,
+ * kept over upstream's quoted executable; see packages/shared/src/shell.test.ts.)
+ */
+function escapeWindowsShellCommand(command: string): string {
+  return command.replace(WINDOWS_SHELL_META_CHARS, "^$1");
+}
+
 function escapeWindowsShellArg(arg: string): string {
   // Double up backslashes that precede a double quote, then escape the quote
   // itself so it survives CommandLineToArgvW.
@@ -765,7 +779,9 @@ export const resolveSpawnCommand = Effect.fnUntraced(function* (
   // passing args with `shell: true` prints DEP0190. Build the same escaped line
   // here and pass no args.
   return {
-    command: [resolvedCommand, ...args].map(escapeWindowsShellArg).join(" "),
+    command: [escapeWindowsShellCommand(resolvedCommand), ...args.map(escapeWindowsShellArg)].join(
+      " ",
+    ),
     args: [],
     shell: true,
   };

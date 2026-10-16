@@ -1162,6 +1162,35 @@ export const DesktopPreviewRecordingSaveInputSchema = Schema.Struct({
 export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
+// Only the transitions a user needs to act on or come back for: these are the
+// moments a thread stops making progress without the user, so app-lifecycle
+// noise (updates, connection changes) never lands here.
+export const DesktopNotificationKindSchema = Schema.Literals([
+  "approval-needed",
+  "input-needed",
+  "completed",
+  "failed",
+]);
+export type DesktopNotificationKind = typeof DesktopNotificationKindSchema.Type;
+
+// Title and body are composed in the renderer and shipped as data: only it
+// has the project title, thread title, and awareness headline. The main
+// process never sees a phase and never formats copy.
+export const DesktopNotificationInputSchema = Schema.Struct({
+  kind: DesktopNotificationKindSchema,
+  title: Schema.String,
+  body: Schema.String,
+  silent: Schema.Boolean,
+  threadRef: ScopedThreadRef,
+});
+export type DesktopNotificationInput = typeof DesktopNotificationInputSchema.Type;
+
+// Echoed back to the renderer when the user clicks a notification.
+export const DesktopNotificationActivationSchema = Schema.Struct({
+  threadRef: ScopedThreadRef,
+});
+export type DesktopNotificationActivation = typeof DesktopNotificationActivationSchema.Type;
+
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   /** The desktop client's OS platform, read from Electron's preload process. */

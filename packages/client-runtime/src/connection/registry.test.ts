@@ -1642,7 +1642,7 @@ describe("EnvironmentRegistry", () => {
               credential: repairedCredential,
             }),
           );
-          expect((yield* Ref.get(harness.storedTargets)).size).toBe(1);
+          expect((yield* Ref.get(harness.storedTargets)).length).toBe(1);
           expect((yield* Ref.get(harness.storedProfiles)).size).toBe(1);
           expect(
             (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
@@ -1676,13 +1676,17 @@ describe("EnvironmentRegistry", () => {
                 ?.target,
             ).toEqual(remotePrimary);
             expect(
-              (yield* Ref.get(harness.storedTargets)).get(remotePrimary.environmentId),
+              (yield* Ref.get(harness.storedTargets)).find(
+                (target) => target.environmentId === remotePrimary.environmentId,
+              ),
             ).toEqual(BEARER_TARGET);
             expect(
               (yield* Ref.get(harness.storedProfiles)).get(BEARER_TARGET.connectionId),
             ).toEqual(BEARER_PROFILE);
             expect(
-              (yield* Ref.get(harness.storedTargets)).get(BEARER_TARGET.environmentId),
+              (yield* Ref.get(harness.storedTargets)).find(
+                (target) => target.environmentId === BEARER_TARGET.environmentId,
+              ),
             ).toEqual(BEARER_TARGET);
             expect(
               (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
@@ -1720,9 +1724,11 @@ describe("EnvironmentRegistry", () => {
             (state) => state.phase === "connected",
           );
           yield* registry.remove(BEARER_TARGET.environmentId);
-          expect((yield* Ref.get(harness.storedTargets)).has(BEARER_TARGET.environmentId)).toBe(
-            false,
-          );
+          expect(
+            (yield* Ref.get(harness.storedTargets)).some(
+              (target) => target.environmentId === BEARER_TARGET.environmentId,
+            ),
+          ).toBe(false);
           expect((yield* Ref.get(harness.storedProfiles)).has(BEARER_TARGET.connectionId)).toBe(
             false,
           );
@@ -1858,9 +1864,11 @@ describe("EnvironmentRegistry", () => {
         expect(
           (yield* SubscriptionRef.get(registry.entries)).get(remotePrimary.environmentId)?.target,
         ).toEqual(remotePrimary);
-        expect((yield* Ref.get(harness.storedTargets)).get(remotePrimary.environmentId)).toEqual(
-          BEARER_TARGET,
-        );
+        expect(
+          (yield* Ref.get(harness.storedTargets)).find(
+            (target) => target.environmentId === remotePrimary.environmentId,
+          ),
+        ).toEqual(BEARER_TARGET);
         expect(yield* permissions.get(primaryEntry)).toBe("read-write");
       }).pipe(
         Effect.provide(harness.layer),
@@ -1935,7 +1943,7 @@ describe("EnvironmentRegistry", () => {
         expect((yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId)).toEqual(
           platformCredential,
         );
-        expect((yield* Ref.get(harness.storedTargets)).size).toBe(0);
+        expect((yield* Ref.get(harness.storedTargets)).length).toBe(0);
         expect(
           (yield* SubscriptionRef.get(registry.entries)).get(BEARER_TARGET.environmentId)?.target,
         ).toEqual(BEARER_TARGET);
@@ -1958,9 +1966,11 @@ describe("EnvironmentRegistry", () => {
             }),
           }),
         );
-        expect((yield* Ref.get(harness.storedTargets)).has(SSH_CONNECTION.environmentId)).toBe(
-          false,
-        );
+        expect(
+          (yield* Ref.get(harness.storedTargets)).some(
+            (target) => target.environmentId === SSH_CONNECTION.environmentId,
+          ),
+        ).toBe(false);
         expect((yield* Ref.get(harness.storedProfiles)).has(SSH_CONNECTION.connectionId)).toBe(
           false,
         );

@@ -32,6 +32,8 @@ import {
 import { ModelSelection } from "./modelSelection.ts";
 import { ProjectScript, type ProjectMutation } from "./project.ts";
 import { DEFAULT_RUNTIME_MODE, RuntimeMode } from "./providerPolicy.ts";
+import { UsagePricingOverride } from "./usage.ts";
+import { EfficiencySettings } from "./efficiency.ts";
 import { BrowserProfile, BrowserProfileId, DEFAULT_BROWSER_PROFILE_ID } from "./browserProfile.ts";
 import {
   DEFAULT_PREVIEW_APPEARANCE,
@@ -1446,6 +1448,18 @@ export const ServerSettings = Schema.Struct({
   ),
   databaseConnections: DatabaseConnections.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  // Command Center token-efficiency routing. Defaults keep routing off.
+  efficiency: EfficiencySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  usagePricingOverrides: Schema.Array(UsagePricingOverride).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  // Days a managed worktree may sit idle (no thread activity, no running
+  // terminal) before its build artifacts are pruned and, after a further
+  // fixed minimum, the worktree itself is removed — only when it has no
+  // local changes and no unpushed commits. `null` disables the sweep.
+  worktreeCleanupAfterDays: Schema.NullOr(PositiveInt).pipe(
+    Schema.withDecodingDefault(Effect.succeed(7)),
+  ),
   /** Keyed by source control host kind, such as `gitcafe`; see `SourceControlHostSettings`. */
   sourceControlHosts: Schema.Record(Schema.String, SourceControlHostSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1582,6 +1596,7 @@ export class ServerSettingsError extends Schema.TaggedError<ServerSettingsError>
     operation: ServerSettingsOperation,
     providerInstanceId: Schema.optional(Schema.String),
     environmentVariable: Schema.optional(Schema.String),
+    databaseConnectionId: Schema.optional(Schema.String),
     // Validation failures (e.g. a create colliding with an existing
     // instance) originate without an upstream defect.
     cause: Schema.optional(Schema.Defect()),

@@ -3,14 +3,14 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Base64Url from "effect/encoding/Base64Url";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClient from "effect/http/HttpClient";
 
 import { renewRemoteBearerSession } from "../authorization/remote.ts";
 import * as EnvironmentRegistry from "./registry.ts";
@@ -48,7 +48,7 @@ export function readSessionTokenExpiry(token: string): number | null {
   if (separator <= 0) {
     return null;
   }
-  const claims = Encoding.decodeBase64UrlString(token.slice(0, separator));
+  const claims = Base64Url.decodeString(token.slice(0, separator));
   if (Result.isFailure(claims)) {
     return null;
   }

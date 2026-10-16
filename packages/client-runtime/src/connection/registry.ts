@@ -675,7 +675,6 @@ export const make = Effect.gen(function* () {
           if (
             persisted ||
             (previous !== undefined &&
-              !previousIsPreservedBearer &&
               gitHubRoutingConnectionKey(previous) !== gitHubRoutingConnectionKey(entry))
           ) {
             const revoked = yield* githubRoutingPermissions.forget(target.environmentId).pipe(
@@ -1087,7 +1086,14 @@ export const make = Effect.gen(function* () {
   const readSavedBearer = Effect.fn("EnvironmentRegistry.readSavedBearer")(function* (
     environmentId: EnvironmentId,
   ) {
-    const target = (yield* Ref.get(persistedTargetsByEnvironment)).get(environmentId);
+    // Any of the environment's routes may hold the saved bearer; the preferred
+    // route can be the platform primary while a bearer route is kept for recovery.
+    const entry = (yield* SubscriptionRef.get(entries)).get(environmentId);
+    const target = entry
+      ? connectionRoutes(entry)
+          .map((route) => route.target)
+          .find((candidate) => candidate._tag === "BearerConnectionTarget")
+      : undefined;
     if (target?._tag !== "BearerConnectionTarget") {
       return Option.none();
     }
@@ -1156,12 +1162,15 @@ export const make = Effect.gen(function* () {
           ) {
             return false;
           }
+          // Re-saving the credential keeps the environment's route list as it is.
+          const current = (yield* SubscriptionRef.get(entries)).get(input.environmentId);
           yield* registrations.register(
             new BearerConnectionRegistration({
               target: saved.value.target,
               profile: saved.value.profile,
               credential: new BearerConnectionCredential({ token: input.token }),
             }),
+            current ? persistedRoutes(current) : [saved.value.target],
           );
           return true;
         }),

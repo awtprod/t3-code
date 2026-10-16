@@ -172,6 +172,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server understands regenerateTitle on thread.meta.update. Absent on
       older servers, so clients hide the action instead of sending it. */
   threadTitleRegeneration: Schema.optionalKey(Schema.Boolean),
+  /** Server can browse a configured remote Windows host over SSH
+      (cc.windowsMedia.roots / cc.windowsMedia.list) and accepts windows-file
+      reference attachments. Absent on servers without the picker backend. */
+  windowsMedia: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.visit / thread.mark-unread commands and
       projects lastVisitedAt on thread shells. Same version-skew contract as
       threadSettlement: clients keep their local visited state against

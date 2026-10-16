@@ -2,7 +2,7 @@ import {
   COMMAND_CENTER_WS_METHODS,
   COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
 } from "@t3tools/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import {

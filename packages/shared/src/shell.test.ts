@@ -704,6 +704,10 @@ effectIt.layer(NodeServices.layer)("resolveSpawnCommand", (it) => {
         ),
       );
 
+      // Command Center: the executable is escaped but never quoted (see
+      // escapeWindowsShellCommand), so the expected line drops its `^"` pair.
+      const unquoteExecutable = (part: string, index: number) =>
+        index === 0 ? part.slice(2, -2) : part;
       // No args alongside `shell: true`: Node prints DEP0190 for that pairing.
       expect(command).toEqual({
         command: [
@@ -715,7 +719,9 @@ effectIt.layer(NodeServices.layer)("resolveSpawnCommand", (it) => {
           String.raw`^"C:\dir^ with^ space\\^"`,
           String.raw`^"slash\\\^"quote^"`,
           String.raw`^"x^|y^<z^>^^^"`,
-        ].join(" "),
+        ]
+          .map(unquoteExecutable)
+          .join(" "),
         args: [],
         shell: true,
       });
@@ -729,10 +735,11 @@ effectIt.layer(NodeServices.layer)("resolveSpawnCommand", (it) => {
     Effect.gen(function* () {
       const command = yield* resolveSpawnCommand(
         "npm",
-        ["install", "-g", "@moonshot-ai/kimi-code@latest"],
+        ["install", "-g", "@acme/agent-cli@latest"],
         { env: { PATH: "", PATHEXT: ".COM;.EXE;.BAT;.CMD" } },
       ).pipe(
-        Effect.provideService(HostProcessPlatform, "win32"),
+        Effect.provideService(HostProcess.Platform, "win32"),
+        Effect.provideService(CommandResolutionCache, new Map()),
         Effect.provideService(
           SpawnExecutableResolution,
           () => "C:\\Users\\tester\\AppData\\Roaming\\npm\\npm.cmd",
@@ -740,8 +747,11 @@ effectIt.layer(NodeServices.layer)("resolveSpawnCommand", (it) => {
       );
 
       expect(command.shell).toBe(true);
-      expect(command.command).toBe("C:\\Users\\tester\\AppData\\Roaming\\npm\\npm.cmd");
-      expect(command.command).not.toContain('"');
+      // The executable leads the one cmd.exe line unquoted; arguments stay quoted.
+      expect(command.command.split(" ")[0]).toBe(
+        "C:\\Users\\tester\\AppData\\Roaming\\npm\\npm.cmd",
+      );
+      expect(command.command.split(" ")[0]).not.toContain('"');
     }),
   );
 
