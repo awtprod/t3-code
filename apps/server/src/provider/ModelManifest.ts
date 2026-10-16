@@ -144,6 +144,10 @@ export function resolveProviderCatalog(
   const catalog = manifest.providers?.[driverKind];
   if (!catalog) return null;
 
+  // `currentModels` is the fleet's current list per driver. A catalog entry it
+  // names is current even when the catalog itself marks it legacy, so models
+  // the fleet still runs as defaults stay in the picker.
+  const currentSlugs = new Set(manifest.currentModels[driverKind] ?? []);
   const seen = new Set<string>();
   const models: Array<ModelCatalog.ProviderCatalogModel> = [];
   for (const entry of catalog.models) {
@@ -160,7 +164,7 @@ export function resolveProviderCatalog(
       ...(entry.subProvider ? { subProvider: entry.subProvider } : {}),
       ...(entry.aliases ? { aliases: entry.aliases } : {}),
       ...(entry.badge ? { badge: entry.badge } : {}),
-      status: entry.status,
+      status: currentSlugs.has(entry.slug) ? "current" : entry.status,
       capabilities: profile?.capabilities ?? null,
       adapter: entry.adapter,
       profileAdapter: profile?.adapter,
