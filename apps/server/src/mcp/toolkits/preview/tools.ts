@@ -32,6 +32,7 @@ import { Tool, Toolkit } from "effect/ai";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
+import { requireCapability } from "../../ToolCapability.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 
@@ -50,30 +51,40 @@ const PreviewActionResult = Schema.Struct(presentationFields).annotate({
   description: "The preview action completed successfully.",
 });
 
+/**
+ * Every preview tool requires the `preview` capability, so `tools/list` hides
+ * the whole toolkit from credentials minted without browser access (Command
+ * Center scoped threads, threads with browser tools withheld). The call path
+ * is gated again in the handlers; this only keeps the tools out of view.
+ */
+const previewTool = <T extends Tool.Any>(tool: T): T => requireCapability(tool, "preview");
+
 /** Drives the real browser and can destroy page state. */
 const browserTool = <T extends Tool.Any>(tool: T): T =>
-  tool.annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, true) as T;
+  previewTool(tool).annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, true) as T;
 
 /** Same open-world browser access, but the action does not destroy page state. */
 const safeBrowserTool = <T extends Tool.Any>(tool: T): T =>
-  tool.annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, false) as T;
+  previewTool(tool).annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, false) as T;
 
 /** A safe browser action that only observes, so it is also repeatable. */
 const readonlyBrowserTool = <T extends Tool.Any>(tool: T): T =>
   safeBrowserTool(tool).annotate(Tool.Readonly, true).annotate(Tool.Idempotent, true) as T;
 
-const PreviewStatusTool = Tool.make("preview_status", {
-  description:
-    "Report whether a collaborative browser tab is automation-capable, including its control owner, pending dialog, URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Server hosts also list every tab in the thread (tabs) with its owner, including tabs the user opened, and the browser profiles preview_open accepts. You can read any listed tab; act only on your own tabs, or on an unclaimed tab while no human controls it.",
-  parameters: PreviewAutomationTabTargetInput,
-  success: PreviewAutomationStatus,
-  failure: PreviewToolFailure,
-  dependencies,
-})
-  .annotate(Tool.Title, "Get preview status")
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+const PreviewStatusTool = previewTool(
+  Tool.make("preview_status", {
+    description:
+      "Report whether a collaborative browser tab is automation-capable, including its control owner, pending dialog, URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Server hosts also list every tab in the thread (tabs) with its owner, including tabs the user opened, and the browser profiles preview_open accepts. You can read any listed tab; act only on your own tabs, or on an unclaimed tab while no human controls it.",
+    parameters: PreviewAutomationTabTargetInput,
+    success: PreviewAutomationStatus,
+    failure: PreviewToolFailure,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Get preview status")
+    .annotate(Tool.Readonly, true)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true),
+);
 
 const PreviewOpenTool = browserTool(
   Tool.make("preview_open", {
