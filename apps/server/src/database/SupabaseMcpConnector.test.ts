@@ -151,7 +151,6 @@ it.effect("proxies the named database's tools without returning the access token
       readOnly: true,
     });
     expect(named).toMatchObject({ connectionId: prodId, database: "prod", readOnly: false });
-    // @effect-diagnostics-next-line preferSchemaOverJson:off
     expect(JSON.stringify([defaulted, named])).not.toContain("sbp-secret");
   }),
 );

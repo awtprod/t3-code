@@ -1299,7 +1299,7 @@ export const make = Effect.gen(function* () {
         clientSessions.map((clientSession): AuthClientSession => ({
           ...clientSession,
           ...authScopeResponse(clientSession.scopes),
-          current: clientSession.sessionId === currentSessionId,
+          current: current.has(clientSession.sessionId),
         })),
       ),
       Effect.withSpan("EnvironmentAuth.listClientSessions"),

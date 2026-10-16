@@ -1,6 +1,5 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
-import * as ByteSize from "effect/ByteSize";
 import * as Cache from "effect/Cache";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -193,6 +192,7 @@ const PR_LOOKUP_CACHE_CAPACITY = 2_048;
 // Matches PR_LOOKUP_NO_OPEN_PR_CACHE_TTL, the delay already accepted for a
 // change made outside the app.
 const PR_LOOKUP_GIT_STATE_TTL = Duration.minutes(5);
+const MAX_REPOSITORY_INSTRUCTION_BYTES = 20_000;
 const isSourceControlProviderError = Schema.is(SourceControlProviderError);
 
 type RepositoryInstructionFile = "AGENTS.md" | "CLAUDE.md";
@@ -798,22 +798,16 @@ export const make = Effect.gen(function* () {
     return yield* gitCore.createWorktree(input, { worktreesDirectory, ...options, submodules });
   });
 
-  const readRepositoryInstructions = (cwd: string, fileName: string) =>
-    Effect.gen(function* () {
-      const root = yield* fileSystem.realPath(cwd);
-      const instructionPath = yield* fileSystem.realPath(path.join(root, fileName));
-      // A drive root such as `D:\` already ends with a separator, so compare
-      // with path.relative instead of a `${root}${sep}` prefix.
-      const relative = path.relative(root, instructionPath);
-      if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
-        return "";
-      }
-      const info = yield* fileSystem.stat(instructionPath);
-      if (info.type !== "File" || info.size > ByteSize.bytes(20_000)) {
-        return "";
-      }
-      return (yield* fileSystem.readFileString(instructionPath)).trim();
-    }).pipe(Effect.orElseSucceed(() => ""));
+  const readRepositoryInstructions = (root: string | null, fileName: RepositoryInstructionFile) => {
+    if (root === null) return "";
+    // Only direct, regular root files are instructions. Symlinked entries are
+    // ignored even when their target remains inside the repository; the file
+    // is opened once and read through the same descriptor it was checked on.
+    return (
+      readThemeFileGuarded(path.join(root, fileName), MAX_REPOSITORY_INSTRUCTION_BYTES)?.trim() ??
+      ""
+    );
+  };
 
   const readRecentCommitSubjects = (cwd: string) =>
     gitCore
@@ -848,7 +842,8 @@ export const make = Effect.gen(function* () {
           );
         case "repo_conventions": {
           const subjects = yield* readRecentCommitSubjects(cwd);
-          const agentInstructions = yield* readRepositoryInstructions(cwd, "AGENTS.md");
+          const root = yield* fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => null));
+          const agentInstructions = readRepositoryInstructions(root, "AGENTS.md");
           const isClaudeWriter =
             settings.modelSelection.instanceId === "claudeAgent" ||
             (yield* providerRegistry.getProviders).some(
@@ -857,7 +852,7 @@ export const make = Effect.gen(function* () {
                 provider.driver === "claudeAgent",
             );
           const claudeInstructions = isClaudeWriter
-            ? yield* readRepositoryInstructions(cwd, "CLAUDE.md")
+            ? readRepositoryInstructions(root, "CLAUDE.md")
             : "";
           const examples = [
             ...(subjects.length > 0

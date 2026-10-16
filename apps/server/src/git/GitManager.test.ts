@@ -24,7 +24,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 import { ChildProcessSpawner } from "effect/process";
-import { expect } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 import type {
   ChangeRequest,
   GitActionProgressEvent,
@@ -74,6 +74,12 @@ import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.t
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitManager from "./GitManager.ts";
+
+const gitSubcommandArgs = (args: ReadonlyArray<string>): ReadonlyArray<string> => {
+  let index = 0;
+  while (args[index] === "-c") index += 2;
+  return args.slice(index);
+};
 
 const instructionReadSwap = vi.hoisted(() => ({
   targetPath: null as string | null,
@@ -384,6 +390,8 @@ function createTextGeneration(
         title: "Update workflow",
       }),
     generateReviewGuide: () => Effect.succeed({ stops: [] }),
+    generateAutomationSchedule: () =>
+      Effect.die("generateAutomationSchedule stub not configured for this test"),
     ...overrides,
   };
 
@@ -433,6 +441,7 @@ function createTextGeneration(
         ),
       ),
     generateReviewGuide: (input) => implementation.generateReviewGuide(input),
+    generateAutomationSchedule: (input) => implementation.generateAutomationSchedule(input),
   };
 }
 
@@ -799,10 +808,12 @@ function makeManager(input?: {
           const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
           return ChildProcessSpawner.make((command) => {
             // On Windows the driver starts git by its full path to git.exe.
+            // Command Center: host Git runs as `git -c <hardened config>... <subcommand>`
+            // (HostGitSecurity), so watchers see the subcommand after the `-c` pairs.
             const args =
               command._tag === "StandardCommand" &&
               NodePath.parse(command.command).name.toLowerCase() === "git"
-                ? command.args
+                ? gitSubcommandArgs(command.args)
                 : null;
             if (args !== null) gitCommands?.push(args.join(" "));
             if (args === null || gitSpawnGate === undefined || !gitSpawnGate.matches(args)) {
@@ -3843,6 +3854,120 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         changeRequestInstructions: `Follow the repository's established change request title and body style when examples are available.\n\nLocal AGENTS.md:\n${agentInstructions}\n\nLocal CLAUDE.md:\n${claudeInstructions}`,
         inferRepositoryConventions: true,
       });
+    }),
+  );
+
+  it.effect("ignores oversized and symlinked repository instruction entries", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      const outsideDir = yield* makeTempDir("t3code-git-manager-outside-");
+      yield* runGit(repoDir, ["init", "--initial-branch=main"]);
+      yield* runGit(repoDir, ["config", "user.email", "test@example.com"]);
+      yield* runGit(repoDir, ["config", "user.name", "Test User"]);
+      const oversizedMarker = "OVERSIZED_INSTRUCTION_MARKER";
+      const symlinkMarker = "SYMLINKED_INSTRUCTION_MARKER";
+      NodeFS.writeFileSync(
+        NodePath.join(repoDir, "AGENTS.md"),
+        oversizedMarker.padEnd(20_001, "x"),
+      );
+      const outsideInstructions = NodePath.join(outsideDir, "outside-claude.md");
+      NodeFS.writeFileSync(outsideInstructions, symlinkMarker);
+      NodeFS.symlinkSync(outsideInstructions, NodePath.join(repoDir, "CLAUDE.md"));
+      NodeFS.writeFileSync(NodePath.join(repoDir, "README.md"), "hello\n");
+      yield* runGit(repoDir, ["add", "README.md"]);
+      let generatedPolicy: TextGeneration.CommitMessageGenerationInput["policy"] = undefined;
+
+      const { manager } = yield* makeManager({
+        serverSettings: {
+          textGenerationModelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-sonnet-4-6",
+          },
+          sourceControlWritingStyle: {
+            mode: "repo_conventions" as const,
+          },
+        },
+        textGeneration: {
+          generateCommitMessage: (input) => {
+            generatedPolicy = input.policy;
+            return Effect.succeed({ subject: "Ignore unusable instructions", body: "" });
+          },
+        },
+      });
+      yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "commit",
+      });
+
+      expect(generatedPolicy).toEqual({
+        kind: "repo_conventions",
+        commitInstructions:
+          "Follow the repository's established commit message style when examples are available.",
+        changeRequestInstructions:
+          "Follow the repository's established change request title and body style when examples are available.",
+        inferRepositoryConventions: true,
+      });
+    }),
+  );
+
+  it.effect("does not reopen repository instructions swapped after descriptor metadata", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      const outsideDir = yield* makeTempDir("t3code-git-manager-outside-");
+      yield* runGit(repoDir, ["init", "--initial-branch=main"]);
+      yield* runGit(repoDir, ["config", "user.email", "test@example.com"]);
+      yield* runGit(repoDir, ["config", "user.name", "Test User"]);
+      const instructionPath = NodePath.join(repoDir, "AGENTS.md");
+      const safeInstructions = "SAFE_ORIGINAL_INSTRUCTION_MARKER";
+      const outsideMarker = "OUTSIDE_REPLACEMENT_INSTRUCTION_MARKER";
+      const outsideInstructions = NodePath.join(outsideDir, "oversized-agents.md");
+      NodeFS.writeFileSync(instructionPath, safeInstructions);
+      NodeFS.writeFileSync(outsideInstructions, outsideMarker.padEnd(20_001, "x"));
+      NodeFS.writeFileSync(NodePath.join(repoDir, "README.md"), "hello\n");
+      yield* runGit(repoDir, ["add", "README.md"]);
+      let generatedPolicy: TextGeneration.CommitMessageGenerationInput["policy"] = undefined;
+
+      const { manager } = yield* makeManager({
+        serverSettings: {
+          sourceControlWritingStyle: {
+            mode: "repo_conventions" as const,
+          },
+        },
+        textGeneration: {
+          generateCommitMessage: (input) => {
+            generatedPolicy = input.policy;
+            return Effect.succeed({ subject: "Reject swapped instructions", body: "" });
+          },
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        instructionReadSwap.targetPath = instructionPath;
+        instructionReadSwap.replacementPath = outsideInstructions;
+        yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+        });
+
+        expect(instructionReadSwap.executed).toBe(true);
+        expect(generatedPolicy).toEqual({
+          kind: "repo_conventions",
+          commitInstructions:
+            "Follow the repository's established commit message style when examples are available.",
+          changeRequestInstructions:
+            "Follow the repository's established change request title and body style when examples are available.",
+          inferRepositoryConventions: true,
+        });
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            instructionReadSwap.targetPath = null;
+            instructionReadSwap.replacementPath = null;
+            instructionReadSwap.targetFd = null;
+            instructionReadSwap.executed = false;
+          }),
+        ),
+      );
     }),
   );
 
