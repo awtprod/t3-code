@@ -82,19 +82,24 @@ const backendConfigurationLayer = Layer.succeed(
   } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"],
 );
 
-const bootstrapsLayer = (instances: ReadonlyArray<DesktopBackendManager.DesktopBackendInstance>) =>
-  Layer.merge(DesktopBackendPool.layerTest([...instances]), backendConfigurationLayer);
+const desktopSettingsLayer = (settings: DesktopAppSettings.DesktopSettings) =>
+  Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
+    get: Effect.succeed(settings),
+  } as unknown as DesktopAppSettings.DesktopAppSettings["Service"]);
+
+const bootstrapsLayer = (
+  instances: ReadonlyArray<DesktopBackendManager.DesktopBackendInstance>,
+  settings: DesktopAppSettings.DesktopSettings = DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+) =>
+  Layer.mergeAll(
+    DesktopBackendPool.layerTest([...instances]),
+    backendConfigurationLayer,
+    desktopSettingsLayer(settings),
+  );
 
 describe("getLocalEnvironmentBootstraps", () => {
-  it.effect("synthesizes the remote primary bootstrap from settings with an empty pool", () => {
-    const remoteSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
-      get: Effect.succeed({
-        ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
-        primaryBackendMode: "remote",
-        remoteBackendUrl: "https://remote.example.test/base/",
-      }),
-    } as unknown as DesktopAppSettings.DesktopAppSettings["Service"]);
-    return Effect.gen(function* () {
+  it.effect("synthesizes the remote primary bootstrap from settings with an empty pool", () =>
+    Effect.gen(function* () {
       assert.deepEqual(yield* getLocalEnvironmentBootstraps.handler(), [
         {
           id: "primary",
@@ -104,8 +109,16 @@ describe("getLocalEnvironmentBootstraps", () => {
           wsBaseUrl: "wss://remote.example.test/base/",
         },
       ]);
-    }).pipe(Effect.provide(Layer.merge(DesktopBackendPool.layerTest([]), remoteSettingsLayer)));
-  });
+    }).pipe(
+      Effect.provide(
+        bootstrapsLayer([], {
+          ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+          primaryBackendMode: "remote",
+          remoteBackendUrl: "https://remote.example.test/base/",
+        }),
+      ),
+    ),
+  );
 
   it.effect("publishes the concrete running distro without replacing the stable instance id", () =>
     Effect.gen(function* () {

@@ -23,7 +23,6 @@ import {
   type ProviderInstanceConfig,
   ProviderInstanceId,
   USAGE_CONTRACT_VERSION,
-  type ServerSettings as ServerSettingsDocument,
   type ServerSettings as ServerSettingsValue,
   type UsageProviderKind,
   type UsageSource,
@@ -193,50 +192,7 @@ export class UsageService extends Context.Service<
     /** Refetches the rate table ahead of its TTL. See `ensureRates`. */
     readonly refreshRates: Effect.Effect<UsagePricing>;
   }
->()("@awtprod/command-center/usage/UsageService") {}
-
-type UsageProviderSettings =
-  | { readonly provider: "claude"; readonly config: ClaudeSettings }
-  | { readonly provider: "codex"; readonly config: CodexSettings };
-
-const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
-const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
-
-/** Resolve every enabled provider instance the transcript dashboard supports. */
-export function configuredUsageProviders(
-  settings: ServerSettingsDocument,
-): readonly UsageProviderSettings[] {
-  const configured: UsageProviderSettings[] = [];
-  let hasClaudeInstance = false;
-  let hasCodexInstance = false;
-
-  for (const instance of Object.values(settings.providerInstances)) {
-    if (instance.enabled === false) continue;
-    if (instance.driver === "claudeAgent") {
-      const config = decodeClaudeSettings(instance.config);
-      if (Option.isSome(config) && config.value.homePath.length > 0) {
-        hasClaudeInstance = true;
-        configured.push({ provider: "claude", config: config.value });
-      }
-    } else if (instance.driver === "codex") {
-      const config = decodeCodexSettings(instance.config);
-      if (Option.isSome(config) && config.value.homePath.length > 0) {
-        hasCodexInstance = true;
-        configured.push({ provider: "codex", config: config.value });
-      }
-    }
-  }
-
-  // Preserve mixed and legacy settings during the provider-instance migration.
-  if (!hasClaudeInstance && settings.providers.claudeAgent.enabled) {
-    configured.push({ provider: "claude", config: settings.providers.claudeAgent });
-  }
-  if (!hasCodexInstance && settings.providers.codex.enabled) {
-    configured.push({ provider: "codex", config: settings.providers.codex });
-  }
-
-  return configured;
-}
+>()("t3/usage/UsageService") {}
 
 const EMPTY_PRICING: UsagePricing = {
   status: "unavailable",

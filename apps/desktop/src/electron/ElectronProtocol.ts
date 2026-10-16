@@ -20,55 +20,6 @@ export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
 }
 
-/**
- * Declare the desktop schemes standard *before* Electron is ready.
- *
- * Custom schemes are non-standard by default, and Chromium gives a
- * non-standard scheme an **opaque** origin — every request the renderer makes
- * carries `Origin: null` rather than `commandcenter://app`. That matters beyond
- * tidiness: the server rejects `null` on the control-plane WebSocket upgrade
- * (`apps/server/src/auth/websocketOrigin.ts`), because `null` is also what a
- * sandboxed hostile iframe sends, so it cannot be allow-listed. Without this
- * call the renderer is indistinguishable from that attacker and is refused.
- *
- * Measured with a real Electron renderer on `commandcenter://app`: with
- * `protocol.handle` alone the upgrade arrives as `Origin: null`; adding this
- * registration makes it arrive as `Origin: commandcenter://app`.
- *
- * Must be called at module scope — Electron requires it before the `ready`
- * event, and it throws if called afterwards. Measured on Electron 41.5.0:
- * `ready` fires ~87 ms in, and a caller that awaits any real I/O first is
- * already too late, so this cannot be moved inside a layer.
- *
- * **This is deliberately not the only registration of these schemes.**
- * `@clerk/electron`'s `createClerkBridge` registers whichever scheme is active
- * (see `../app/DesktopClerk.ts`), and Electron documents the API as one-shot.
- * Measured on the pinned version, a second call before `ready` neither throws
- * nor replaces: the privileges *merge*, and `standard: true` wins regardless of
- * which call sets it. Clerk's registration is nonetheless not sufficient on its
- * own — it only covers the active scheme, and it runs during layer construction,
- * which is the window `ready` can beat. The privileges below are kept identical
- * to Clerk's so the merged result does not depend on call order.
- */
-export function registerDesktopSchemesAsPrivileged(): void {
-  Electron.protocol.registerSchemesAsPrivileged(
-    [DESKTOP_PRODUCTION_SCHEME, DESKTOP_DEVELOPMENT_SCHEME].map((scheme) => ({
-      scheme,
-      privileges: {
-        // `standard` is the one that grants a real origin; the rest keep the
-        // renderer's capabilities equivalent to the https page it replaces, and
-        // match `@clerk/electron`'s own registration exactly.
-        standard: true,
-        secure: true,
-        supportFetchAPI: true,
-        corsEnabled: true,
-        allowServiceWorkers: true,
-        stream: true,
-      },
-    })),
-  );
-}
-
 function getDesktopOrigin(isDevelopment: boolean): string {
   return `${getDesktopScheme(isDevelopment)}://${DESKTOP_HOST}`;
 }
@@ -106,10 +57,6 @@ export class ElectronProtocolUnregistrationError extends Schema.TaggedError<Elec
 export type DesktopProtocolRegistrationInput = {
   readonly scheme: string;
   readonly clerkFrontendApiHostname: string | undefined;
-  // Remote-only installers package the renderer but deliberately omit
-  // apps/server. Serve that static client from the desktop protocol while its
-  // Connections records make direct bearer-authenticated requests to servers.
-  readonly staticClientRoot?: string;
 } & ({ readonly targetOrigin: URL } | { readonly assetDirectory: string });
 
 export class ElectronProtocol extends Context.Service<
@@ -310,8 +257,6 @@ const serveDesktopAsset = Effect.fn("desktop.protocol.serveAsset")(function* (
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const registered = yield* Ref.make(false);
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
   const context = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
   const runPromise = Effect.runPromiseWith(context);
 
@@ -325,12 +270,6 @@ export const make = Effect.gen(function* () {
         Effect.try({
           try: () => {
             Electron.protocol.handle(input.scheme, async (request) => {
-              if (input.staticClientRoot) {
-                return withContentSecurityPolicy(
-                  await staticClientResponse(request, input.staticClientRoot, fileSystem, path),
-                  contentSecurityPolicy,
-                );
-              }
               if ("assetDirectory" in input) {
                 return withContentSecurityPolicy(
                   await runPromise(serveDesktopAsset(request, input.assetDirectory)),

@@ -8,6 +8,7 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type ChatAttachment,
+  type EfficiencyTier,
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
@@ -83,7 +84,6 @@ import {
   ComposerInlineControl,
   ComposerToolbarRow,
 } from "../../components/ComposerToolbar";
-import { ControlPillMenu } from "../../components/ControlPill";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import {
   composerStripAttachments,
@@ -205,6 +205,9 @@ export interface ThreadComposerProps {
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateInteractionMode: (interactionMode: ProviderInteractionMode) => void;
+  /** Efficiency routing choice, held in the thread's composer draft. */
+  readonly routingMode: ThreadRoutingMode;
+  readonly efficiencyTier: EfficiencyTier;
   readonly onUpdateEfficiencyRouting: (mode: ThreadRoutingMode, tier: EfficiencyTier) => void;
   readonly onExpandedChange?: (expanded: boolean) => void;
   /** Fires on editor focus/blur; hosts use it to vet stale keyboard state. */
@@ -438,8 +441,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const sendLabel = sendPresentation.label;
   const currentModelSelection = props.selectedThread.modelSelection;
   const currentRuntimeMode = props.selectedThread.runtimeMode;
-  const currentRoutingMode = props.selectedThread.routingMode ?? "manual";
-  const currentEfficiencyTier = props.selectedThread.efficiencyTier ?? "economy";
+  const currentRoutingMode = props.routingMode;
+  const currentEfficiencyTier = props.efficiencyTier;
   const modelUnavailable =
     props.connectionState === "connected" &&
     isModelSelectionUnavailable(
@@ -756,11 +759,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
     }),
     [
-      currentEfficiencyTier,
       currentModelSelection,
       props.reportedModelSelection,
       currentRuntimeMode,
-      props.onUpdateEfficiencyRouting,
       props.onUpdateModelSelection,
       props.onUpdateRuntimeMode,
       providerOptionDescriptors,

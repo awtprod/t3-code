@@ -97,6 +97,7 @@ import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+import { isRemoteOnlyDesktopBuild } from "../app/remoteOnlyBuild.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopBrowserHost from "../preview/DesktopBrowserHost.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
@@ -148,11 +149,10 @@ export class DesktopBackendPool extends Context.Service<
     // Snapshot of all currently-registered instances. Order is unspecified;
     // callers that need a canonical "primary first" view should sort by id.
     readonly list: Effect.Effect<readonly DesktopBackendInstance[]>;
-    // Convenience accessor for the always-registered primary instance.
-    // Currently equivalent to `get(PRIMARY_INSTANCE_ID)` unwrapped, but
-    // exposed as a typed effect so consumers don't have to handle the
-    // Option for the case that's guaranteed to be present.
-    readonly primary: Effect.Effect<DesktopBackendInstance>;
+    // The local primary instance. None in remote-only builds and when the
+    // primary backend is a remote server: those launches deliberately have
+    // no local primary.
+    readonly primary: Effect.Effect<Option.Option<DesktopBackendInstance>>;
     // Build a fresh DesktopBackendInstance from `spec` and add it to the
     // registry. The pool owns the instance's scope: unregister(id) or pool
     // teardown closes it and runs the instance's auto-stop finalizer. The
@@ -218,6 +218,8 @@ export const layer = Layer.effect(
     const electronDialog = yield* ElectronDialog.ElectronDialog;
     const electronApp = yield* ElectronApp.ElectronApp;
     const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
+    const loadedSettings = yield* appSettings.load;
+    const startupPlan = DesktopAppSettings.resolveDesktopStartupPlan(loadedSettings);
     // Anchor the pool's lifetime to its layer scope so registered
     // instance scopes can be forked off it. Without this, instance
     // scopes are orphaned: they only close via explicit unregister()
@@ -247,7 +249,7 @@ export const layer = Layer.effect(
           );
           yield* electronDialog.showErrorBox(
             "WSL backend is still unavailable",
-            `${reason}\n\nT3 Code will use the Windows backend for this launch and retry WSL the next time the app starts.`,
+            `${reason}\n\nCommand Center will use the Windows backend for this launch and retry WSL the next time the app starts.`,
           );
           yield* appSettings.applyWslWindowsFallbackInMemory;
           return true;
@@ -258,7 +260,7 @@ export const layer = Layer.effect(
         });
         yield* electronDialog.showErrorBox(
           "WSL backend couldn't start",
-          `${reason}\n\nFalling back to the Windows backend so T3 Code can open. Re-enable the WSL backend from Settings > Connections once the WSL distro is fixed.`,
+          `${reason}\n\nFalling back to the Windows backend so Command Center can open. Re-enable the WSL backend from Settings > Connections once the WSL distro is fixed.`,
         );
         // Fully disable the WSL backend — both flags, matching the "Switch to
         // Windows" recovery path — so the manager's next restart re-resolves the
@@ -281,48 +283,57 @@ export const layer = Layer.effect(
       },
     );
 
-    const primary = yield* DesktopBackendManager.makeBackendInstance({
-      id: DesktopBackendManager.PRIMARY_INSTANCE_ID,
-      // Keep this lazy. The pool layer is initialized before startup loads
-      // persisted desktop settings, so resolving the primary label here would
-      // permanently capture DEFAULT_DESKTOP_SETTINGS and mislabel WSL-only
-      // primaries as Windows.
-      label: configuration.resolvePrimaryLabel,
-      configResolve: configuration.resolvePrimary,
-      // Window creation errors propagating out of handleBackendReady must
-      // not block the readiness callback (that would prevent restartAttempt
-      // from being reset), so we absorb them here. The window service only
-      // logs on success, so log the failure here before swallowing it —
-      // otherwise a post-readiness window-open failure vanishes silently and
-      // is near-impossible to diagnose in production.
-      onReady: (httpBaseUrl) =>
-        desktopWindow.handleBackendReady(httpBaseUrl).pipe(
-          Effect.catch((error) =>
-            logBackendPoolWarning("failed to open main window after backend readiness", {
-              error: error.message,
+    const primary =
+      isRemoteOnlyDesktopBuild || !startupPlan.constructLocalPrimary
+        ? Option.none<DesktopBackendInstance>()
+        : Option.some(
+            yield* DesktopBackendManager.makeBackendInstance({
+              id: DesktopBackendManager.PRIMARY_INSTANCE_ID,
+              // Keep this lazy. The pool layer is initialized before startup loads
+              // persisted desktop settings, so resolving the primary label here would
+              // permanently capture DEFAULT_DESKTOP_SETTINGS and mislabel WSL-only
+              // primaries as Windows.
+              label: configuration.resolvePrimaryLabel,
+              configResolve: configuration.resolvePrimary,
+              // Window creation errors propagating out of handleBackendReady must
+              // not block the readiness callback (that would prevent restartAttempt
+              // from being reset), so we absorb them here. The window service only
+              // logs on success, so log the failure here before swallowing it —
+              // otherwise a post-readiness window-open failure vanishes silently and
+              // is near-impossible to diagnose in production.
+              onReady: (httpBaseUrl) =>
+                desktopWindow.handleBackendReady(httpBaseUrl).pipe(
+                  Effect.catch((error) =>
+                    logBackendPoolWarning("failed to open main window after backend readiness", {
+                      error: error.message,
+                    }),
+                  ),
+                ),
+              onShutdown: () => desktopWindow.handleBackendNotReady,
+              onPreflightFailed: handlePrimaryPreflightFailure,
+              onStateDirOwned: () =>
+                electronDialog
+                  .showErrorBox(
+                    "This Command Center home is unavailable",
+                    "Another Command Center server, such as the background service, is using this data directory. Stop that server and reopen Command Center, or set a separate COMMAND_CENTER_HOME and pair with the running server.",
+                  )
+                  .pipe(Effect.andThen(electronApp.quit)),
             }),
-          ),
-        ),
-      onShutdown: () => desktopWindow.handleBackendNotReady,
-      onPreflightFailed: handlePrimaryPreflightFailure,
-      onStateDirOwned: () =>
-        electronDialog
-          .showErrorBox(
-            "This T3 home is unavailable",
-            "Another T3 Code server, such as the background service, is using this data directory. Stop that server and reopen T3 Code, or set a separate T3CODE_HOME and pair with the running server.",
-          )
-          .pipe(Effect.andThen(electronApp.quit)),
-    });
+          );
 
     const instancesRef = yield* SynchronizedRef.make<
       ReadonlyMap<BackendInstanceId, RegisteredInstance>
     >(
-      new Map([
-        [
-          DesktopBackendManager.PRIMARY_INSTANCE_ID,
-          { _tag: "Active", instance: primary, scope: Option.none() },
-        ],
-      ]),
+      Option.match(primary, {
+        onNone: () => new Map(),
+        onSome: (instance) =>
+          new Map([
+            [
+              DesktopBackendManager.PRIMARY_INSTANCE_ID,
+              { _tag: "Active" as const, instance, scope: Option.none() },
+            ],
+          ]),
+      }),
     );
 
     const register: DesktopBackendPool["Service"]["register"] = (spec) =>
@@ -466,14 +477,11 @@ export const layerTest = (
 ): Layer.Layer<DesktopBackendPool> =>
   Layer.effect(
     DesktopBackendPool,
-    Effect.gen(function* () {
-      if (instances.length === 0) {
-        return yield* Effect.die("DesktopBackendPool.layerTest requires at least one instance");
-      }
+    Effect.sync(() => {
       const byId = new Map<BackendInstanceId, DesktopBackendInstance>(
         instances.map((instance) => [instance.id, instance] as const),
       );
-      const primary = instances[0]!;
+      const primary = Option.fromNullishOr(instances[0]);
       return DesktopBackendPool.of({
         get: (id) => Effect.succeed(Option.fromNullishOr(byId.get(id))),
         list: Effect.succeed(Array.from(byId.values())),

@@ -15,6 +15,7 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
 import { resolveLinuxDesktopEntryName } from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
+import { isRemoteOnlyDesktopBuild } from "./remoteOnlyBuild.ts";
 import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
 import type { OtlpProtocol } from "@t3tools/shared/observability";
 
@@ -28,6 +29,7 @@ export interface MakeDesktopEnvironmentInput {
   readonly isPackaged: boolean;
   readonly resourcesPath: string;
   readonly runningUnderArm64Translation: boolean;
+  readonly remoteOnlyBuild?: boolean;
 }
 
 export class DesktopEnvironment extends Context.Service<
@@ -54,6 +56,9 @@ export class DesktopEnvironment extends Context.Service<
     readonly browserArtifactsDir: string;
     readonly rootDir: string;
     readonly appRoot: string;
+    // Build-time flag: remote-only installers ship the renderer without
+    // apps/server and never launch a local backend (see remoteOnlyBuild.ts).
+    readonly remoteOnlyBuild: boolean;
     // Root of the tree containing apps/server/dist and node_modules for the
     // backend. Equals appRoot everywhere except packaged Windows, where the
     // server tree ships as the resources/server.asar sidecar (see
@@ -62,7 +67,8 @@ export class DesktopEnvironment extends Context.Service<
     // extracts on demand (see DesktopWslServerTree).
     readonly serverRoot: string;
     readonly backendEntryPath: string;
-    // Built web client the packaged renderer is served from over t3code://app.
+    // Built web client the packaged renderer is served from over commandcenter://app.
+    // Remote-only installers stage it at apps/desktop/client instead.
     readonly clientAssetsDir: string;
     readonly backendCwd: string;
     readonly preloadPath: string;
@@ -86,6 +92,10 @@ export class DesktopEnvironment extends Context.Service<
     readonly linuxWmClass: string;
     readonly linuxApplicationsDir: string;
     readonly appImagePath: Option.Option<string>;
+    // Electron profile directory name under appDataDirectory.
+    readonly userDataDirName: string;
+    // Older profile names reused in place when one already exists.
+    readonly legacyUserDataDirNames: readonly string[];
     readonly defaultDesktopSettings: DesktopAppSettings.DesktopSettings;
     readonly runtimeInfo: DesktopRuntimeInfo;
     readonly resolvePickFolderDefaultPath: (rawOptions: unknown) => Option.Option<string>;
@@ -93,7 +103,7 @@ export class DesktopEnvironment extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopEnvironment") {}
 
-const APP_BASE_NAME = "T3 Code";
+const APP_BASE_NAME = "Command Center";
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
@@ -114,7 +124,9 @@ export function resolveDesktopAppBranding(input: {
   return {
     baseName: APP_BASE_NAME,
     stageLabel,
-    displayName: `${APP_BASE_NAME} (${stageLabel})`,
+    // The stable channel carries the bare product name; only Dev and Nightly
+    // builds are labelled.
+    displayName: stageLabel === "Beta" ? APP_BASE_NAME : `${APP_BASE_NAME} (${stageLabel})`,
   };
 }
 
@@ -153,6 +165,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
 ): Effect.fn.Return<DesktopEnvironment["Service"], Config.ConfigError, Path.Path> {
   const path = yield* Path.Path;
   const config = yield* DesktopConfig.DesktopConfig;
+  const remoteOnlyBuild = input.remoteOnlyBuild ?? isRemoteOnlyDesktopBuild;
   const homeDirectory = input.homeDirectory;
   const devServerUrl = config.devServerUrl;
   const isDevelopment = Option.isSome(devServerUrl);
@@ -168,6 +181,8 @@ const make = Effect.fn("desktop.environment.make")(function* (
     homeDirectory,
     joinPath: path.join,
     t3Home: config.t3Home,
+    commandCenterHome: config.commandCenterHome,
+    remoteOnlyBuild,
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -185,7 +200,20 @@ const make = Effect.fn("desktop.environment.make")(function* (
     isDevelopment,
     joinPath: path.join,
     t3Home: config.t3Home,
+    commandCenterHome: config.commandCenterHome,
   });
+  const userDataDirName = remoteOnlyBuild
+    ? isDevelopment
+      ? "command-center-remote-only-dev"
+      : "command-center-remote-only"
+    : isDevelopment
+      ? "command-center-dev"
+      : "command-center";
+  const legacyUserDataDirNames = remoteOnlyBuild
+    ? []
+    : isDevelopment
+      ? ["t3code-dev", "T3 Code (Dev)"]
+      : ["t3code", "T3 Code (Alpha)", "Command Center (Alpha)"];
   const linuxApplicationsDir = path.join(
     Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
     "applications",
@@ -214,9 +242,12 @@ const make = Effect.fn("desktop.environment.make")(function* (
     browserArtifactsDir: path.join(stateDir, "browser-artifacts"),
     rootDir,
     appRoot,
+    remoteOnlyBuild,
     serverRoot,
     backendEntryPath: path.join(serverRoot, "apps/server/dist/bin.mjs"),
-    clientAssetsDir: path.join(serverRoot, "apps/server/dist/client"),
+    clientAssetsDir: remoteOnlyBuild
+      ? path.join(appRoot, "apps/desktop/client")
+      : path.join(serverRoot, "apps/server/dist/client"),
     backendCwd: input.isPackaged ? homeDirectory : appRoot,
     preloadPath: path.join(input.dirname, "preload.cjs"),
     compileCachePath: path.join(input.dirname, "compileCache.cjs"),
@@ -236,13 +267,22 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
+      remoteOnlyBuild
+        ? "com.awtprod.commandcenter.remote-only"
+        : isDevelopment
+          ? "com.awtprod.commandcenter.dev"
+          : "com.awtprod.commandcenter",
     ),
     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
+    linuxWmClass: isDevelopment ? "commandcenter-dev" : "command-center",
     linuxApplicationsDir,
     appImagePath: config.appImagePath,
-    defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),
+    userDataDirName,
+    legacyUserDataDirNames,
+    defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(
+      input.appVersion,
+      remoteOnlyBuild,
+    ),
     runtimeInfo: resolveDesktopRuntimeInfo({
       platform: input.platform,
       processArch: input.processArch,

@@ -133,7 +133,8 @@ const withIdentity = <A, E, R>(
               input.legacyPathProbeError
                 ? Effect.fail(input.legacyPathProbeError)
                 : Effect.succeed(
-                    input.legacyPathExists === true && /T3 Code \((Alpha|Dev)\)/.test(path),
+                    input.legacyPathExists === true &&
+                      path.endsWith(`/${input.existingLegacyUserDataDirName ?? "t3code"}`),
                   ),
             readFileString: () =>
               Effect.succeed(input.packageJson ?? '{"t3codeCommitHash":"abcdef1234567890"}'),
@@ -148,15 +149,38 @@ const withIdentity = <A, E, R>(
 };
 
 describe("DesktopAppIdentity", () => {
-  it.effect("isolates the V2 profile even when the legacy V1 profile exists", () =>
+  it.effect("uses the Command Center profile when no legacy profile exists", () =>
     withIdentity(
       Effect.gen(function* () {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         const userDataPath = yield* identity.resolveUserDataPath;
 
-        assert.equal(userDataPath, "/Users/alice/Library/Application Support/t3code-v2");
+        assert.equal(userDataPath, "/user-home/Library/Application Support/command-center");
+      }),
+    ),
+  );
+
+  it.effect("reuses the legacy t3code profile in place", () =>
+    withIdentity(
+      Effect.gen(function* () {
+        const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+        const userDataPath = yield* identity.resolveUserDataPath;
+
+        assert.equal(userDataPath, "/user-home/Library/Application Support/t3code");
       }),
       { legacyPathExists: true },
+    ),
+  );
+
+  it.effect("recognizes the older display-name userData path", () =>
+    withIdentity(
+      Effect.gen(function* () {
+        const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+        const userDataPath = yield* identity.resolveUserDataPath;
+
+        assert.equal(userDataPath, "/user-home/Library/Application Support/T3 Code (Alpha)");
+      }),
+      { legacyPathExists: true, existingLegacyUserDataDirName: "T3 Code (Alpha)" },
     ),
   );
 
@@ -166,18 +190,19 @@ describe("DesktopAppIdentity", () => {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         assert.equal(
           yield* identity.resolveUserDataPath,
-          "/Users/alice/Library/Application Support/T3 Code (Dev)",
+          "/user-home/Library/Application Support/T3 Code (Dev)",
         );
       }),
       {
         legacyPathExists: true,
+        existingLegacyUserDataDirName: "T3 Code (Dev)",
         environment: { env: { VITE_DEV_SERVER_URL: "http://localhost:5173" } },
       },
     ),
   );
 
   it.effect("preserves failures while inspecting the legacy userData path", () => {
-    const legacyPath = "/Users/alice/Library/Application Support/T3 Code (Dev)";
+    const legacyPath = "/user-home/Library/Application Support/t3code-dev";
     const cause = PlatformError.systemError({
       _tag: "PermissionDenied",
       module: "FileSystem",
@@ -218,8 +243,8 @@ describe("DesktopAppIdentity", () => {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         yield* identity.configure;
 
-        assert.deepEqual(calls.setName, ["T3 Code Beta"]);
-        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "T3 Code (Beta)");
+        assert.deepEqual(calls.setName, ["Command Center"]);
+        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "Command Center");
         assert.equal(calls.setAboutPanelOptions[0]?.applicationVersion, "1.2.3");
         assert.equal(calls.setAboutPanelOptions[0]?.version, "0123456789ab");
         // Packaged: the bundle's own icon stands, so a custom one the user
@@ -239,7 +264,6 @@ describe("DesktopAppIdentity", () => {
   });
 
   it.effect.each([
-    { stage: "Beta", environment: {} },
     {
       stage: "Nightly",
       environment: { appVersion: "0.0.43-nightly.20260929.2428" },
@@ -262,10 +286,10 @@ describe("DesktopAppIdentity", () => {
 
         const runtimeName = calls.setName[0];
         assert.isDefined(runtimeName);
-        assert.equal(runtimeName, `T3 Code ${stage}`);
+        assert.equal(runtimeName, `Command Center ${stage}`);
         // RFC 9110's token grammar, after Electron removes ASCII spaces.
         assert.match(runtimeName.replaceAll(" ", ""), /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/);
-        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, `T3 Code (${stage})`);
+        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, `Command Center (${stage})`);
       }),
       { calls, environment },
     );

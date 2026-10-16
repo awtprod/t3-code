@@ -1,5 +1,6 @@
 import type {
   DesktopBridge,
+  DesktopNotificationActivation,
   DesktopPreviewOpenLinkEvent,
   DesktopPreviewPointerEvent,
   DesktopPreviewRecordingInputEvent,

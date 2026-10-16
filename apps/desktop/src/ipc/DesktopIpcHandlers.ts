@@ -57,6 +57,12 @@ import {
 } from "./methods/window.ts";
 import { showNotification } from "./methods/notifications.ts";
 import {
+  getPrimaryBackendState,
+  retryRemotePrimary,
+  setPrimaryBackend,
+  startLocalExecutionOnce,
+} from "./methods/primaryBackend.ts";
+import {
   acknowledgeSnapShot,
   checkSnapShotShortcut,
   dismissSnapShotAnimation,

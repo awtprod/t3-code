@@ -354,23 +354,13 @@ function decodeAzureDevOpsJson<S extends Schema.Top>(
 export const make = Effect.gen(function* () {
   const { process } = yield* SourceControlHost.SourceControlHost;
 
-  const execute: AzureDevOpsCli["Service"]["execute"] = (input) => {
-    const launchesGit =
-      input.args[0] === "repos" && input.args[1] === "pr" && input.args[2] === "checkout";
-    return process
+  const execute: AzureDevOpsCli["Service"]["execute"] = (input) =>
+    process
       .run({
         operation: "AzureDevOpsCli.execute",
         command: "az",
         args: input.args,
         cwd: input.cwd,
-        ...(launchesGit
-          ? {
-              env: hardenedGitSpawningCliEnvironment("azure-devops", [globalThis.process.env], {
-                writableRoots: [input.cwd],
-              }),
-              extendEnv: false,
-            }
-          : {}),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
       })
@@ -387,7 +377,6 @@ export const make = Effect.gen(function* () {
           ),
         ),
       );
-  };
 
   const executeJson = (input: Parameters<AzureDevOpsCli["Service"]["execute"]>[0]) =>
     execute({

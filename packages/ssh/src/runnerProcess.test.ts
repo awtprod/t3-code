@@ -292,7 +292,7 @@ server.listen(0, "127.0.0.1", () => {
   },
 );
 
-describe.skipIf(HostProcessPlatform.defaultValue() === "win32")(
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "remote runner install diagnostics",
   () => {
     const decodeArguments = Schema.decodeUnknownSync(

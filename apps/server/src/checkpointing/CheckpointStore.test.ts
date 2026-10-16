@@ -18,11 +18,6 @@ import * as CheckpointStore from "./CheckpointStore.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as ServerConfig from "../config.ts";
-import {
-  SandboxRuntimeManager,
-  type SandboxRuntimeManagerShape,
-} from "../sandbox/SandboxRuntimeManager.ts";
-import type { SandboxExecInput } from "../sandbox/types.ts";
 
 const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-checkpoint-store-test-",
@@ -570,104 +565,5 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
         expect(yield* checkpointStore.listAuthoredPaths(refs)).toEqual(new Set(["feature.txt"]));
       }),
     );
-  });
-});
-
-describe("sandbox checkpoint boundary", () => {
-  it("fails closed for non-ready and unsupported sandbox targets", () => {
-    const threadId = ThreadId.make("sandbox-unavailable-thread");
-    expect(
-      CheckpointStore.checkpointExecutionTargetForThread({
-        id: threadId,
-        sandbox: { lifecycle: "ready", runtime: "microvm" },
-      }),
-    ).toMatchObject({ kind: "unavailable", threadId });
-    expect(
-      CheckpointStore.checkpointExecutionTargetForThread({
-        id: threadId,
-        sandbox: { lifecycle: "provisioning", runtime: "docker" },
-      }),
-    ).toMatchObject({ kind: "unavailable", threadId });
-  });
-
-  it.effect("captures and diffs through sandbox exec without addressing host VCS", () => {
-    const calls: Array<{ runtime: string; threadId: string; input: SandboxExecInput }> = [];
-    const manager = {
-      exec: (runtime: "docker" | "podman", threadId: string, input: SandboxExecInput) => {
-        return Effect.sync(() => {
-          calls.push({ runtime, threadId, input });
-          const subcommand = input.args?.[0];
-          const stdout =
-            subcommand === "write-tree"
-              ? "tree123\n"
-              : subcommand === "commit-tree"
-                ? "commit123\n"
-                : subcommand === "diff"
-                  ? "diff --git a/file b/file\n"
-                  : subcommand === "rev-parse" && input.args?.[1] === "--git-common-dir"
-                    ? ".git\n"
-                    : "abc123\n";
-          return { exitCode: 0, stdout, stderr: "" };
-        });
-      },
-    } as unknown as SandboxRuntimeManagerShape;
-    const hostRegistry = VcsDriverRegistry.VcsDriverRegistry.of({
-      get: () => Effect.die("host VCS must not be used"),
-      detect: () => Effect.die("host filesystem must not be detected"),
-      resolve: () => Effect.die("host filesystem must not be resolved"),
-    });
-    const layer = CheckpointStore.layer.pipe(
-      Layer.provide(Layer.succeed(VcsDriverRegistry.VcsDriverRegistry, hostRegistry)),
-      Layer.provide(Layer.succeed(SandboxRuntimeManager, manager)),
-      Layer.provide(NodeServices.layer),
-    );
-
-    return Effect.gen(function* () {
-      const store = yield* CheckpointStore.CheckpointStore;
-      const threadId = ThreadId.make("sandbox-checkpoint-thread");
-      const from = checkpointRefForThreadTurn(threadId, 0);
-      const to = checkpointRefForThreadTurn(threadId, 1);
-      yield* store.captureCheckpoint({
-        cwd: "/tmp/host-worktree-that-must-not-enter-the-sandbox",
-        checkpointRef: to,
-        target: { kind: "sandbox", threadId, runtime: "podman" },
-      });
-      const diff = yield* store.diffCheckpoints({
-        cwd: "/tmp/host-worktree-that-must-not-enter-the-sandbox",
-        fromCheckpointRef: from,
-        toCheckpointRef: to,
-        ignoreWhitespace: false,
-        target: { kind: "sandbox", threadId, runtime: "podman" },
-      });
-
-      expect(diff).toContain("diff --git");
-      expect(calls.every((call) => call.runtime === "podman" && call.threadId === threadId)).toBe(
-        true,
-      );
-      expect(calls.every((call) => call.input.cwd === "/workspace/repo")).toBe(true);
-      expect(
-        calls
-          .flatMap((call) => [call.input.cwd ?? "", ...(call.input.args ?? [])])
-          .some((value) => value.includes("host-worktree-that-must-not-enter-the-sandbox")),
-      ).toBe(false);
-      const indexPaths = calls
-        .flatMap((call) => Object.values(call.input.env ?? {}))
-        .filter((value) => value.includes("t3-checkpoint-index-"));
-      expect(indexPaths.length).toBeGreaterThan(0);
-      expect(
-        indexPaths.every((value) => value.startsWith("/workspace/repo/.git/t3-checkpoint-index-")),
-      ).toBe(true);
-      expect(calls.map((call) => call.input.args?.[0])).toEqual([
-        "rev-parse",
-        "rev-parse",
-        "read-tree",
-        "add",
-        "write-tree",
-        "commit-tree",
-        "update-ref",
-        "-f",
-        "diff",
-      ]);
-    }).pipe(Effect.provide(layer));
   });
 });

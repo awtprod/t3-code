@@ -32,7 +32,6 @@ import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import { nextPastedTextFileName, pastedTextDisposition } from "@t3tools/client-runtime/text-paste";
 import {
-  codexFeedbackMessage,
   parseCodexFeedbackCommand,
   submitCodexFeedback,
   type CodexFeedbackSubmission,
@@ -295,7 +294,6 @@ export function useThreadComposerState() {
     selectedThreadKey,
     selectedThreadQueuedMessages,
     acknowledgedMessages,
-    feedbackSubmissionsByThreadKey,
   ]);
   useEffect(() => {
     const echoedIds = new Set(selectedThreadMessages?.map((message) => message.id));
@@ -356,6 +354,10 @@ export function useThreadComposerState() {
         selectedDraft?.interactionMode ?? selectedThread.interactionMode,
       )
     : null;
+  // V2PORT: v2 thread shells carry no routingMode/efficiencyTier, so the
+  // routing choice lives only in the composer draft (see use-thread-outbox-drain).
+  const routingMode: ThreadRoutingMode = selectedDraft?.routingMode ?? "manual";
+  const efficiencyTier: EfficiencyTier = selectedDraft?.efficiencyTier ?? "economy";
   // Whether the model picker may leave this thread's provider. Derived here
   // because the projection already drives this hook; the composer only needs
   // the answer, not a subscription to every projection update.
@@ -732,6 +734,8 @@ export function useThreadComposerState() {
           provider,
           draft.interactionMode ?? thread.interactionMode,
         ),
+        routingMode: draft.routingMode ?? "manual",
+        ...(draft.efficiencyTier === undefined ? {} : { efficiencyTier: draft.efficiencyTier }),
         ...(followUpDispatchMode === null ? {} : { dispatchMode: followUpDispatchMode }),
         createdAt: metadata.createdAt,
       });
@@ -1094,6 +1098,8 @@ export function useThreadComposerState() {
   );
 
   return {
+    feedbackSubmissions,
+    dismissFeedback,
     selectedThreadFeed,
     selectedThreadActivityRun,
     selectedThreadQueueCount,
@@ -1117,6 +1123,8 @@ export function useThreadComposerState() {
     canSwitchThreadProvider,
     runtimeMode,
     interactionMode,
+    routingMode,
+    efficiencyTier,
     activeThreadBusy,
     interruptibleRunId,
     onChangeDraftMessage,

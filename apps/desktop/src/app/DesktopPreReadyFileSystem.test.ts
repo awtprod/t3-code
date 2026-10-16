@@ -12,12 +12,12 @@ import * as DesktopUserData from "./DesktopUserData.ts";
 const resolveWindowsUserData = (appDataDirectory: string) =>
   DesktopUserData.resolveUserDataPath({
     appDataDirectory,
-    isDevelopment: false,
-    platform: "win32",
+    userDataDirName: "command-center",
+    legacyUserDataDirNames: ["t3code", "T3 Code (Alpha)", "Command Center (Alpha)"],
   }).pipe(Effect.provide(DesktopPreReadyFileSystem.layer));
 
 it.layer(NodeServices.layer)("DesktopPreReadyFileSystem", (it) => {
-  it.effect("migrates the legacy Windows profile state", () =>
+  it.effect("reuses an existing legacy profile in place", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -27,7 +27,7 @@ it.layer(NodeServices.layer)("DesktopPreReadyFileSystem", (it) => {
 
       const userData = yield* resolveWindowsUserData(root);
 
-      assert.equal(userData, path.join(root, "t3code-v2"));
+      assert.equal(userData, path.join(root, "T3 Code (Alpha)"));
       assert.equal(yield* fileSystem.readFileString(path.join(userData, "Local State")), "keys");
     }),
   );

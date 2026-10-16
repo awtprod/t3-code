@@ -15,13 +15,18 @@ export function resolveDesktopBaseDir(input: {
   readonly joinPath: JoinPath;
   readonly t3Home: Option.Option<string>;
   readonly commandCenterHome?: Option.Option<string> | undefined;
+  // Remote-only installers keep their state apart from a full install's.
+  readonly remoteOnlyBuild?: boolean | undefined;
 }): string {
   const configuredHome = Option.orElse(
     input.commandCenterHome ?? Option.none(),
     () => input.t3Home,
   );
   return Option.getOrElse(normalizeConfiguredBaseDir(configuredHome), () =>
-    input.joinPath(input.homeDirectory, ".command-center"),
+    input.joinPath(
+      input.homeDirectory,
+      input.remoteOnlyBuild === true ? ".command-center-remote-only" : ".command-center",
+    ),
   );
 }
 

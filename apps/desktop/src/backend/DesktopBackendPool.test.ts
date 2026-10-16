@@ -43,7 +43,10 @@ function makeStubInstance(
   };
 }
 
-function layerPool(labelRef: Ref.Ref<string>): Layer.Layer<DesktopBackendPool.DesktopBackendPool> {
+function layerPool(
+  labelRef: Ref.Ref<string>,
+  settings: DesktopAppSettings.DesktopSettings = DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+): Layer.Layer<DesktopBackendPool.DesktopBackendPool> {
   return DesktopBackendPool.layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
@@ -167,7 +170,7 @@ describe("DesktopBackendPool", () => {
         const labelRef = yield* Ref.make("Windows");
         const pool = yield* DesktopBackendPool.DesktopBackendPool.pipe(
           Effect.provide(
-            makePoolLayer(labelRef, {
+            layerPool(labelRef, {
               ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
               primaryBackendMode: "remote",
               remoteBackendUrl: "https://remote.example.test",

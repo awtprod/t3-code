@@ -9,7 +9,6 @@ import {
 import {
   ConnectionCatalogDocument as RuntimeConnectionCatalogDocument,
   type ConnectionCatalogDocument as RuntimeConnectionCatalogDocumentType,
-  pruneSupersededBearerConnections,
 } from "@t3tools/client-runtime/platform";
 import type { PersistedSavedEnvironmentRecord } from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
@@ -46,45 +45,6 @@ const RuntimeConnectionCatalogDocumentJson = Schema.fromJsonString(
 const encodeRuntimeConnectionCatalogDocumentJson = Schema.encodeEffect(
   RuntimeConnectionCatalogDocumentJson,
 );
-const decodeRuntimeConnectionCatalogDocumentJson = Schema.decodeEffect(
-  RuntimeConnectionCatalogDocumentJson,
-);
-
-/**
- * Hides bearer connections that a newer pairing for the same environment and
- * URL superseded but older builds never removed. This only changes what is
- * returned: the file is not rewritten here, so a concurrent renderer save can
- * never be lost. The renderer persists the pruned catalog with its next write.
- * Anything that does not decode, or has nothing to prune, is returned as is.
- */
-const withoutSupersededBearerConnections = Effect.fn(
-  "desktop.connectionCatalogStore.withoutSupersededBearerConnections",
-)(function* (catalog: Option.Option<string>) {
-  if (Option.isNone(catalog)) {
-    return catalog;
-  }
-  const decoded = yield* decodeRuntimeConnectionCatalogDocumentJson(catalog.value).pipe(
-    Effect.option,
-  );
-  if (Option.isNone(decoded)) {
-    return catalog;
-  }
-  const pruned = pruneSupersededBearerConnections(decoded.value);
-  if (pruned.dropped.length === 0) {
-    return catalog;
-  }
-  const encoded = yield* encodeRuntimeConnectionCatalogDocumentJson(pruned.document).pipe(
-    Effect.option,
-  );
-  if (Option.isNone(encoded)) {
-    return catalog;
-  }
-  yield* Effect.logInfo("Ignoring saved bearer connections superseded by a newer pairing.", {
-    connectionIds: pruned.dropped,
-  });
-  return encoded;
-});
-
 const DesktopConnectionCatalogStoreWriteOperation = Schema.Literals([
   "create-temporary-file-name",
   "encode-document",
@@ -546,7 +506,11 @@ export const make = Effect.gen(function* () {
     return Option.some(decrypted);
   });
 
-  const getCurrent = getCatalog(true).pipe(Effect.flatMap(withoutSupersededBearerConnections));
+  // V2PORT: the fork hid bearer profiles superseded by a newer pairing for the
+  // same environment and URL (`pruneSupersededBearerConnections`), but the v2
+  // client-runtime catalog (routes per environment) no longer exports it.
+  // Reads return the stored catalog unchanged until that helper is restored.
+  const getCurrent = getCatalog(true);
 
   const get = environment.remoteOnlyBuild
     ? getCurrent.pipe(

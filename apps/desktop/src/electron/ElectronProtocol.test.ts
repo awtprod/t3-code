@@ -1,5 +1,4 @@
 import { assert, describe, it } from "@effect/vitest";
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -131,7 +130,7 @@ describe("ElectronProtocol", () => {
       assert.isNull(forwardedHeaders.get("origin"));
       assert.isNull(forwardedHeaders.get("referer"));
       assert.isNull(forwardedHeaders.get("sec-fetch-site"));
-      assert.deepEqual(unhandleMock.mock.calls, [["t3code-dev"]]);
+      assert.deepEqual(unhandleMock.mock.calls, [["commandcenter-dev"]]);
     }).pipe(Effect.provide(layerProtocol)),
   );
 
@@ -178,7 +177,7 @@ describe("ElectronProtocol", () => {
             clerkFrontendApiHostname: undefined,
           });
           const fiber = yield* Effect.forkChild(
-            Effect.promise(() => handler!(new Request("t3code-dev://app/"))),
+            Effect.promise(() => handler!(new Request("commandcenter-dev://app/"))),
           );
           yield* TestClock.adjust("50 millis");
           return yield* Fiber.join(fiber);
@@ -212,7 +211,7 @@ describe("ElectronProtocol", () => {
           });
           const fiber = yield* Effect.forkChild(
             Effect.promise(() =>
-              handler!(new Request("t3code-dev://app/")).then(
+              handler!(new Request("commandcenter-dev://app/")).then(
                 () => null,
                 (error: unknown) => error,
               ),
@@ -253,7 +252,10 @@ describe("ElectronProtocol", () => {
       assert.instanceOf(error, ElectronProtocol.ElectronProtocolRegistrationError);
       assert.equal(error.scheme, "commandcenter-dev");
       assert.strictEqual(error.cause, cause);
-      assert.equal(error.message, 'Failed to register Electron protocol scheme "t3code-dev".');
+      assert.equal(
+        error.message,
+        'Failed to register Electron protocol scheme "commandcenter-dev".',
+      );
     }).pipe(Effect.provide(layerProtocol)),
   );
 

@@ -152,7 +152,6 @@ import { useThreadTurnSubagents } from "./ThreadAgentsSheet";
 import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
-import { SandboxDesktopPanel } from "./SandboxDesktopPanel";
 import { resolveThreadFeedSubmissionAnchor } from "./thread-feed-live-follow";
 import { useGlobalVoiceInput } from "../voice-input/VoiceInputProvider";
 
@@ -170,6 +169,8 @@ export interface ThreadDetailScreenProps {
   readonly screenTone: StatusTone;
   readonly connectionError: string | null;
   readonly environmentLabel: string | null;
+  readonly feedbackSubmissions: ReadonlyArray<CodexFeedbackSubmission>;
+  readonly onDismissFeedback: (id: MessageId) => void;
   readonly selectedThreadFeed: ReadonlyArray<ThreadFeedEntry>;
   readonly pendingHandoff?: HandoffEndpoints | null;
   readonly activityRun: ThreadFeedLatestRun | null;
@@ -242,6 +243,8 @@ export interface ThreadDetailScreenProps {
   readonly onUpdateThreadModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateThreadRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateThreadInteractionMode: (interactionMode: ProviderInteractionMode) => void;
+  readonly threadRoutingMode: ThreadRoutingMode;
+  readonly threadEfficiencyTier: EfficiencyTier;
   readonly onUpdateThreadEfficiencyRouting: (mode: ThreadRoutingMode, tier: EfficiencyTier) => void;
   readonly onRespondToApproval: (
     requestId: RuntimeRequestId,
@@ -1480,6 +1483,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                         onUpdateModelSelection={props.onUpdateThreadModelSelection}
                         onUpdateRuntimeMode={props.onUpdateThreadRuntimeMode}
                         onUpdateInteractionMode={props.onUpdateThreadInteractionMode}
+                        routingMode={props.threadRoutingMode}
+                        efficiencyTier={props.threadEfficiencyTier}
+                        onUpdateEfficiencyRouting={props.onUpdateThreadEfficiencyRouting}
                         onExpandedChange={setComposerExpanded}
                         onEditorFocusChange={handleComposerFocusChange}
                       />

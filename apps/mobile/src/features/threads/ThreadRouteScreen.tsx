@@ -434,18 +434,9 @@ function ThreadRouteContent(
             modelSelection: composer.modelSelection ?? selectedThread.modelSelection,
             runtimeMode: composer.runtimeMode ?? selectedThread.runtimeMode,
             interactionMode: composer.interactionMode ?? selectedThread.interactionMode,
-            routingMode: composer.routingMode,
-            efficiencyTier: composer.efficiencyTier,
           }
         : null,
-    [
-      composer.efficiencyTier,
-      composer.interactionMode,
-      composer.modelSelection,
-      composer.routingMode,
-      composer.runtimeMode,
-      selectedThread,
-    ],
+    [composer.interactionMode, composer.modelSelection, composer.runtimeMode, selectedThread],
   );
 
   /* ─── Native header theming ──────────────────────────────────────── */
@@ -1003,6 +994,8 @@ function ThreadRouteContent(
           screenTone={connectionTone(routeConnectionState)}
           connectionError={routeConnectionError}
           environmentLabel={selectedEnvironmentConnection?.environmentLabel ?? null}
+          feedbackSubmissions={composer.feedbackSubmissions}
+          onDismissFeedback={composer.dismissFeedback}
           selectedThreadFeed={composer.selectedThreadFeed}
           pendingHandoff={composer.pendingHandoff}
           activityRun={composer.selectedThreadActivityRun}
@@ -1080,6 +1073,8 @@ function ThreadRouteContent(
           onUpdateThreadModelSelection={composer.onUpdateModelSelection}
           onUpdateThreadRuntimeMode={composer.onUpdateRuntimeMode}
           onUpdateThreadInteractionMode={composer.onUpdateInteractionMode}
+          threadRoutingMode={composer.routingMode}
+          threadEfficiencyTier={composer.efficiencyTier}
           onUpdateThreadEfficiencyRouting={composer.onUpdateEfficiencyRouting}
           onRespondToApproval={requests.onRespondToApproval}
           onSelectUserInputOption={requests.onSelectUserInputOption}

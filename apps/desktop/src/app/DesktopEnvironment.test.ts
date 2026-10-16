@@ -165,7 +165,7 @@ describe("DesktopEnvironment", () => {
       assert.equal(development.stateDir, "/user-home/.command-center/dev");
       assert.equal(production.stateDir, "/user-home/.command-center/userdata");
       assert.equal(production.displayName, "Command Center");
-      assert.equal(production.branding.stageLabel, "Latest");
+      assert.equal(production.branding.stageLabel, "Beta");
       assert.equal(production.appUserModelId, "com.awtprod.commandcenter");
       assert.equal(production.linuxDesktopEntryName, "command-center.desktop");
       assert.equal(production.linuxWmClass, "command-center");

@@ -124,7 +124,7 @@ describe("DesktopWslBackend", () => {
             : Option.none<DesktopBackendPool.DesktopBackendInstance>(),
         ),
       list: Effect.sync(() => (registeredWsl === undefined ? [primary] : [primary, registeredWsl])),
-      primary: Effect.succeed(primary),
+      primary: Effect.succeed(Option.some(primary)),
       register: (spec) =>
         Effect.sync(() => {
           registeredSpec = spec;

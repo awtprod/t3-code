@@ -12,6 +12,7 @@ import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { installDesktopIpcHandlers } from "../ipc/DesktopIpcHandlers.ts";
 import * as DesktopAppActivation from "./DesktopAppActivation.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
@@ -37,6 +38,7 @@ import * as DesktopSnapShot from "../snapShot/DesktopSnapShot.ts";
 import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { waitForHttpReady } from "@t3tools/shared/httpReadiness";
 
 const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
 const MAX_TCP_PORT = 65_535;
@@ -286,18 +288,15 @@ const bootstrap = Effect.gen(function* () {
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
   const wslBackend = yield* DesktopWslBackend.DesktopWslBackend;
 
+  // Remote-only installers ship no backend. The bundled client registered
+  // above talks to saved remote connections directly, so open the window now.
   if (environment.remoteOnlyBuild) {
-    const electronProtocol = yield* ElectronProtocol.ElectronProtocol;
-    yield* installDesktopIpcHandlers();
-    const staticClientOrigin = new URL("https://remote-only-client.invalid/");
-    yield* electronProtocol.registerDesktopProtocol({
-      scheme: ElectronProtocol.getDesktopScheme(environment.isDevelopment),
-      targetOrigin: staticClientOrigin,
-      clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
-      staticClientRoot: environment.localClientRoot,
-    });
     yield* logBootstrapInfo("bootstrap remote-only shell ready");
-    yield* desktopWindow.handleBackendReady(staticClientOrigin);
+    if (!(yield* Ref.get(state.quitting))) {
+      yield* desktopWindow.handleBackendReady(
+        new URL(ElectronProtocol.getDesktopUrl(environment.isDevelopment)),
+      );
+    }
     return;
   }
 
@@ -306,8 +305,6 @@ const bootstrap = Effect.gen(function* () {
     let normalizedRemoteUrl = DesktopAppSettings.normalizeRemoteBackendUrl(
       settings.remoteBackendUrl,
     );
-    const electronProtocol = yield* ElectronProtocol.ElectronProtocol;
-    yield* installDesktopIpcHandlers();
     if (!(yield* Ref.get(state.quitting))) {
       yield* desktopWindow.showConnectingSplash;
       while (true) {
@@ -361,17 +358,11 @@ const bootstrap = Effect.gen(function* () {
         yield* electronApp.quit;
         return;
       }
+      // The renderer is the bundled client registered above; it reaches the
+      // remote primary through the environment bootstrap (getLocalEnvironmentBootstraps).
       const remoteHttpBaseUrl = new URL(
         Option.getOrThrow(Option.fromNullishOr(normalizedRemoteUrl)),
       );
-      const rendererTarget = environment.isDevelopment
-        ? Option.getOrThrow(environment.devServerUrl)
-        : remoteHttpBaseUrl;
-      yield* electronProtocol.registerDesktopProtocol({
-        scheme: ElectronProtocol.getDesktopScheme(environment.isDevelopment),
-        targetOrigin: rendererTarget,
-        clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
-      });
       yield* logBootstrapInfo("bootstrap remote-only endpoint ready", {
         baseUrl: remoteHttpBaseUrl.href,
       });

@@ -827,9 +827,9 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
   const result = yield* runSshCommand(target, {
     remoteCommandArgs: ["sh", "-s"],
     stdin: buildRemotePairingScript(stateKey, runner),
-    // Pairing may be the first command on a cold remote, so it can install
-    // the archive on the way.
-    ...(isNodeScriptRunner(runner) ? {} : { timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS }),
+    // Pairing may be the first command on a cold remote, so the package runner
+    // can install Command Center on the way; give it the launch timeout.
+    timeoutMs: REMOTE_LAUNCH_TIMEOUT_MS,
     ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
     ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
     ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),

@@ -31,68 +31,33 @@ export class DesktopUserDataInitializationError extends Schema.TaggedError<Deskt
   }
 }
 
-/** Select Electron's profile independently of the server's T3 home. */
+/**
+ * Select Electron's profile independently of the server's Command Center home.
+ *
+ * Command Center keeps one profile across releases: the first legacy profile
+ * that already exists is reused in place (so renamed installs keep their
+ * cookies, IndexedDB and safeStorage keys), and otherwise the current
+ * `userDataDirName` is used.
+ */
 export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPath")(
   function* (input: {
     readonly appDataDirectory: string;
-    readonly isDevelopment: boolean;
-    readonly platform: NodeJS.Platform;
+    readonly userDataDirName: string;
+    readonly legacyUserDataDirNames: readonly string[];
   }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const names = input.isDevelopment
-      ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }
-      : { current: "t3code-v2", legacy: "T3 Code (Alpha)" };
-    const destinationPath = path.join(input.appDataDirectory, names.current);
-    const legacyPath = path.join(input.appDataDirectory, names.legacy);
-    const inspect = (resourcePath: string) =>
-      fs
-        .exists(resourcePath)
+    for (const legacyName of input.legacyUserDataDirNames) {
+      const legacyPath = path.join(input.appDataDirectory, legacyName);
+      const exists = yield* fs
+        .exists(legacyPath)
         .pipe(
           Effect.mapError((cause) =>
-            DesktopUserDataInitializationError.fromFileSystem(cause, "inspect", resourcePath),
+            DesktopUserDataInitializationError.fromFileSystem(cause, "inspect", legacyPath),
           ),
         );
-    if (input.isDevelopment) {
-      return (yield* inspect(legacyPath)) ? legacyPath : destinationPath;
+      if (exists) return legacyPath;
     }
-    // Chromium databases require their own profile for each running version.
-    if (input.platform !== "win32") return destinationPath;
-    const destinationState = path.join(destinationPath, "Local State");
-    if (yield* inspect(destinationState)) return destinationPath;
-    const legacyState = path.join(legacyPath, "Local State");
-    const sourceState = (yield* inspect(legacyState))
-      ? legacyState
-      : path.join(input.appDataDirectory, "t3code", "Local State");
-    if (!(yield* inspect(sourceState))) return destinationPath;
-    // Windows safeStorage keys live here. Copy only these preferences, never locked databases.
-    const state = yield* fs
-      .readFileString(sourceState)
-      .pipe(
-        Effect.mapError((cause) =>
-          DesktopUserDataInitializationError.fromFileSystem(cause, "read", sourceState),
-        ),
-      );
-    yield* fs
-      .makeDirectory(destinationPath, { recursive: true })
-      .pipe(
-        Effect.mapError((cause) =>
-          DesktopUserDataInitializationError.fromFileSystem(
-            cause,
-            "create-directory",
-            destinationPath,
-          ),
-        ),
-      );
-    yield* fs.writeFileString(destinationState, state, { flag: "wx" }).pipe(
-      Effect.catchIf(
-        (error) => error.reason._tag === "AlreadyExists",
-        () => Effect.void,
-      ),
-      Effect.mapError((cause) =>
-        DesktopUserDataInitializationError.fromFileSystem(cause, "write", destinationState),
-      ),
-    );
-    return destinationPath;
+    return path.join(input.appDataDirectory, input.userDataDirName);
   },
 );

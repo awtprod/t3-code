@@ -1,6 +1,14 @@
-import { bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
+import {
+  bootstrapRemoteBearerSession,
+  fetchRemoteSessionState,
+} from "@t3tools/client-runtime/authorization";
+import { fetchRemoteEnvironmentDescriptor } from "@t3tools/client-runtime/environment";
+import {
+  ConnectionCatalogDocument,
+  type ConnectionCatalogDocument as ConnectionCatalogDocumentType,
+} from "@t3tools/client-runtime/platform";
 import type { RemoteEnvironmentRequestError } from "@t3tools/client-runtime/rpc";
-import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts";
+import { PRIMARY_LOCAL_ENVIRONMENT_ID, type AuthSessionState } from "@t3tools/contracts";
 import { currentDesktopBootstrapToken } from "@t3tools/shared/desktopBootstrapToken";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -10,6 +18,7 @@ import * as Base64Url from "effect/encoding/Base64Url";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";

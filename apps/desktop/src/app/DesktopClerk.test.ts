@@ -62,6 +62,8 @@ const layerDesktopClerk = (
     stateDir: "/tmp/t3-state",
     isDevelopment,
     appDataDirectory: "/tmp/app-data",
+    userDataDirName: isDevelopment ? "command-center-dev" : "command-center",
+    legacyUserDataDirNames: [],
     platform,
   } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]);
 
@@ -117,7 +119,10 @@ describe("DesktopClerk", () => {
       // The bridge acquires Electron's single-instance lock at creation, and
       // the lock both lives in and creates the userData directory — so the
       // real path must be set before the bridge exists.
-      assert.deepEqual(events, ["setPath:userData:/tmp/app-data/t3code-dev", "createClerkBridge"]);
+      assert.deepEqual(events, [
+        "setPath:userData:/tmp/app-data/command-center-dev",
+        "createClerkBridge",
+      ]);
       storageMock.mockClear();
       createClerkBridgeMock.mockClear();
     });
@@ -128,13 +133,13 @@ describe("DesktopClerk", () => {
       name: "packaged Windows",
       isDevelopment: false,
       platform: "win32" as const,
-      userData: "/tmp/app-data/t3code-v2",
+      userData: "/tmp/app-data/command-center",
     },
     {
       name: "development",
       isDevelopment: true,
       platform: "win32" as const,
-      userData: "/tmp/app-data/t3code-dev",
+      userData: "/tmp/app-data/command-center-dev",
     },
   ])(
     "creates the bridge before startup can yield to the event loop ($name)",

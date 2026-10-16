@@ -977,10 +977,10 @@ export function useThreadOutboxDrain(): void {
           }),
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
-          routingMode: sendSettings.routingMode,
-          ...(sendSettings.efficiencyTier === undefined
-            ? {}
-            : { efficiencyTier: sendSettings.efficiencyTier }),
+          // V2PORT: the v2 start-turn command (StartThreadTurnInput) and thread
+          // metadata update carry no routingMode/efficiencyTier, so the queued
+          // routing choice is not sent. Efficiency routing stays off until v2
+          // contracts grow a routing field.
           createdAt: queuedMessage.createdAt,
           // Rows written before follow-up behavior existed keep the previous
           // delivery, which the server turns into a queued run when a turn is

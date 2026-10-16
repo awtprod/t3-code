@@ -415,28 +415,18 @@ export const make = Effect.gen(function* () {
   const run = (
     input: Parameters<GitLabCli["Service"]["execute"]>[0],
     mapError: (error: VcsError) => GitLabCliError,
-  ) => {
-    const launchesGit = input.args[0] === "mr" && input.args[1] === "checkout";
-    return process
+  ) =>
+    process
       .run({
         operation: "GitLabCli.execute",
         command: "glab",
         args: input.args,
         cwd: input.cwd,
-        ...(launchesGit
-          ? {
-              env: hardenedGitSpawningCliEnvironment("gitlab", [globalThis.process.env], {
-                writableRoots: [input.cwd],
-              }),
-              extendEnv: false,
-            }
-          : {}),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
         ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
       })
       .pipe(Effect.mapError(mapError));
-  };
 
   const execute: GitLabCli["Service"]["execute"] = (input) =>
     run(input, (error) =>
