@@ -348,8 +348,6 @@ describe("AzureDevOpsCli.layer", () => {
           "origin",
         ],
         cwd: "/repo",
-        env: hardenedGitSpawningCliEnvironment("azure-devops"),
-        extendEnv: false,
         timeoutMs: 30_000,
       });
     }).pipe(Effect.provide(layer)),

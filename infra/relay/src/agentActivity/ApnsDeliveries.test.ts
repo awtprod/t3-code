@@ -1834,7 +1834,7 @@ describe("ApnsDeliveries", () => {
       });
     }).pipe(
       Effect.provide(
-        makeLayer({ attempts, queuedJobs, webPushTargets: [webPushTarget, mutedTarget] }),
+        layerFor({ attempts, queuedJobs, webPushTargets: [webPushTarget, mutedTarget] }),
       ),
     );
   });
@@ -1889,7 +1889,7 @@ describe("ApnsDeliveries", () => {
           apnsStatus: 201,
         },
       ]);
-    }).pipe(Effect.provide(makeLayer({ attempts, webPushSends })));
+    }).pipe(Effect.provide(layerFor({ attempts, webPushSends })));
   });
 
   it.effect("queues prospect pushes only for globally opted-in browser subscriptions", () => {
@@ -1932,7 +1932,7 @@ describe("ApnsDeliveries", () => {
       });
     }).pipe(
       Effect.provide(
-        makeLayer({
+        layerFor({
           attempts,
           queuedJobs,
           webPushTargets: [
@@ -1976,7 +1976,7 @@ describe("ApnsDeliveries", () => {
       ]);
     }).pipe(
       Effect.provide(
-        makeLayer({
+        layerFor({
           attempts,
           queueSendFailure: true,
           webPushTargets: [
@@ -2039,7 +2039,7 @@ describe("ApnsDeliveries", () => {
       expect(invalidatedEndpoints).toEqual(["https://push.example.test/subscription/gone"]);
     }).pipe(
       Effect.provide(
-        makeLayer({
+        layerFor({
           attempts,
           invalidatedEndpoints,
           webPushSendResult: { ok: false, status: 410, permanentFailure: true },

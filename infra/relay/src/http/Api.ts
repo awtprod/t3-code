@@ -1184,6 +1184,30 @@ export const layerDpopClientApi = HttpApiBuilder.group(
   }),
 );
 
+export const publishProspectNotification = Effect.fn(
+  "relay.api.server.publishProspectNotification.effect",
+)(function* (input: {
+  readonly environmentId: string;
+  readonly payload: RelayProspectNotificationPublishRequest;
+  readonly principal: RelayEnvironmentPrincipal["Service"];
+}) {
+  if (input.principal.environmentId !== input.environmentId) {
+    return yield* new HttpApiError.Unauthorized({});
+  }
+  const publishSignatures = yield* EnvironmentPublishSignatures.EnvironmentPublishSignatures;
+  const publisher = yield* AgentActivityPublisher.AgentActivityPublisher;
+  yield* publishSignatures.verifyProspectNotification({
+    environmentId: input.environmentId,
+    environmentPublicKey: input.principal.environmentPublicKey,
+    request: input.payload,
+  });
+  return yield* publisher.publishProspectNotification({
+    environmentId: input.environmentId,
+    environmentPublicKey: input.principal.environmentPublicKey,
+    notification: input.payload.notification,
+  });
+});
+
 export const layerServerApi = HttpApiBuilder.group(
   RelayApi,
   "server",
@@ -1518,6 +1542,7 @@ const RelayCommonPersistenceError = Schema.Union([
   DeliveryAttempts.DeliveryAttemptRecordPersistenceError,
   EnvironmentLinks.EnvironmentLinkEnvironmentLookupPersistenceError,
   HookInbox.HookInboxError,
+  WebPushSubscriptions.WebPushSubscriptionPersistenceError,
 ]);
 type RelayCommonPersistenceError = typeof RelayCommonPersistenceError.Type;
 const isRelayCommonPersistenceError = Schema.is(RelayCommonPersistenceError);

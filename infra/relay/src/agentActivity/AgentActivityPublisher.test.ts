@@ -237,7 +237,7 @@ describe("AgentActivityPublisher", () => {
         });
       }).pipe(
         Effect.provide(
-          publisherLayer.pipe(
+          layerPublisher.pipe(
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(
@@ -315,7 +315,7 @@ describe("AgentActivityPublisher", () => {
       });
     }).pipe(
       Effect.provide(
-        publisherLayer.pipe(
+        layerPublisher.pipe(
           Layer.provide(
             Layer.mergeAll(
               Layer.succeed(AgentActivityRows.AgentActivityRows, makeAgentActivityRows()),

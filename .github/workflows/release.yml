@@ -1304,6 +1304,7 @@ jobs:
       always() && !cancelled() &&
       needs.preflight.result == 'success' &&
       needs.preflight.outputs.release_mode == 'publish' &&
+      needs.preflight.outputs.release_channel != 'preview' &&
       needs.relay_public_config.result == 'success' &&
       needs.release.result == 'success' &&
       needs.deploy_web.result == 'success' &&

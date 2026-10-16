@@ -56,6 +56,7 @@ import {
   verifyRelayClientBearerToken,
   verifyEnvironmentTunnelRecoveryProof,
   withoutCapturedParentSpan,
+  publishProspectNotification,
 } from "./Api.ts";
 import * as RelayHttpApi from "./Api.ts";
 import * as RelayConfiguration from "../Config.ts";
@@ -66,9 +67,6 @@ import * as HookInbox from "../hooks/HookInbox.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as ManagedEndpointAllocations from "../environments/ManagedEndpointAllocations.ts";
 import * as ManagedEndpointProvider from "../environments/ManagedEndpointProvider.ts";
-import * as EnvironmentLinker from "../environments/EnvironmentLinker.ts";
-import * as RelayTokens from "../auth/RelayTokens.ts";
-import * as Devices from "../agentActivity/Devices.ts";
 import * as WebPushSubscriptions from "../agentActivity/WebPushSubscriptions.ts";
 import * as EnvironmentPublishSignatures from "../environments/EnvironmentPublishSignatures.ts";
 import * as AgentActivityPublisher from "../agentActivity/AgentActivityPublisher.ts";
@@ -318,6 +316,51 @@ describe("relay environment authentication", () => {
         ),
       ),
       Effect.scoped,
+    );
+  });
+});
+
+describe("prospect notification publication", () => {
+  const notification = {
+    type: "prospect",
+    itemId: "prospect-review:lead-1",
+    spaceId: "space-1",
+    evaluationId: "evaluation-1",
+    environmentId: EnvironmentId.make("environment-1"),
+    title: "New prospect",
+    body: "Review it.",
+    deepLink: "/prospects/prospect-review%3Alead-1",
+  } as const;
+
+  it.effect("rejects a principal whose environment does not match the path", () => {
+    const verifyProspectNotification = vi.fn(() => Effect.void);
+    const publishNotification = vi.fn(() =>
+      Effect.succeed({ status: "queued" as const, idempotencyKey: "key", deliveries: [] }),
+    );
+    return Effect.gen(function* () {
+      const result = yield* Effect.result(
+        publishProspectNotification({
+          environmentId: "environment-1",
+          principal: {
+            environmentId: "environment-2",
+            environmentPublicKey: "public-key",
+          },
+          payload: { notification, proof: "proof" },
+        }),
+      );
+      expect(result._tag).toBe("Failure");
+      expect(verifyProspectNotification).not.toHaveBeenCalled();
+      expect(publishNotification).not.toHaveBeenCalled();
+    }).pipe(
+      Effect.provideService(EnvironmentPublishSignatures.EnvironmentPublishSignatures, {
+        verify: () => Effect.die("unused activity verifier"),
+        verifyProspectNotification,
+      }),
+      Effect.provideService(AgentActivityPublisher.AgentActivityPublisher, {
+        publish: () => Effect.die("unused activity publisher"),
+        replayForLiveActivityRegistration: () => Effect.die("unused replay"),
+        publishProspectNotification: publishNotification,
+      }),
     );
   });
 });
@@ -1299,6 +1342,7 @@ describe("relay routing fallback", () => {
             Effect.sync(() => {
               verified.push(input);
             }),
+          verifyProspectNotification: () => Effect.die("unused prospect verifier"),
         },
       );
       const layerAuth = Layer.succeed(RelayEnvironmentAuth, {

@@ -1,6 +1,7 @@
 // @effect-diagnostics preferSchemaOverJson:off - this test plays the browser
 // receiver: it decrypts raw bytes and inspects plain JSON exactly as a push
 // client library would, without Effect schemas in the loop.
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no generateKeyPairSync, hkdfSync, createDecipheriv or verify.
 import * as NodeCrypto from "node:crypto";
 
 import { p256 } from "@noble/curves/nist";

@@ -1,3 +1,4 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createPrivateKey or createPublicKey.
 import * as NodeCrypto from "node:crypto";
 
 import { p256 } from "@noble/curves/nist";

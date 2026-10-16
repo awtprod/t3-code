@@ -196,7 +196,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
         repository: "web",
         state: "open",
         involvement: "all",
-        viewer: "bilal@example.com",
+        viewer: "bilal@acme.dev",
         limit: 10,
       });
 
@@ -261,7 +261,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
         host: "dev.azure.com",
         state: "open",
         involvement: "all",
-        viewer: "bilal@example.com",
+        viewer: "bilal@acme.dev",
         limit: 10,
         query: "page",
       });
@@ -300,7 +300,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
         repository: "web",
         state: "open",
         involvement: "all",
-        viewer: "bilal@example.com",
+        viewer: "bilal@acme.dev",
         limit: 10,
         // The instant is the same cursor every other host reads; Azure has no filter for it and
         // takes the count instead.
@@ -324,7 +324,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
         repository: "web",
         state: "open",
         involvement: "all",
-        viewer: "bilal@example.com",
+        viewer: "bilal@acme.dev",
         limit: 10,
       });
 
@@ -356,7 +356,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
         repository: "web",
         state: "open",
         involvement: "all",
-        viewer: "bilal@example.com",
+        viewer: "bilal@acme.dev",
         limit: 2,
       });
 
@@ -380,12 +380,12 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
         repository: "web",
         state: "closed",
         involvement: "authored",
-        viewer: "bilal@example.com",
+        viewer: "bilal@acme.dev",
         limit: 10,
       });
 
       expect(argsOfCall(0)).toContain("--creator");
-      expect(argsOfCall(0)).toContain("bilal@example.com");
+      expect(argsOfCall(0)).toContain("bilal@acme.dev");
       // Azure calls a closed pull request abandoned.
       expect(argsOfCall(0)).toContain("abandoned");
     }),
@@ -401,7 +401,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
         repository: "web",
         state: "all",
         involvement: "all",
-        viewer: "bilal@example.com",
+        viewer: "bilal@acme.dev",
         limit: 10,
       });
 
@@ -420,7 +420,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
         repository: "web",
         state: "open",
         involvement: "reviewing",
-        viewer: "bilal@example.com",
+        viewer: "bilal@acme.dev",
         limit: 10,
       });
 
@@ -438,7 +438,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
 
       const viewer = yield* cli.getViewer({ cwd: "/w" });
 
-      assert.strictEqual(viewer, "bilal@example.com");
+      assert.strictEqual(viewer, "bilal@acme.dev");
       expect(argsOfCall(0)).toEqual([
         "account",
         "show",
@@ -1440,7 +1440,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
       yield* cli.setPullRequestReviewers({
         cwd: "/w",
         number: 42,
-        reviewers: ["octocat@example.com", "hubot@example.com"],
+        reviewers: ["octocat@acme.test", "hubot@acme.test"],
         requested: true,
       });
 
@@ -1454,8 +1454,8 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
         "--id",
         "42",
         "--reviewers",
-        "octocat@example.com",
-        "hubot@example.com",
+        "octocat@acme.test",
+        "hubot@acme.test",
         "--only-show-errors",
         "--output",
         "json",
@@ -1471,7 +1471,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
       yield* cli.setPullRequestReviewers({
         cwd: "/w",
         number: 42,
-        reviewers: ["octocat@example.com"],
+        reviewers: ["octocat@acme.test"],
         requested: false,
       });
 

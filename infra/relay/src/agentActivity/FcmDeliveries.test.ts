@@ -82,6 +82,11 @@ const config = {
   cloudMintPublicKey: "unused",
   managedEndpointBaseDomain: undefined,
   managedEndpointNamespace: undefined,
+  webPush: {
+    privateKey: Redacted.make("web-push-private-key"),
+    publicKey: "web-push-public-key",
+    subject: "https://relay.example.test",
+  },
 } satisfies RelayConfiguration.RelayConfiguration["Service"];
 
 function harness() {

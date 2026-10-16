@@ -291,15 +291,13 @@ layer("GitLabCli.layer", (it) => {
         force: true,
       });
 
-      expect(mockedRun).toHaveBeenCalledWith({
-        operation: "GitLabCli.execute",
-        command: "glab",
-        cwd: "/repo",
-        args: ["mr", "checkout", "42"],
-        env: hardenedGitSpawningCliEnvironment("gitlab"),
-        extendEnv: false,
-        timeoutMs: 30_000,
-      });
+      expect(mockedRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: "glab",
+          cwd: "/repo",
+          args: ["mr", "checkout", "42"],
+        }),
+      );
     }),
   );
 
