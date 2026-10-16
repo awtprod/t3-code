@@ -356,10 +356,16 @@ function scanHistoricalRevisions() {
     for (const relativePath of changedPaths) {
       const isVendoredPublicReference = relativePath.startsWith(VENDORED_PUBLIC_REFERENCE_PREFIX);
       const pathFindings = scanPublicPath(relativePath, denylist);
+      // Same exemption as the current-file loop: an upstream blob the fork never touched is
+      // already public, so only the sensitive-file path rule is skipped for it.
+      const upstreamVerbatim =
+        !isVendoredPublicReference && isUpstreamVerbatimBlob(commit, relativePath);
       historicalFindings.push(
         ...(isVendoredPublicReference
           ? pathFindings.filter((finding) => finding.rule === "private-denylist")
-          : pathFindings
+          : upstreamVerbatim
+            ? pathFindings.filter((finding) => finding.rule !== "sensitive-file")
+            : pathFindings
         ).map((finding) => ({ ...finding, revision })),
       );
 
