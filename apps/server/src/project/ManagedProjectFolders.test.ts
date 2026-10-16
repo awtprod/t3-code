@@ -367,11 +367,9 @@ const TEST_IDENTITY = {
 const gitOutput = (cwd: string, args: ReadonlyArray<string>) =>
   git(cwd, args).pipe(Effect.map((result) => result.stdout.trim()));
 
-// V2PORT: S1. Hardened host git ignores the user's global config and takes identity
-// only from the caller's env; ManagedProjectFolders commits without one, so the first
-// commit fails with "Git has no name or email". `fails` keeps the assertion live until
-// S1 decides how trusted callers supply an identity.
-it.effect.fails("starts a named project as a committed repository, and suffixes a taken name", () =>
+// Hardened host git ignores the user's global config; the scaffold commits under the
+// shared Command Center identity, supplied through the allowlisted GIT_AUTHOR_* env.
+it.effect("starts a named project as a committed repository, and suffixes a taken name", () =>
   withScratch(({ baseDir }) =>
     withGitEnv(
       TEST_IDENTITY,
@@ -405,6 +403,10 @@ it.effect.fails("starts a named project as a committed repository, and suffixes 
         assert.equal(
           yield* gitOutput(first.workspaceRoot, ["log", "--format=%s"]),
           "Initial commit",
+        );
+        assert.equal(
+          yield* gitOutput(first.workspaceRoot, ["log", "--format=%an <%ae>|%cn <%ce>"]),
+          "Command Center <command-center@example.com>|Command Center <command-center@example.com>",
         );
         assert.equal(
           yield* gitOutput(first.workspaceRoot, ["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -441,9 +443,10 @@ it.effect("gives concurrent named projects with the same name distinct folders",
   ),
 );
 
-it.effect("keeps a named project and reports why when Git cannot commit", () =>
+it.effect("commits a named project under the Command Center identity when the host has none", () =>
   withScratch(({ baseDir }) =>
-    // No identity anywhere, and Git may not guess one from the host name.
+    // No identity anywhere, and Git may not guess one from the host name. The scaffold
+    // never depends on the user's config: it brings the shared Command Center identity.
     withGitEnv(
       {},
       Effect.gen(function* () {
@@ -459,7 +462,11 @@ it.effect("keeps a named project and reports why when Git cannot commit", () =>
 
         const result = yield* folders.createNamedProject({ name: "No Identity" });
 
-        assert.include(result.commitError ?? "", "no name or email");
+        assert.isUndefined(result.commitError);
+        assert.equal(
+          yield* gitOutput(result.workspaceRoot, ["log", "--format=%an <%ae>"]),
+          "Command Center <command-center@example.com>",
+        );
         assert.isTrue(Option.isSome(yield* projects.getById(result.projectId)));
         assert.isTrue(yield* fileSystem.exists(path.join(result.workspaceRoot, "README.md")));
         assert.isTrue(yield* fileSystem.exists(path.join(result.workspaceRoot, ".git")));

@@ -1,4 +1,5 @@
 import * as NodeBuffer from "node:buffer";
+import { commandCenterGitIdentityEnvironment } from "@t3tools/shared/commandCenterGitIdentity";
 
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -831,10 +832,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       const commitEnv: NodeJS.ProcessEnv = {
         ...process.env,
         GIT_INDEX_FILE: tempIndexPath,
-        GIT_AUTHOR_NAME: "Command Center",
-        GIT_AUTHOR_EMAIL: "t3code@users.noreply.github.com",
-        GIT_COMMITTER_NAME: "Command Center",
-        GIT_COMMITTER_EMAIL: "t3code@users.noreply.github.com",
+        ...commandCenterGitIdentityEnvironment(),
       };
 
       // Forced process termination can leave Git's private index lock behind.

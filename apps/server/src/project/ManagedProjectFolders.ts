@@ -9,6 +9,7 @@
  *
  * @module ManagedProjectFolders
  */
+import { commandCenterGitIdentityEnvironment } from "@t3tools/shared/commandCenterGitIdentity";
 import {
   CommandId,
   type GitManagerServiceError,
@@ -458,6 +459,8 @@ const make = Effect.gen(function* () {
         operation: "ManagedProjectFolders.commit",
         cwd,
         args: ["commit", "--message", "Initial commit"],
+        // Hardened git never reads the user's global identity.
+        env: commandCenterGitIdentityEnvironment(),
         allowNonZeroExit: true,
         timeoutMs: 30_000,
       })
