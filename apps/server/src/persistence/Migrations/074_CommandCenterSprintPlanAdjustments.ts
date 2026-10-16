@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /** An immutable receipt for a separately approved, atomic Inbox-to-plan adjustment. */
 export default Effect.gen(function* () {

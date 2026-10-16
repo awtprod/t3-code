@@ -69,9 +69,9 @@ import {
   HttpServerRequest,
   HttpServerResponse,
   HttpServerRespondable,
-} from "effect/unstable/http";
-import * as Cookies from "effect/unstable/http/Cookies";
-import * as Socket from "effect/unstable/socket/Socket";
+} from "effect/http";
+import * as Cookies from "effect/http/Cookies";
+import * as Socket from "effect/socket/Socket";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import {

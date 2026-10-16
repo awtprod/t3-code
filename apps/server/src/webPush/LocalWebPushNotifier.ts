@@ -19,7 +19,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { CommandCenterEventStream } from "../command-center/EventStream.ts";
 import { spaceAgentThreadId } from "../command-center/SpaceAgentIds.ts";

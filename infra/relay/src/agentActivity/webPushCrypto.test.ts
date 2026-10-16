@@ -6,13 +6,13 @@ import * as NodeCrypto from "node:crypto";
 import { p256 } from "@noble/curves/nist";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Base64Url from "effect/encoding/Base64Url";
 import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
 
 import { encryptWebPushPayload, makeVapidJwt, vapidPublicKeyFromPem } from "./webPushCrypto.ts";
 
-const decodeB64Url = (value: string) => Result.getOrThrow(Encoding.decodeBase64Url(value));
+const decodeB64Url = (value: string) => Result.getOrThrow(Base64Url.decode(value));
 
 // RFC 8291 Appendix A test vectors.
 const rfc8291 = {
@@ -37,7 +37,7 @@ describe("webPushCrypto", () => {
         ephemeralPrivateKey: decodeB64Url(rfc8291.senderPrivate),
         salt: decodeB64Url(rfc8291.salt),
       });
-      expect(Encoding.encodeBase64Url(body)).toBe(rfc8291.ciphertext);
+      expect(Base64Url.encode(body)).toBe(rfc8291.ciphertext);
     }),
   );
 
@@ -52,8 +52,8 @@ describe("webPushCrypto", () => {
 
       const body = yield* encryptWebPushPayload({
         plaintext: new TextEncoder().encode(plaintext),
-        p256dh: Encoding.encodeBase64Url(receiverPublic),
-        auth: Encoding.encodeBase64Url(authSecret),
+        p256dh: Base64Url.encode(receiverPublic),
+        auth: Base64Url.encode(authSecret),
       });
 
       // Decrypt per RFC 8291 §3.1/RFC 8188 §2 exactly as a push service

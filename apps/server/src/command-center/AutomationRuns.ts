@@ -19,7 +19,7 @@ import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as CommandCenterService from "./Service.ts";
 import * as RepositoryChecks from "./RepositoryChecks.ts";

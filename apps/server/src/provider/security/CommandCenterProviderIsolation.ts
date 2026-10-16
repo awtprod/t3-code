@@ -6,7 +6,7 @@ import * as NodeModule from "node:module";
 import type { ProviderDriverKind, RuntimeMode, ThreadId } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
@@ -488,7 +488,7 @@ export const prepareCommandCenterCodexHome = Effect.fn(
   "CommandCenterProviderIsolation.prepareCodexHome",
 )(function* (input: PrepareCommandCenterCodexHomeInput) {
   const { fileSystem, path } = input;
-  const threadDigest = Encoding.encodeHex(
+  const threadDigest = Hex.encode(
     yield* input.crypto
       .digest("SHA-256", new TextEncoder().encode(String(input.threadId)))
       .pipe(
@@ -497,7 +497,7 @@ export const prepareCommandCenterCodexHome = Effect.fn(
         ),
       ),
   );
-  const digest = Encoding.encodeHex(
+  const digest = Hex.encode(
     yield* input.crypto
       .digest(
         "SHA-256",
@@ -644,7 +644,7 @@ export const prepareCommandCenterCodexHome = Effect.fn(
     ),
   );
   const header = Option.getOrUndefined(runtimeHeader);
-  const headerMagic = header === undefined ? "" : Encoding.encodeHex(header);
+  const headerMagic = header === undefined ? "" : Hex.encode(header);
   const expectedNativeFormat =
     (input.platform === "linux" && headerMagic === "7f454c46") ||
     (input.platform === "darwin" &&

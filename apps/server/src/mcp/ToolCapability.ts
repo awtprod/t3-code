@@ -1,7 +1,7 @@
 import type { CapabilityName } from "@command-center/core";
 import * as Context from "effect/Context";
 import * as Fiber from "effect/Fiber";
-import { McpSchema, Tool } from "effect/unstable/ai";
+import { McpSchema, Tool } from "effect/ai";
 
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import type { McpCapability } from "./McpInvocationContext.ts";

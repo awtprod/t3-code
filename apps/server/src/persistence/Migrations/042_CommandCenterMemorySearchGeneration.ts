@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /** Marks the rebuildable memory-search projection stale at the canonical write boundary. */
 export default Effect.gen(function* () {

@@ -11,11 +11,11 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { makeCommandCenterAuditLog } from "./AuditLog.ts";
 
@@ -536,7 +536,7 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
   const mutationLock = yield* Semaphore.make(1);
 
   const digest = Effect.fn("SprintPlan.digest")(function* (value: string) {
-    return Encoding.encodeHex(yield* crypto.digest("SHA-256", textEncoder.encode(value)));
+    return Hex.encode(yield* crypto.digest("SHA-256", textEncoder.encode(value)));
   });
 
   const parseSource = (value: string) =>

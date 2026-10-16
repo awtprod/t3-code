@@ -2,7 +2,7 @@ import { WINDOWS_MEDIA_MAX_ENTRIES } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as ProcessRunner from "../processRunner.ts";
 import {

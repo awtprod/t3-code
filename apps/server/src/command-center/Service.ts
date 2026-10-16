@@ -50,13 +50,13 @@ import * as Data from "effect/Data";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ProcessRunner from "../processRunner.ts";
 import { makeCommandCenterAuditLog } from "./AuditLog.ts";
@@ -939,7 +939,7 @@ export const layer = Layer.effect(
     const textEncoder = new TextEncoder();
 
     const digest = Effect.fn("CommandCenter.digest")(function* (value: string) {
-      return Encoding.encodeHex(yield* crypto.digest("SHA-256", textEncoder.encode(value)));
+      return Hex.encode(yield* crypto.digest("SHA-256", textEncoder.encode(value)));
     });
     const auditLog = yield* makeCommandCenterAuditLog;
     const configSyncState = yield* Ref.make<ConfigSyncState | null>(null);

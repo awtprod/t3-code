@@ -38,7 +38,7 @@ import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import { CommandCenterToolkit } from "./toolkits/command-center/tools.ts";
 import { PreviewToolkit } from "./toolkits/preview/tools.ts";
 import { SupabaseToolkit } from "./toolkits/supabase/tools.ts";
-import { Tool } from "effect/unstable/ai";
+import { Tool } from "effect/ai";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");

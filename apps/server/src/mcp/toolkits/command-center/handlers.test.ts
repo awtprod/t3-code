@@ -4,7 +4,7 @@ import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts"
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
-import { Tool } from "effect/unstable/ai";
+import { Tool } from "effect/ai";
 
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";

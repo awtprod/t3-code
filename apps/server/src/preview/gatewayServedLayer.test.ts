@@ -34,7 +34,7 @@ import {
   HttpRouter,
   HttpServer,
   HttpServerResponse,
-} from "effect/unstable/http";
+} from "effect/http";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";

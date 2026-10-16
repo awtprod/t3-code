@@ -23,12 +23,12 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { Artifact, RouteDecision } from "@command-center/core";
 
@@ -448,7 +448,7 @@ const make = Effect.gen(function* () {
         eventStreamError("decode", "Could not decode the audit payload.", row.sequence, cause),
       ),
     );
-    const calculatedHash = Encoding.encodeHex(
+    const calculatedHash = Hex.encode(
       yield* crypto
         .digest(
           "SHA-256",

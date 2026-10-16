@@ -2,7 +2,7 @@ import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { McpSchema, McpServer } from "effect/unstable/ai";
+import { McpSchema, McpServer } from "effect/ai";
 
 import * as SupabaseMcpConnector from "../../../database/SupabaseMcpConnector.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";

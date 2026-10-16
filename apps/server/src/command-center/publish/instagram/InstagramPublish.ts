@@ -16,7 +16,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Schedule from "effect/Schedule";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import type { AuthenticatedSession } from "../../../auth/EnvironmentAuth.ts";
 import { canonicalJson } from "../../automation/Digest.ts";
 import { isInstagramPublishingEnabled } from "./config.ts";

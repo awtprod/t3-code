@@ -32,11 +32,11 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { makeCommandCenterAuditLog } from "./AuditLog.ts";
 import { make as makeObservations } from "./Observations.ts";
@@ -240,7 +240,7 @@ export const make = Effect.gen(function* () {
   const textEncoder = new TextEncoder();
 
   const digest = Effect.fn("CommandCenterInbox.digest")(function* (value: string) {
-    return Encoding.encodeHex(yield* crypto.digest("SHA-256", textEncoder.encode(value)));
+    return Hex.encode(yield* crypto.digest("SHA-256", textEncoder.encode(value)));
   });
 
   const proposalFingerprint = (input: {

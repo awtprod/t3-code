@@ -14,7 +14,7 @@
  * loopback rules stay in {@link ./gatewayTarget.ts}.
  */
 
-import * as Encoding from "effect/Encoding";
+import * as Base64Url from "effect/encoding/Base64Url";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
@@ -115,7 +115,7 @@ export function verifyPreviewPortCookie(input: {
     return { ok: false, reason: "bad-signature" };
   }
 
-  const decoded = Result.getOrUndefined(Encoding.decodeBase64UrlString(encoded));
+  const decoded = Result.getOrUndefined(Base64Url.decodeString(encoded));
   if (decoded === undefined) {
     return { ok: false, reason: "malformed" };
   }

@@ -52,7 +52,8 @@ export const ObservationTimeZone = TrimmedNonEmptyString.check(
 );
 export type ObservationTimeZone = typeof ObservationTimeZone.Type;
 
-const makeId = <Brand extends string>(brand: Brand) => shortString.pipe(Schema.brand(brand));
+const makeId = <Brand extends string>(brand: Parameters<typeof Schema.brand<Brand>>[0]) =>
+  shortString.pipe(Schema.brand<Brand>(brand));
 
 export const ObservationId = makeId("CommandCenterObservationId");
 export type ObservationId = typeof ObservationId.Type;

@@ -5,7 +5,7 @@ import { p256 } from "@noble/curves/nist";
 import { hkdf } from "@noble/hashes/hkdf";
 import { sha256 } from "@noble/hashes/sha2";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Base64Url from "effect/encoding/Base64Url";
 import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
@@ -54,7 +54,7 @@ function concatBytes(...chunks: ReadonlyArray<Uint8Array>): Uint8Array {
 
 function decodeSubscriptionKey(value: string, expectedLength: number): Uint8Array {
   const bytes = Result.getOrThrowWith(
-    Encoding.decodeBase64Url(value),
+    Base64Url.decode(value),
     () => new Error("Web push subscription key is not valid base64url."),
   );
   if (bytes.length !== expectedLength) {
@@ -181,7 +181,7 @@ export const makeVapidJwt = Effect.fn("relay.web_push.make_vapid_jwt")(function*
 
   return yield* Effect.try({
     try: () => {
-      const signingInput = `${Encoding.encodeBase64Url(headerJson)}.${Encoding.encodeBase64Url(payloadJson)}`;
+      const signingInput = `${Base64Url.encode(headerJson)}.${Base64Url.encode(payloadJson)}`;
       // Deterministic ES256 (RFC 6979 via noble), same rationale as apnsJwt:
       // every isolate derives the identical JWT for a (key, exp) pair, so the
       // quantized-expiry cache below never signs twice for one window.
@@ -189,7 +189,7 @@ export const makeVapidJwt = Effect.fn("relay.web_push.make_vapid_jwt")(function*
       const signature = p256
         .sign(sha256(new TextEncoder().encode(signingInput)), scalar, { prehash: false })
         .toCompactRawBytes();
-      return `${signingInput}.${Encoding.encodeBase64Url(signature)}`;
+      return `${signingInput}.${Base64Url.encode(signature)}`;
     },
     catch: (cause) => new WebPushCryptoError({ stage: "vapid-jwt", cause }),
   });
@@ -211,7 +211,7 @@ function vapidSigningScalar(privateKeyPem: string): Uint8Array {
     throw new Error("VAPID signing key is not a P-256 private key.");
   }
   const scalar = Result.getOrThrowWith(
-    Encoding.decodeBase64Url(jwk.d),
+    Base64Url.decode(jwk.d),
     () => new Error("VAPID signing key scalar is not valid base64url."),
   );
   signingScalarCache.set(privateKeyPem, scalar);
@@ -234,18 +234,18 @@ export function vapidPublicKeyFromPem(publicKeyPem: string): string {
     throw new Error("VAPID public key is not a P-256 key.");
   }
   const x = Result.getOrThrowWith(
-    Encoding.decodeBase64Url(jwk.x),
+    Base64Url.decode(jwk.x),
     () => new Error("VAPID public key x coordinate is not valid base64url."),
   );
   const y = Result.getOrThrowWith(
-    Encoding.decodeBase64Url(jwk.y),
+    Base64Url.decode(jwk.y),
     () => new Error("VAPID public key y coordinate is not valid base64url."),
   );
   const point = new Uint8Array(65);
   point[0] = 4;
   point.set(x, 1);
   point.set(y, 33);
-  const encoded = Encoding.encodeBase64Url(point);
+  const encoded = Base64Url.encode(point);
   publicKeyCache.set(publicKeyPem, encoded);
   return encoded;
 }

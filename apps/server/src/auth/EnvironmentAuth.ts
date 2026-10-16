@@ -34,7 +34,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Base64Url from "effect/encoding/Base64Url";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -138,7 +138,7 @@ export function draftScopeIdForAuthenticatedSession(
     session.proofKeyThumbprint,
   ]);
   return AuthDraftScopeId.make(
-    `dpop:${Encoding.encodeBase64Url(sha256(draftScopeEncoder.encode(identity)))}`,
+    `dpop:${Base64Url.encode(sha256(draftScopeEncoder.encode(identity)))}`,
   );
 }
 

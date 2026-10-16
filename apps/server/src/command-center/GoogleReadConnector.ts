@@ -3,7 +3,7 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -581,7 +581,7 @@ export const layer = Layer.effect(
               });
             }
             const bytes = yield* fs.readFile(outputPath);
-            const contentDigest = Encoding.encodeHex(yield* crypto.digest("SHA-256", bytes));
+            const contentDigest = Hex.encode(yield* crypto.digest("SHA-256", bytes));
             const createdAt = DateTime.formatIso(yield* DateTime.now);
             const artifact = yield* decodeArtifact({
               id: artifactId,

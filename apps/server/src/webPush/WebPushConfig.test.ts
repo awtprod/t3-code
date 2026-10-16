@@ -1,7 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Base64Url from "effect/encoding/Base64Url";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -82,7 +82,7 @@ it.layer(NodeServices.layer)("WebPushConfig VAPID key pair", (it) => {
       if (Option.isSome(service.config)) {
         assert.equal(service.config.value.subject, "mailto:ops@example.com");
         assert.equal(Redacted.value(service.config.value.privateKey).includes("PRIVATE KEY"), true);
-        const raw = Result.getOrThrow(Encoding.decodeBase64Url(service.config.value.publicKey));
+        const raw = Result.getOrThrow(Base64Url.decode(service.config.value.publicKey));
         assert.equal(raw.length, 65);
         assert.equal(raw[0], 4);
       }

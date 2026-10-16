@@ -6,7 +6,7 @@ import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Base64Url from "effect/encoding/Base64Url";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -107,7 +107,7 @@ function readSessionTokenExpiry(token: string): number | null {
   if (separator <= 0) {
     return null;
   }
-  const claims = Encoding.decodeBase64UrlString(token.slice(0, separator));
+  const claims = Base64Url.decodeString(token.slice(0, separator));
   if (Result.isFailure(claims)) {
     return null;
   }

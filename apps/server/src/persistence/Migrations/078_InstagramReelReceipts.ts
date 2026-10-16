@@ -1,6 +1,6 @@
 import { CommandCenterError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /** One receipt is also the immutable approval and one-time action. */
 export const createInstagramReelTable = Effect.gen(function* () {

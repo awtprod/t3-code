@@ -28,9 +28,9 @@ import {
   type HttpClientResponse,
   HttpRouter,
   HttpServer,
-} from "effect/unstable/http";
-import * as Cookies from "effect/unstable/http/Cookies";
-import * as NetAddress from "effect/unstable/net/NetAddress";
+} from "effect/http";
+import * as Cookies from "effect/http/Cookies";
+import * as NetAddress from "effect/net/NetAddress";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";

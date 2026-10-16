@@ -5,8 +5,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import type * as SqlConnection from "effect/unstable/sql/SqlConnection";
+import * as SqlClient from "effect/sql/SqlClient";
+import type * as SqlConnection from "effect/sql/SqlConnection";
 
 import { makeRuntimeSqliteLayer } from "./persistence/Layers/Sqlite.ts";
 

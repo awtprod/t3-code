@@ -31,7 +31,7 @@ import {
   GoogleReadResult,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 
 import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as AutomationDefinitionConfig from "../../../command-center/AutomationDefinitionConfig.ts";
