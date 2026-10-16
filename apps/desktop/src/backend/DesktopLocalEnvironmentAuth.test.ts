@@ -490,7 +490,7 @@ describe("saved remote primary recovery", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  for (const [label, catalog] of [
+  it.effect.each([
     [
       "missing matching profile",
       encodedRemoteCatalog.replace("https://remote.example.test", "https://other.example.test"),
@@ -503,20 +503,18 @@ describe("saved remote primary recovery", () => {
       ),
     ],
     ["unreadable catalog", "not-json-with-private-data"],
-  ] as const) {
-    it.effect(`blocks a ${label} without making network requests`, () => {
-      const harness = recoveryHarness({ catalog: () => Option.some(catalog) });
-      return Effect.gen(function* () {
-        const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
-        const error = yield* auth
-          .recoverRemotePrimarySession(remoteSettings.remoteBackendUrl)
-          .pipe(Effect.flip);
-        assert.equal(error._tag, "DesktopSavedEnvironmentRecoveryError");
-        assert.notInclude(error.message, "private-data");
-        assert.deepEqual(harness.requests, []);
-      }).pipe(Effect.provide(harness.layer));
-    });
-  }
+  ] as const)("blocks a %s without making network requests", ([_label, catalog]) => {
+    const harness = recoveryHarness({ catalog: () => Option.some(catalog) });
+    return Effect.gen(function* () {
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      const error = yield* auth
+        .recoverRemotePrimarySession(remoteSettings.remoteBackendUrl)
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "DesktopSavedEnvironmentRecoveryError");
+      assert.notInclude(error.message, "private-data");
+      assert.deepEqual(harness.requests, []);
+    }).pipe(Effect.provide(harness.layer));
+  });
 
   it.effect("checks server identity before sending the saved bearer", () => {
     const harness = recoveryHarness({ environmentId: "different-server" });
@@ -531,7 +529,7 @@ describe("saved remote primary recovery", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  for (const [label, session, sessionStatus] of [
+  it.effect.each([
     ["expired or revoked bearer", { authenticated: false, auth: recoveryAuth }, 200],
     [
       "cookie authentication",
@@ -543,34 +541,33 @@ describe("saved remote primary recovery", () => {
       { _tag: "EnvironmentAuthInvalidError", message: "synthetic-token-private" },
       401,
     ],
-  ] as const) {
-    it.effect(`keeps the gate closed after ${label}`, () => {
-      const harness = recoveryHarness({ session, sessionStatus });
-      return Effect.gen(function* () {
-        const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
-        const error = yield* auth
-          .recoverRemotePrimarySession(remoteSettings.remoteBackendUrl)
-          .pipe(Effect.flip);
-        assert.equal(error._tag, "DesktopSavedEnvironmentRecoveryError");
-        assert.notInclude(error.message, "synthetic-token-private");
-        assert.notInclude(error.message, "No credential is saved");
-        assert.include(
-          error.message,
-          sessionStatus === 200 ? "rejected the saved credential" : "could not be validated",
-        );
-        assert.deepEqual(
-          harness.requests.map((request) => request.method),
-          ["GET", "GET"],
-        );
-      }).pipe(Effect.provide(harness.layer));
-    });
-  }
+  ] as const)("keeps the gate closed after %s", ([_label, session, sessionStatus]) => {
+    const harness = recoveryHarness({ session, sessionStatus });
+    return Effect.gen(function* () {
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      const error = yield* auth
+        .recoverRemotePrimarySession(remoteSettings.remoteBackendUrl)
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "DesktopSavedEnvironmentRecoveryError");
+      assert.notInclude(error.message, "synthetic-token-private");
+      assert.notInclude(error.message, "No credential is saved");
+      assert.include(
+        error.message,
+        sessionStatus === 200 ? "rejected the saved credential" : "could not be validated",
+      );
+      assert.deepEqual(
+        harness.requests.map((request) => request.method),
+        ["GET", "GET"],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
 
-  for (const [label, settings, endpoint] of [
+  it.effect.each([
     ["changed selected endpoint", remoteSettings, "https://other.example.test"],
     ["local primary", DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS, remoteSettings.remoteBackendUrl],
-  ] as const) {
-    it.effect(`blocks a ${label} without bootstrapping or changing settings`, () => {
+  ] as const)(
+    "blocks a %s without bootstrapping or changing settings",
+    ([_label, settings, endpoint]) => {
       const harness = recoveryHarness({ settings: () => settings });
       return Effect.gen(function* () {
         const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
@@ -578,8 +575,8 @@ describe("saved remote primary recovery", () => {
         assert.equal(error._tag, "DesktopSavedEnvironmentRecoveryError");
         assert.deepEqual(harness.requests, []);
       }).pipe(Effect.provide(harness.layer));
-    });
-  }
+    },
+  );
 
   it.effect("does not open the workspace if the primary changes during verification", () => {
     let settings: DesktopAppSettings.DesktopSettings = remoteSettings;

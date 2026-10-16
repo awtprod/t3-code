@@ -156,7 +156,7 @@ describe("server-owned Reel provider artifact", () => {
       expect((yield* Effect.result(port(binding)))._tag).toBe("Failure");
     }),
   );
-  for (const [name, modify] of [
+  it.each([
     [
       "unverified",
       (r) => {
@@ -259,15 +259,16 @@ describe("server-owned Reel provider artifact", () => {
         r.expires_in_seconds = 604801;
       },
     ],
-  ] satisfies Array<[string, (receipt: ReturnType<typeof fixture>["receipt"]) => void]>) {
-    it(`rejects receipt ${name} before fetching`, async () => {
+  ] satisfies Array<[string, (receipt: ReturnType<typeof fixture>["receipt"]) => void]>)(
+    "rejects receipt %s before fetching",
+    async (_name, modify) => {
       const f = fixture();
       modify(f.receipt);
       await reject(f);
       expect(f.calls).toHaveLength(0);
-    });
-  }
-  for (const [name, modify] of [
+    },
+  );
+  it.each([
     [
       "foreign host",
       (u) => {
@@ -349,14 +350,15 @@ describe("server-owned Reel provider artifact", () => {
         u.searchParams.set("X-Amz-Expires", "3600");
       },
     ],
-  ] satisfies Array<[string, (url: URL) => void]>) {
-    it(`rejects signed URL ${name} before fetching`, async () => {
+  ] satisfies Array<[string, (url: URL) => void]>)(
+    "rejects signed URL %s before fetching",
+    async (_name, modify) => {
       const f = fixture();
       modify(f.url);
       await reject(f);
       expect(f.calls).toHaveLength(0);
-    });
-  }
+    },
+  );
   it("rejects explicit default port and invalid AWS calendar date", async () => {
     const f = fixture();
     const read = f.options.readFile!;
@@ -416,7 +418,7 @@ describe("server-owned Reel provider artifact", () => {
     };
     await reject(f);
   });
-  for (const [name, response] of [
+  it.each([
     [
       "changed bytes",
       (f) => {
@@ -431,15 +433,16 @@ describe("server-owned Reel provider artifact", () => {
     ["wrong length", (f) => f.response(false, bytes, { "content-length": "999" })],
     ["encoded body", (f) => f.response(false, bytes, { "content-encoding": "gzip" })],
     ["redirect", () => new Response(null, { status: 302 })],
-  ] satisfies Array<[string, (f: ReturnType<typeof fixture>) => Response]>) {
-    it(`rejects remote ${name}`, async () => {
+  ] satisfies Array<[string, (f: ReturnType<typeof fixture>) => Response]>)(
+    "rejects remote %s",
+    async (_name, response) => {
       const f = fixture();
       let count = 0;
       f.options.fetch = async () => (++count === 1 ? response(f) : f.response(true));
       await reject(f);
-    });
-  }
-  for (const [name, response] of [
+    },
+  );
+  it.each([
     ["status", (f) => f.response(false)],
     [
       "total",
@@ -461,14 +464,15 @@ describe("server-owned Reel provider artifact", () => {
       },
     ],
     ["changed bytes", (f) => f.response(true, new Uint8Array(1024))],
-  ] satisfies Array<[string, (f: ReturnType<typeof fixture>) => Response]>) {
-    it(`rejects range ${name}`, async () => {
+  ] satisfies Array<[string, (f: ReturnType<typeof fixture>) => Response]>)(
+    "rejects range %s",
+    async (_name, response) => {
       const f = fixture();
       let count = 0;
       f.options.fetch = async () => (++count === 1 ? f.response(false) : response(f));
       await reject(f);
-    });
-  }
+    },
+  );
   it("cancels oversize and bad-header streams without reading beyond the bound", async () => {
     for (const invalidHeader of [true, false]) {
       const f = fixture();

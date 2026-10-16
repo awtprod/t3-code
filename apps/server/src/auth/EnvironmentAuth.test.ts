@@ -1077,8 +1077,9 @@ it.layer(NodeServices.layer)("EnvironmentAuth bearer session renewal lineage", (
     }).pipe(Effect.provide(makeRenewalLayer())),
   );
 
-  for (const end of ["original", "successor"] as const) {
-    it.effect(`revoking the ${end} revokes the whole renewal chain`, () =>
+  it.effect.each(["original", "successor"] as const)(
+    "revoking the %s revokes the whole renewal chain",
+    (end) =>
       Effect.gen(function* () {
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
         const admin = yield* adminSessionId();
@@ -1107,8 +1108,7 @@ it.layer(NodeServices.layer)("EnvironmentAuth bearer session renewal lineage", (
         expect(remaining).not.toContain(paired.session.sessionId);
         expect(remaining).not.toContain(secondSession.sessionId);
       }).pipe(Effect.provide(makeRenewalLayer())),
-    );
-  }
+  );
 
   it.effect("revokes a session renewed twice from its root", () =>
     Effect.gen(function* () {

@@ -1748,72 +1748,63 @@ describe("EnvironmentRegistry", () => {
       }),
   );
 
-  for (const initiallySaved of [false, true]) {
-    it.effect(
-      `saves a newly paired primary bearer without replacing its runtime (saved=${initiallySaved})`,
-      () =>
-        Effect.gen(function* () {
-          const primary = new PrimaryConnectionTarget({
-            ...TARGET,
-            environmentId: BEARER_TARGET.environmentId,
-          });
-          const replacement = new BearerConnectionCredential({ token: "new-paired-bearer" });
-          const harness = yield* makeHarness(
-            initiallySaved ? [BEARER_TARGET] : [],
-            initiallySaved ? [BEARER_PROFILE] : [],
-            initiallySaved ? [[BEARER_TARGET.connectionId, BEARER_CREDENTIAL]] : [],
+  it.effect.each([false, true])(
+    "saves a newly paired primary bearer without replacing its runtime (saved=%s)",
+    (initiallySaved) =>
+      Effect.gen(function* () {
+        const primary = new PrimaryConnectionTarget({
+          ...TARGET,
+          environmentId: BEARER_TARGET.environmentId,
+        });
+        const replacement = new BearerConnectionCredential({ token: "new-paired-bearer" });
+        const harness = yield* makeHarness(
+          initiallySaved ? [BEARER_TARGET] : [],
+          initiallySaved ? [BEARER_PROFILE] : [],
+          initiallySaved ? [[BEARER_TARGET.connectionId, BEARER_CREDENTIAL]] : [],
+        );
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.registerPlatform(new PrimaryConnectionRegistration({ target: primary }));
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            primary.environmentId,
+            (state) => state.phase === "connected",
           );
-          yield* Effect.gen(function* () {
-            const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-            yield* registry.registerPlatform(
-              new PrimaryConnectionRegistration({ target: primary }),
-            );
-            yield* registry.start;
-            yield* awaitConnectionState(
-              registry,
-              primary.environmentId,
-              (state) => state.phase === "connected",
-            );
-            const before = yield* registry.run(
-              primary.environmentId,
-              EnvironmentSupervisor.EnvironmentSupervisor,
-            );
-            const sessionsBefore = yield* Ref.get(harness.sessions);
-            const releasedBefore = yield* Ref.get(harness.releasedSessions);
-            yield* registry.register(
-              new BearerConnectionRegistration({
-                target: BEARER_TARGET,
-                profile: BEARER_PROFILE,
-                credential: replacement,
-              }),
-            );
-            expect(
-              (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
-            ).toEqual(replacement);
-            expect(
-              (yield* Ref.get(harness.storedProfiles)).get(BEARER_TARGET.connectionId),
-            ).toEqual(BEARER_PROFILE);
-            expect(
-              (yield* SubscriptionRef.get(registry.entries)).get(primary.environmentId)?.target,
-            ).toEqual(primary);
-            expect(
-              yield* registry.run(
-                primary.environmentId,
-                EnvironmentSupervisor.EnvironmentSupervisor,
-              ),
-            ).toBe(before);
-            expect(yield* Ref.get(harness.sessions)).toBe(sessionsBefore);
-            expect(yield* Ref.get(harness.releasedSessions)).toBe(releasedBefore);
-            yield* registry.registerPlatform(
-              new PrimaryConnectionRegistration({ target: primary }),
-            );
-            expect(
-              (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
-            ).toEqual(replacement);
-          }).pipe(Effect.provide(harness.layer), Effect.scoped);
-        }),
-    );
-  }
+          const before = yield* registry.run(
+            primary.environmentId,
+            EnvironmentSupervisor.EnvironmentSupervisor,
+          );
+          const sessionsBefore = yield* Ref.get(harness.sessions);
+          const releasedBefore = yield* Ref.get(harness.releasedSessions);
+          yield* registry.register(
+            new BearerConnectionRegistration({
+              target: BEARER_TARGET,
+              profile: BEARER_PROFILE,
+              credential: replacement,
+            }),
+          );
+          expect(
+            (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
+          ).toEqual(replacement);
+          expect((yield* Ref.get(harness.storedProfiles)).get(BEARER_TARGET.connectionId)).toEqual(
+            BEARER_PROFILE,
+          );
+          expect(
+            (yield* SubscriptionRef.get(registry.entries)).get(primary.environmentId)?.target,
+          ).toEqual(primary);
+          expect(
+            yield* registry.run(primary.environmentId, EnvironmentSupervisor.EnvironmentSupervisor),
+          ).toBe(before);
+          expect(yield* Ref.get(harness.sessions)).toBe(sessionsBefore);
+          expect(yield* Ref.get(harness.releasedSessions)).toBe(releasedBefore);
+          yield* registry.registerPlatform(new PrimaryConnectionRegistration({ target: primary }));
+          expect(
+            (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
+          ).toEqual(replacement);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
 
   it.effect("keeps remote-primary GitHub routing trust while preserving its saved bearer", () =>
     Effect.gen(function* () {
