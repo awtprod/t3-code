@@ -1,5 +1,10 @@
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import {
+  type ClaudeSdkHooks,
+  makeClaudeModelGuardrailHooks,
+  mergeClaudeSdkHooks,
+} from "./ClaudeModelGuardrail.ts";
+import {
   dynamicToolTitle,
   formatReadToolLabel,
   formatSearchToolLabel,
@@ -1108,6 +1113,8 @@ export function makeClaudeQueryOptions(input: {
   readonly onUserDialog?: ClaudeQueryOptions["onUserDialog"];
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
   readonly allowDangerouslySkipPermissions?: boolean;
+  /** SDK lifecycle hooks, passed through unchanged (see ClaudeModelGuardrail). */
+  readonly hooks?: ClaudeQueryOptions["hooks"];
 }): ClaudeAgentSdkQueryOptions {
   const compiledSelection = compileClaudeModelSelection(input.modelSelection);
   const {
@@ -1161,6 +1168,9 @@ export function makeClaudeQueryOptions(input: {
     ...(input.allowedTools === undefined ? {} : { allowedTools: [...input.allowedTools] }),
     ...(input.disallowedTools === undefined ? {} : { disallowedTools: [...input.disallowedTools] }),
     ...(input.canUseTool === undefined ? {} : { canUseTool: input.canUseTool }),
+    ...(input.hooks === undefined || Object.keys(input.hooks).length === 0
+      ? {}
+      : { hooks: input.hooks }),
     ...(input.allowDangerouslySkipPermissions === true
       ? { allowDangerouslySkipPermissions: true }
       : {}),
@@ -3486,6 +3496,14 @@ export interface ClaudeAdapterV2Options {
       request: ProviderContinuationRequests.ProviderContinuationRequest,
     ) => Effect.Effect<void>;
   };
+  /**
+   * Extra SDK hooks per opened query (for example a `PostToolUse` tool-result
+   * filter). Merged after the model guardrail, which always runs.
+   */
+  readonly sdkHooks?: (context: {
+    readonly threadId: ThreadId;
+    readonly sessionModel: () => string;
+  }) => ClaudeSdkHooks | undefined;
 }
 
 export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
@@ -8572,6 +8590,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             turnInput.nativeThreadHasTurns ?? turnInput.providerTurnOrdinal > 1;
           const shouldResume =
             resumeSessionAt !== undefined || openedWithResume || hasPersistedProviderTurn;
+          // Read at hook time: a live model switch updates the opened context.
+          let openedContext: ClaudeLiveQueryContext | undefined;
+          const sessionModel = () =>
+            openedContext?.selection.apiModelId ?? compiledSelection.apiModelId;
           const queryOptions = makeClaudeQueryOptions({
             modelSelection: turnInput.modelSelection,
             nativeThreadId,
@@ -8597,6 +8619,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             canUseTool,
             onUserDialog,
             supportedDialogKinds: ["resume_return"],
+            hooks: mergeClaudeSdkHooks(
+              makeClaudeModelGuardrailHooks({ sessionModel, catalog: subagentModelCatalog }),
+              adapterOptions.sdkHooks?.({ threadId: turnInput.threadId, sessionModel }),
+            ),
           });
           const querySession = yield* queryRunner
             .open({
@@ -8660,6 +8686,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ),
             ),
           };
+          openedContext = context;
           yield* Ref.set(queryContext, context);
           yield* querySession.messages.pipe(
             Stream.runForEach((message) =>
