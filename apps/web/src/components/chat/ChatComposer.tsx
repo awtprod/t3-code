@@ -2477,15 +2477,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => resolveContextWindowModelDisplayName(activeThreadModelSelection, modelOptionsByInstance),
     [activeThreadModelSelection, modelOptionsByInstance],
   );
-  const activeEfficiencyTier = activeThread?.efficiencyTier ?? settings.efficiency.defaultTier;
+  // V2PORT: efficiency routing fields (S4) — EnvironmentThreadShell has no
+  // routingMode/efficiencyTier, so the thresholds key off the routing state ChatView passes in
+  // (manual until v2 threads carry routing again).
   const contextAdviceThreshold =
-    activeThread?.routingMode === "auto"
-      ? settings.efficiency.contextThresholds[activeEfficiencyTier]
-      : null;
+    efficiencyRoutingMode === "auto" ? settings.efficiency.contextThresholds[efficiencyTier] : null;
   const toolWarningThreshold =
-    activeThread?.routingMode === "auto"
-      ? settings.efficiency.toolWarnings[activeEfficiencyTier]
-      : null;
+    efficiencyRoutingMode === "auto" ? settings.efficiency.toolWarnings[efficiencyTier] : null;
   const reserveContextWindowMeter = shouldReserveContextWindowMeter({
     meterEnabled: settings.contextWindowMeterEnabled,
     detailLoading: props.threadSyncPhase === "loading",
@@ -6950,6 +6948,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       <div className="relative">
         <ComposerSurface.Main
           ref={composerMainSurfaceRef}
+          data-chat-composer-bridge={isComposerSurfaceBridgeOnly ? "true" : undefined}
           data-inline-resting-controls={restingControlsHost === null ? "true" : undefined}
           data-model-only-strip={
             restingControlsHost?.closest("[data-composer-model-strip]") ? "true" : undefined

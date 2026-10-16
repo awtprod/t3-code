@@ -231,7 +231,7 @@ function createCanvas(width: number, height: number): Canvas2D | null {
  * and it keeps alpha, so screenshots with transparency survive intact.
  * Browsers that can't encode it silently fall back to JPEG.
  */
-async function encodeToDataUrl(
+async function encodeCanvas(
   canvas: OffscreenCanvas | HTMLCanvasElement,
   quality: number,
   mimeType: string,
@@ -286,9 +286,7 @@ export function createComposerImageThumbnail(file: File): Promise<string | null>
 
 /**
  * Draws `bitmap` scaled to fit `maxDimension` and encodes it, stepping
- * quality down until the data URL fits `budgetChars`. Returns the smallest
- * encoding produced, even if it still exceeds the budget, so the caller can
- * decide whether to keep or drop it.
+ * quality down until the data URL fits `budgetChars`.
  */
 async function encodeWithinBudget(
   bitmap: ImageBitmap,
@@ -316,12 +314,6 @@ async function encodeWithinBudget(
   }
   target.context.drawImage(bitmap, 0, 0, width, height);
 
-  let smallest: {
-    dataUrl: string;
-    dataUrlLength: number;
-    mimeType: string;
-    imageSize: ImageSize;
-  } | null = null;
   for (const quality of QUALITY_STEPS) {
     const encoded = await encodeCanvas(target.canvas, quality, mimeType);
     if (!encoded) break;
@@ -329,7 +321,7 @@ async function encodeWithinBudget(
       return { blob: encoded, mimeType, imageSize: { width, height } };
     }
   }
-  return smallest;
+  return null;
 }
 
 type ReencodeResult =

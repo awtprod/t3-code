@@ -37,6 +37,7 @@ import {
   hasProviderUsageLimits,
   isUsageLimitsCommand,
 } from "@t3tools/shared/usageLimits";
+import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { usageLimitsBannerItem } from "./chat/ComposerUsageLimits";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as Schema from "effect/Schema";
@@ -80,10 +81,11 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ProviderInteractionMode,
   ProviderDriverKind,
+  type EfficiencyTier,
+  type ThreadRoutingMode,
   resolveEnvironmentMachineKind,
   resolveProjectProviderInstanceEnabled,
   RuntimeMode,
-  SUBAGENT_STARTED_ACTIVITY_KIND,
   TerminalOpenInput,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
@@ -236,7 +238,6 @@ import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_THREAD_TERMINAL_ID,
   MAX_TERMINALS_PER_GROUP,
-  type ChatImageAttachment,
   type ChatMessage,
   isBrowserPreviewAttachment,
   isImageAttachment,
@@ -303,6 +304,7 @@ import { Dialog } from "./ui/dialog";
 import { WizardPopup } from "./ui/wizard";
 import { BranchToolbar, type BranchToolbarHandle } from "./BranchToolbar";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
+import { windowsFileTurnAttachments } from "./chat/windowsMediaPicker.logic";
 import { isEditableFocused } from "../lib/editableFocus";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { resolveChatShortcutCommand, shortcutLabelForCommand } from "../keybindings";
@@ -548,7 +550,6 @@ import {
   type LocalDispatchSnapshot,
   PullRequestDialogState,
   cloneComposerImageForRetry,
-  loadComposerImagesForRetry,
   deriveLockedProvider,
   readFileAsDataUrl,
   resolveFileAttachmentUrl,
@@ -842,6 +843,7 @@ type ChatViewProps =
       environmentId: EnvironmentId;
       threadId: ThreadId;
       onDiffPanelOpen?: () => void;
+      reserveTitleBarControlInset?: boolean;
       forceExpandedMobileComposer?: boolean;
       routeKind: "server";
       draftId?: never;
@@ -850,6 +852,7 @@ type ChatViewProps =
       environmentId: EnvironmentId;
       threadId: ThreadId;
       onDiffPanelOpen?: () => void;
+      reserveTitleBarControlInset?: boolean;
       forceExpandedMobileComposer?: boolean;
       routeKind: "draft";
       draftId: DraftId;
@@ -889,7 +892,9 @@ function useLocalDispatchState(input: {
         hasPendingApproval: input.activePendingApproval !== null,
         hasPendingUserInput: input.activePendingUserInput !== null,
         threadError: input.threadError,
-        latestUserMessageDelegated,
+        // V2PORT: efficiency routing fields (S4) — v1 flagged a latest user message the
+        // router handed to a subagent thread via a "routing.subagent-started" activity;
+        // v2 has no equivalent signal yet, so `latestUserMessageDelegated` is not supplied.
       }),
     [
       input.activeLatestRun,
@@ -1691,6 +1696,7 @@ export default function ChatView(props: ChatViewProps) {
     threadId,
     routeKind,
     onDiffPanelOpen,
+    reserveTitleBarControlInset = true,
     forceExpandedMobileComposer = false,
   } = props;
   const canOperateThread = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
@@ -1771,17 +1777,6 @@ export default function ChatView(props: ChatViewProps) {
     reportFailure: false,
   });
   const forkThreadFromRun = useAtomCommand(threadEnvironment.forkFromRun, {
-    reportFailure: false,
-  });
-  const provisionSandbox = useAtomCommand(threadEnvironment.provisionSandbox, "sandbox provision");
-  const takeOverSandbox = useAtomCommand(threadEnvironment.takeOverSandbox, "sandbox takeover");
-  const resumeSandbox = useAtomCommand(threadEnvironment.resumeSandbox, "sandbox resume");
-  const stopSandbox = useAtomCommand(threadEnvironment.stopSandbox, "sandbox stop");
-  const exportSandboxBranch = useAtomCommand(
-    threadEnvironment.exportSandboxBranch,
-    "sandbox branch export",
-  );
-  const requestSandboxViewerTicket = useAtomCommand(threadEnvironment.requestSandboxViewerTicket, {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
@@ -2328,6 +2323,12 @@ export default function ChatView(props: ChatViewProps) {
     (isServerThread ? activeThread?.runtimeMode : undefined) ??
     defaultRuntimeMode;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
+  // V2PORT: efficiency routing fields (S4) — v2 thread shells carry no routingMode/efficiencyTier
+  // and no v2 command can set them, so the composer shows the manual routing state at the
+  // configured default tier. The fork's per-thread override, retry-one-tier-higher prep
+  // (retryOfTurnId) and draft "auto" default return with S4.
+  const composerEfficiencyRoutingMode: ThreadRoutingMode = "manual";
+  const composerEfficiencyTier: EfficiencyTier = settings.efficiency.defaultTier;
   const canCheckoutPullRequestIntoThread = canWriteSourceControl && isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
   // Prefer the larger of turn-item-committed ids and projection messages so
@@ -9165,6 +9166,7 @@ export default function ChatView(props: ChatViewProps) {
     );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
+    const windowsFileAttachmentsForSend = windowsFileTurnAttachments(composerWindowsFiles);
     // A stale Claude session compacts before this message so the turn does not re-read the
     // old history. The message queues behind the /compact run, since steering into it is
     // rejected.
@@ -9633,27 +9635,30 @@ export default function ChatView(props: ChatViewProps) {
       }
       return;
     }
-    const optimisticAttachments = composerAttachmentsSnapshot.map((attachment) =>
-      attachment.type === "image"
-        ? {
-            type: "image" as const,
-            id: attachment.id,
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            sizeBytes: attachment.sizeBytes,
-            previewUrl: attachment.previewUrl,
-            ...(attachment.source ? { source: attachment.source } : {}),
-          }
-        : {
-            type: "file" as const,
-            id: attachment.id,
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            sizeBytes: attachment.sizeBytes,
-            downloadable: false,
-            ...(attachment.source ? { source: attachment.source } : {}),
-          },
-    );
+    const optimisticAttachments = [
+      ...composerAttachmentsSnapshot.map((attachment) =>
+        attachment.type === "image"
+          ? {
+              type: "image" as const,
+              id: attachment.id,
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              sizeBytes: attachment.sizeBytes,
+              previewUrl: attachment.previewUrl,
+              ...(attachment.source ? { source: attachment.source } : {}),
+            }
+          : {
+              type: "file" as const,
+              id: attachment.id,
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              sizeBytes: attachment.sizeBytes,
+              downloadable: false,
+              ...(attachment.source ? { source: attachment.source } : {}),
+            },
+      ),
+      ...windowsFileAttachmentsForSend,
+    ];
     if (!shouldQueueBehindActiveRun) {
       // A sent turn returns to the live edge and anchors its new transcript
       // row. Queued input stays in the composer queue and must not move the
@@ -9739,9 +9744,9 @@ export default function ChatView(props: ChatViewProps) {
       ctxSelectedModel || activeProjectDefaultModelSelection?.model || DEFAULT_MODEL,
       ctxSelectedModelSelection.options,
     );
-    const selectedRoutingMode = composerEfficiencyRoutingMode;
-    const selectedEfficiencyTier = composerEfficiencyTier;
-    const retryOfTurnIdForSend = retryOfTurnIdRef.current;
+    // V2PORT: efficiency routing fields (S4) — v2 StartThreadTurnInput, its createThread
+    // bootstrap and UpdateThreadMetadataInput carry no routingMode/efficiencyTier/retryOfTurnId,
+    // so this send (and the thread-settings persist below) dispatches without routing.
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
 
@@ -9800,8 +9805,7 @@ export default function ChatView(props: ChatViewProps) {
                       projectId: activeProject.id,
                       title,
                       modelSelection: threadCreateModelSelection,
-                      routingMode: selectedRoutingMode,
-                      efficiencyTier: selectedEfficiencyTier,
+                      // V2PORT: efficiency routing fields (S4) — not in v2 createThread bootstrap.
                       runtimeMode,
                       interactionMode: sendInteractionMode,
                       branch: activeThreadBranch,
@@ -9864,9 +9868,7 @@ export default function ChatView(props: ChatViewProps) {
             })(),
           },
           modelSelection: ctxSelectedModelSelection,
-          routingMode: selectedRoutingMode,
-          efficiencyTier: selectedEfficiencyTier,
-          ...(retryOfTurnIdForSend === null ? {} : { retryOfTurnId: retryOfTurnIdForSend }),
+          // V2PORT: efficiency routing fields (S4) — routingMode/efficiencyTier/retryOfTurnId not in v2.
           titleSeed: title,
           runtimeMode,
           interactionMode: sendInteractionMode,
@@ -10383,6 +10385,8 @@ export default function ChatView(props: ChatViewProps) {
             attachments: [],
           },
           modelSelection: ctxSelectedModelSelection,
+          // V2PORT: efficiency routing fields (S4) — the plan follow-up send carried
+          // routingMode/efficiencyTier (here and in the settings persist above); v2 has neither.
           titleSeed: activeThread.title,
           runtimeMode,
           interactionMode: nextInteractionMode,
@@ -10461,8 +10465,6 @@ export default function ChatView(props: ChatViewProps) {
     });
     const nextThreadTitle = truncate(buildPlanImplementationThreadTitle(planMarkdown));
     const nextThreadModelSelection: ModelSelection = ctxSelectedModelSelection;
-    const nextRoutingMode = composerEfficiencyRoutingMode;
-    const nextEfficiencyTier = composerEfficiencyTier;
 
     sendInFlightRef.current = true;
     beginLocalDispatch({ preparingWorktree: false });
@@ -10478,8 +10480,7 @@ export default function ChatView(props: ChatViewProps) {
         projectId: activeProject.id,
         title: nextThreadTitle,
         modelSelection: nextThreadModelSelection,
-        routingMode: nextRoutingMode,
-        efficiencyTier: nextEfficiencyTier,
+        // V2PORT: efficiency routing fields (S4) — v2 CreateThreadInput has no routingMode/efficiencyTier.
         runtimeMode: defaultRuntimeMode,
         interactionMode: "default",
         branch: activeThreadBranch,
@@ -10502,8 +10503,7 @@ export default function ChatView(props: ChatViewProps) {
             attachments: [],
           },
           modelSelection: ctxSelectedModelSelection,
-          routingMode: nextRoutingMode,
-          efficiencyTier: nextEfficiencyTier,
+          // V2PORT: efficiency routing fields (S4) — v2 StartThreadTurnInput has no routingMode/efficiencyTier.
           titleSeed: nextThreadTitle,
           runtimeMode: defaultRuntimeMode,
           interactionMode: "default",
@@ -10970,40 +10970,6 @@ export default function ChatView(props: ChatViewProps) {
             ? addPullRequestsSurfaceStable
             : undefined
         }
-      />
-    ) : renderedRightPanelSurface?.kind === "desktop" ? (
-      <SandboxDesktopPanel
-        sandbox={activeServerThread?.sandbox ?? null}
-        onProvision={() => provisionSandbox({ environmentId, input: { threadId } })}
-        onTakeover={() =>
-          takeOverSandbox({
-            environmentId,
-            input: { threadId, sessionId: `desktop-${randomHex(16)}` },
-          })
-        }
-        onResume={(leaseId) =>
-          resumeSandbox({
-            environmentId,
-            input: {
-              threadId,
-              ...(leaseId === undefined ? {} : { leaseId }),
-              takeoverSummary:
-                "Manual desktop control ended; repository and browser state may have changed.",
-            },
-          })
-        }
-        onStop={() => stopSandbox({ environmentId, input: { threadId } })}
-        onExport={() => exportSandboxBranch({ environmentId, input: { threadId } })}
-        onReconnect={() => undefined}
-        onRequestViewerUrl={async () => {
-          const result = await requestSandboxViewerTicket({
-            environmentId,
-            input: { threadId },
-          });
-          if (result._tag === "Failure")
-            throw new Error("Could not obtain a desktop viewer ticket.");
-          return result.value.viewerUrl;
-        }}
       />
     ) : renderedRightPanelSurface?.kind === "pull-requests" && activeThreadRef ? (
       <ThreadPullRequestsPanel threadRef={activeThreadRef} />
@@ -11577,6 +11543,7 @@ export default function ChatView(props: ChatViewProps) {
                               attachmentUploadsCapabilityKnown={attachmentUploadsCapabilityKnown}
                               supportsAttachmentUploads={supportsAttachmentUploads}
                               supportsQuestionAttachments={supportsQuestionAttachments}
+                              supportsWindowsMedia={supportsWindowsMedia}
                               maxFileAttachmentBytes={maxFileAttachmentBytes}
                               routeKind={routeKind}
                               routeThreadRef={routeThreadRef}
@@ -11667,6 +11634,8 @@ export default function ChatView(props: ChatViewProps) {
                               compactThreadUnavailable={compactThreadUnavailable}
                               compactDisabled={compactDisabled}
                               compactDisabledReason={compactDisabledReason}
+                              efficiencyRoutingMode={composerEfficiencyRoutingMode}
+                              efficiencyTier={composerEfficiencyTier}
                               resolvedTheme={resolvedTheme}
                               settings={settings}
                               keybindings={keybindings}

@@ -724,7 +724,10 @@ export function ProviderInstanceCard({
     liveProvider?.compatibilityAdvisory,
     enabled,
   );
-  const updateCommand = versionAdvisory?.updateCommand ?? null;
+  // Only surface an update command when the server says this install can be
+  // updated in place; compatibility guidance may still suppress it.
+  const providerMaintenance = getProviderMaintenancePresentation(liveProvider?.versionAdvisory);
+  const updateCommand = providerMaintenance ? (versionAdvisory?.updateCommand ?? null) : null;
   const updateState = liveProvider?.updateState;
   // The server reports each update step. `isUpdating` also covers the moment
   // between the click and the server's first report.

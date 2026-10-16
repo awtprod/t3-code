@@ -142,7 +142,7 @@ import { AnimatedHeight } from "../AnimatedHeight";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { Textarea } from "../ui/textarea";
 import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
-import { readHostedPairingRequest } from "../../hostedPairing";
+import { isRemoteOnlyBuild, readHostedPairingRequest } from "../../hostedPairing";
 import {
   createServerPairingCredential,
   revokeOtherServerClientSessions,
@@ -3738,7 +3738,8 @@ export function ConnectionsSettings() {
 
   const primarySettings = (
     <>
-      {primaryEnvironmentId !== null ? (
+      {desktopBridge && !remoteOnlyBuild ? <DesktopPrimaryBackendSettings /> : null}
+      {primaryEnvironmentId !== null && !remoteOnlyBuild ? (
         <>
           <SettingsSection
             {...searchableSetting("connections-environment")}

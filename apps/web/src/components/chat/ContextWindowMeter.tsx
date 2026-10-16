@@ -161,6 +161,38 @@ export function ContextWindowMeter(props: {
               </span>
             </div>
           ) : null}
+          {latestInput !== null || latestOutput !== null ? (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-2xs leading-4">
+              <span className="text-secondary-label">Uncached input</span>
+              <span className="text-right tabular-nums text-secondary-label">
+                {latestInput === null
+                  ? "Unavailable"
+                  : formatContextWindowTokens(
+                      Math.max(0, latestInput - (latestCacheRead ?? 0) - (latestCacheWrite ?? 0)),
+                    )}
+              </span>
+              <span className="text-secondary-label">Cache read</span>
+              <span className="text-right tabular-nums text-secondary-label">
+                {latestCacheRead === null
+                  ? "Unavailable"
+                  : formatContextWindowTokens(latestCacheRead)}
+              </span>
+              <span className="text-secondary-label">Cache write</span>
+              <span className="text-right tabular-nums text-secondary-label">
+                {latestCacheWrite === null
+                  ? "Unavailable"
+                  : formatContextWindowTokens(latestCacheWrite)}
+              </span>
+              <span className="text-secondary-label">Output</span>
+              <span className="text-right tabular-nums text-secondary-label">
+                {latestOutput === null ? "Unavailable" : formatContextWindowTokens(latestOutput)}
+              </span>
+              <span className="text-secondary-label">Cache utilization</span>
+              <span className="text-right tabular-nums text-secondary-label">
+                {formatPercentage(cacheUtilization) ?? "Unavailable"}
+              </span>
+            </div>
+          ) : null}
           {usage.cost != null ? (
             <div className="flex items-center justify-between gap-3 text-2xs leading-4">
               <span className="text-secondary-label">Cost</span>

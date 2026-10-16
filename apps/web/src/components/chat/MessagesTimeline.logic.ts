@@ -55,6 +55,7 @@ import {
   type ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
+import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import type { ThreadRunSummary } from "@t3tools/client-runtime/state/shell";
 import {
   resolveT3McpToolDefinition,
@@ -551,6 +552,18 @@ type MessagesTimelineRowContent =
       kind: "working";
       id: string;
       createdAt: string | null;
+      /**
+       * Transport state for the thread's environment, or `null` for a local
+       * draft that has no environment connection to report on.
+       */
+      connectionPhase: EnvironmentConnectionPhase | null;
+      /**
+       * When the thread last produced activity. Used to time the "stalled"
+       * label from the start of the *silence* rather than from the start of
+       * the turn — a turn that worked for 9 minutes and then went quiet for 2
+       * has been unresponsive for 2, and saying otherwise would overstate it.
+       */
+      lastActivityAt: string | null;
     }
   | {
       kind: "thinking";
@@ -1535,6 +1548,10 @@ export function deriveMessagesTimelineRows(input: {
    */
   runlessWorkActive?: boolean;
   activeTurnStartedAt?: string | null;
+  /** Environment transport state; drives the "reconnecting" working label. */
+  connectionPhase?: EnvironmentConnectionPhase | null | undefined;
+  /** Thread `updatedAt`; times the "stalled" working label from the silence. */
+  lastActivityAt?: string | null | undefined;
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   supportsConversationRollback: boolean;
   /** Task ids of subagents still working, used by the active tool indicator. */
@@ -1696,6 +1713,8 @@ export function deriveMessagesTimelineRows(input: {
       kind: "working",
       id: "working-indicator-row",
       createdAt: input.activeTurnStartedAt ?? null,
+      connectionPhase: input.connectionPhase ?? null,
+      lastActivityAt: input.lastActivityAt ?? null,
     });
   };
   let hasActivityRow = false;
@@ -2375,8 +2394,17 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   if (a.kind !== b.kind || a.id !== b.id) return false;
 
   switch (a.kind) {
-    case "working":
-      return a.createdAt === (b as typeof a).createdAt;
+    case "working": {
+      const bw = b as typeof a;
+      // `connectionPhase` must participate: without it the memoized row is
+      // reused and the indicator keeps claiming "Working" after the socket
+      // drops. Same for `lastActivityAt`, which is what makes silence visible.
+      return (
+        a.createdAt === bw.createdAt &&
+        a.connectionPhase === bw.connectionPhase &&
+        a.lastActivityAt === bw.lastActivityAt
+      );
+    }
     case "thinking": {
       const bt = b as typeof a;
       return a.createdAt === bt.createdAt && a.groupId === bt.groupId && a.expanded === bt.expanded;

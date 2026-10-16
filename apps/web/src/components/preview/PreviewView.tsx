@@ -79,7 +79,6 @@ import { alternatePreviewRuntime, useRendersServerTabNatively } from "~/browser/
 import { ServerBrowserSurface, type ServerBrowserHandle } from "~/browser/ServerBrowserSurface";
 import { cn } from "~/lib/utils";
 import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
-import { WebPreviewFrame } from "~/browser/WebPreviewFrame";
 import { usePreviewSession } from "./usePreviewSession";
 import { ZoomIndicator } from "./ZoomIndicator";
 import { AgentBrowserCursor } from "./AgentBrowserCursor";
@@ -151,7 +150,6 @@ export function PreviewView({
   onSendAnnotation,
 }: Props) {
   const [focusUrlNonce, setFocusUrlNonce] = useState<number | undefined>(undefined);
-  const [frameReloadNonce, setFrameReloadNonce] = useState(0);
   const [pickActive, setPickActive] = useState(false);
   const canSendAnnotation =
     useEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope) &&
@@ -274,18 +272,8 @@ export function PreviewView({
         return true;
       }
       if (runtimeTabId && previewBridge) {
-        // Drive the webview imperatively; `usePreviewBridge` mirrors the
-        // resolved URL back to the server so other clients stay in sync.
+        // The bridge mirrors the resolved URL back to the server.
         await previewBridge.navigate(runtimeTabId, resolvedUrl);
-        rememberPreviewUrl(threadRef, resolvedUrl);
-        return true;
-      } else if (tabId) {
-        const result = await navigate({
-          environmentId: threadRef.environmentId,
-          input: { threadId: threadRef.threadId, tabId, url: resolvedUrl },
-        });
-        if (result._tag === "Failure") return false;
-        updatePreviewServerSnapshot(threadRef, result.value);
         rememberPreviewUrl(threadRef, resolvedUrl);
         return true;
       }

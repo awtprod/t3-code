@@ -11,6 +11,7 @@ import type { ConnectionTarget } from "@t3tools/client-runtime/connection";
 
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
 import { isElectron } from "~/env";
+import { readServerConfig } from "~/state/server";
 import { readPreparedConnection } from "~/state/session";
 
 export const normalizeHostname = (host: string): string =>

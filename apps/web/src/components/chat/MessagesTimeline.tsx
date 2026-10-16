@@ -5,6 +5,7 @@ import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
+import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
 import { useRightPanelStore } from "~/rightPanelStore";
 import {
@@ -124,6 +125,7 @@ import remarkGfm from "remark-gfm";
 import type { Root, RootContent } from "mdast";
 import { T3Wordmark } from "../T3Wordmark";
 import { ThreadContextChip } from "../ThreadContextChip";
+import { ChatVideoClipTile } from "./ChatVideoClipTile";
 import {
   BotIcon,
   BrainIcon,
@@ -203,6 +205,7 @@ import { useAssistantCitationTarget, type CitationHistoryPage } from "./useAssis
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRowsWithState,
+  deriveWorkingIndicatorStatus,
   type MessagesTimelineRowsProjection,
   liveWorkEntryLabel,
   resolveAssistantMessageCopyState,
@@ -233,6 +236,7 @@ import {
   TIMELINE_MINIMAP_MIN_ITEMS,
   type TimelineLatestRun,
   type WorkGroupScrollAnchor,
+  type WorkingIndicatorStatus,
 } from "./MessagesTimeline.logic";
 import { type ThreadFindMatch } from "./threadFind";
 import { useThreadFindNavigation } from "./useThreadFindNavigation";
@@ -466,6 +470,14 @@ interface MessagesTimelineProps {
   runlessWorkActive?: boolean;
   activeTurnInProgress: boolean;
   activeTurnStartedAt?: string | null;
+  /**
+   * Transport state of the thread's environment, so the working indicator can
+   * stop claiming progress while the socket is down. `null` for a local draft,
+   * which has no environment connection.
+   */
+  connectionPhase?: EnvironmentConnectionPhase | null;
+  /** Thread `updatedAt` — times the "stalled" label from the silence, not the turn. */
+  lastActivityAt?: string | null;
   worktreeSetup?: WorktreeSetupSnapshot | null;
   onCancelWorktreeSetup?: () => void;
   /** Runs whose failed workspace preparation can be retried, keyed by run id. */
@@ -581,6 +593,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
   runlessWorkActive = false,
   activeTurnInProgress,
   activeTurnStartedAt = null,
+  connectionPhase = null,
+  lastActivityAt = null,
   worktreeSetup = null,
   footer = null,
   onCancelWorktreeSetup,
@@ -3857,6 +3871,18 @@ function toolIconAcceptsTint(toolIcon: ToolActivityIcon | undefined): boolean {
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
   const { isCompacting, isPreparingWorktree, backgroundWorktreeSetup } =
     use(TimelineRowActivityCtx);
+  // The status is derived here rather than in ChatView because it depends on
+  // wall-clock time: a turn crosses into "stalled" purely by the passage of
+  // seconds, with no state change upstream to trigger a re-render. Ticking in
+  // ChatView would re-render the entire view every few seconds; ticking here
+  // re-renders one row, consistent with the self-ticking labels below.
+  const status = useWorkingIndicatorStatus(row.connectionPhase, row.lastActivityAt, row.createdAt);
+  // The same instant the threshold is measured from, so the label and the
+  // status can never disagree about how long the silence has run.
+  const silenceStartedAt = resolveWorkingSilenceStart(row.lastActivityAt, row.createdAt);
+  // The turn genuinely may still be running server-side, but once the status
+  // leaves "working" the label stops claiming we can see progress.
+  const labelClassName = status === "working" ? "text-muted-foreground" : "text-warning-foreground";
   // One span for every label so the setup-to-working handoff swaps text in
   // place instead of remounting the row.
   const shimmer = isPreparingWorktree || isCompacting;
@@ -3864,16 +3890,22 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
     "Setting up worktree…"
   ) : isCompacting ? (
     <CompactingLabel />
-  ) : row.createdAt ? (
-    <>
-      Working for <WorkingTimer createdAt={row.createdAt} />
-    </>
   ) : (
-    "Working..."
+    <WorkingRowLabel
+      status={status}
+      createdAt={row.createdAt}
+      silenceStartedAt={silenceStartedAt}
+    />
   );
   return (
     <div className="border-b border-border/60 pb-2 pt-1">
-      <div className="flex h-6 min-w-0 items-baseline gap-2 px-1 text-sm leading-relaxed text-muted-foreground tabular-nums">
+      <div
+        className={cn(
+          "flex h-6 min-w-0 items-baseline gap-2 px-1 text-sm leading-relaxed tabular-nums",
+          labelClassName,
+        )}
+        data-working-status={status}
+      >
         <span
           ref={shimmer ? observeVisibleAnimation : undefined}
           className="relative shrink-0 overflow-hidden whitespace-nowrap"
@@ -3887,6 +3919,87 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
       </div>
     </div>
   );
+}
+
+/**
+ * Re-evaluates the indicator status as silence accumulates.
+ *
+ * Only re-renders on an actual status *change*, not on every tick: the interval
+ * is coarse (the threshold is minutes, so second-level precision buys nothing)
+ * and the setState is a no-op while the status holds steady. The interval is
+ * dropped entirely once "stalled" is reached, since nothing further can change
+ * it without new props.
+ */
+function useWorkingIndicatorStatus(
+  connectionPhase: EnvironmentConnectionPhase | null,
+  lastActivityAt: string | null,
+  workStartedAt: string | null,
+): WorkingIndicatorStatus {
+  const evaluateStatus = useCallback(
+    () =>
+      deriveWorkingIndicatorStatus({
+        connectionPhase,
+        lastActivityAt,
+        workStartedAt,
+        nowMs: Date.now(),
+      }),
+    [connectionPhase, lastActivityAt, workStartedAt],
+  );
+  const [status, setStatus] = useState<WorkingIndicatorStatus>(evaluateStatus);
+
+  useEffect(() => {
+    // Props changed — resync immediately rather than waiting out the interval,
+    // so a socket drop is reflected at once.
+    const initial = evaluateStatus();
+    setStatus(initial);
+    if (initial === "stalled") return;
+
+    const id = setInterval(() => {
+      const next = evaluateStatus();
+      setStatus(next);
+      if (next === "stalled") clearInterval(id);
+    }, WORKING_STATUS_POLL_MS);
+    return () => clearInterval(id);
+  }, [evaluateStatus]);
+
+  return status;
+}
+
+/** How often the working row re-checks whether silence has crossed the threshold. */
+const WORKING_STATUS_POLL_MS = 5_000;
+
+function WorkingRowLabel({
+  status,
+  createdAt,
+  silenceStartedAt,
+}: {
+  status: WorkingIndicatorStatus;
+  createdAt: string | null;
+  silenceStartedAt: string | null;
+}) {
+  switch (status) {
+    case "reconnecting":
+      // Deliberately not an error: a turn survives a client disconnect, so the
+      // work is probably still happening — we just cannot see it right now.
+      return <>Reconnecting… this turn keeps running on the server</>;
+    case "stalled":
+      // Timed from the last activity, not from the turn start.
+      return silenceStartedAt ? (
+        <>
+          No response for <WorkingTimer createdAt={silenceStartedAt} /> — may be stuck
+        </>
+      ) : (
+        <>No response yet — may be stuck</>
+      );
+    case "working":
+      return createdAt ? (
+        <>
+          Working for <WorkingTimer createdAt={createdAt} />
+        </>
+      ) : (
+        <>Working...</>
+      );
+  }
 }
 
 /**
@@ -4249,7 +4362,7 @@ function WorkGroupToggleTimelineRow({
   row: Extract<TimelineRow, { kind: "work-toggle" }>;
 }) {
   const ctx = use(TimelineRowCtx);
-  return (
+  const toggle = (
     <WorkGroupHeader
       label={row.summary}
       iconName={row.summaryToolIcon ?? row.toolSurface ?? toolGroupSummaryIconName(row.summaryKind)}
@@ -4260,6 +4373,32 @@ function WorkGroupToggleTimelineRow({
       timestampFormat={ctx.timestampFormat}
       onToggle={() => ctx.onToggleWorkGroup(row.groupId, row.id)}
     />
+  );
+  // Finished clips stay visible while the group is collapsed: they are the
+  // deliverable, not a detail of the tool calls.
+  const { threadRef, workspaceRoot } = ctx;
+  if (row.videoClipPaths.length === 0 || !threadRef) return toggle;
+  return (
+    <div>
+      {toggle}
+      <div className="mt-1 mb-0.5 ms-7 flex flex-wrap gap-2">
+        {row.videoClipPaths.map((videoPath) => {
+          const clip = resolveVideoClipAsset(videoPath, {
+            threadId: threadRef.threadId,
+            workspaceRoot,
+          });
+          return clip ? (
+            <ChatVideoClipTile
+              key={videoPath}
+              environmentId={threadRef.environmentId}
+              resource={clip.resource}
+              name={clip.name}
+              onImageExpand={ctx.onImageExpand}
+            />
+          ) : null;
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -4297,30 +4436,6 @@ function WorkGroupHeader(props: {
         <TimelineRowTimestamp createdAt={props.createdAt} timestampFormat={props.timestampFormat} />
       }
     />
-  );
-  const { threadRef, workspaceRoot } = ctx;
-  if (row.videoClipPaths.length === 0 || !threadRef) return toggle;
-  return (
-    <div>
-      {toggle}
-      <div className="mt-1 mb-0.5 ms-7 flex flex-wrap gap-2">
-        {row.videoClipPaths.map((videoPath) => {
-          const clip = resolveVideoClipAsset(videoPath, {
-            threadId: threadRef.threadId,
-            workspaceRoot,
-          });
-          return clip ? (
-            <ChatVideoClipTile
-              key={videoPath}
-              environmentId={threadRef.environmentId}
-              resource={clip.resource}
-              name={clip.name}
-              onImageExpand={ctx.onImageExpand}
-            />
-          ) : null;
-        })}
-      </div>
-    </div>
   );
 }
 
@@ -5494,68 +5609,6 @@ function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
   return workToneIcon(workEntry.tone).iconName;
 }
 
-function capitalizePhrase(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    return value;
-  }
-  return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
-}
-
-function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
-  if (!workEntry.toolTitle) {
-    return capitalizePhrase(normalizeCompactToolLabel(workEntry.label));
-  }
-  return capitalizePhrase(normalizeCompactToolLabel(workEntry.toolTitle));
-}
-
-function SubagentWorkEntryRow({ workEntry }: { workEntry: TimelineWorkEntry }) {
-  const data =
-    workEntry.toolData && typeof workEntry.toolData === "object"
-      ? (workEntry.toolData as Record<string, unknown>)
-      : null;
-  const state = typeof data?.state === "string" ? data.state : "running";
-  const name =
-    (typeof data?.name === "string" && data.name) ||
-    (typeof data?.agentType === "string" && data.agentType) ||
-    "Subagent";
-  const provider = typeof data?.provider === "string" ? data.provider : "provider";
-  const summary =
-    (typeof data?.resultSummary === "string" && data.resultSummary) ||
-    (typeof data?.errorSummary === "string" && data.errorSummary) ||
-    (typeof data?.description === "string" && data.description) ||
-    workEntry.detail;
-  const statusClass =
-    state === "failed"
-      ? "text-destructive"
-      : state === "completed"
-        ? "text-success-foreground"
-        : state === "suspended"
-          ? "text-warning-foreground"
-          : "text-info-foreground";
-  return (
-    <div className="my-1 flex gap-2 rounded-lg border border-border/55 bg-muted/20 px-2.5 py-2">
-      <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-accent/55">
-        <BotIcon className="size-3.5" aria-hidden />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 text-xs">
-          <span className="truncate font-medium text-foreground/90">{name}</span>
-          <span className="rounded bg-muted px-1.5 py-0.5 text-3xs text-muted-foreground">
-            {provider}
-          </span>
-          <span className={cn("ms-auto text-3xs font-medium capitalize", statusClass)}>
-            {state}
-          </span>
-        </div>
-        {summary ? (
-          <p className="mt-1 line-clamp-2 text-2xs leading-4 text-muted-foreground">{summary}</p>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
 const stopRowToggle = (e: { stopPropagation: () => void }) => e.stopPropagation();
 
 function remarkThoughtPreview(fallback: string) {
@@ -6032,6 +6085,20 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
             </>
           )}
         </WorkLogDetails>
+      ) : null}
+      {videoClip && threadRef ? (
+        <div
+          className="mt-1 mb-0.5 ms-7 cursor-default"
+          onClick={stopRowToggle}
+          onPointerDown={stopRowToggle}
+        >
+          <ChatVideoClipTile
+            environmentId={threadRef.environmentId}
+            resource={videoClip.resource}
+            name={videoClip.name}
+            onImageExpand={onImageExpand}
+          />
+        </div>
       ) : null}
     </WorkLogRow>
   );

@@ -11,7 +11,13 @@ import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-searc
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/reactivity";
-import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import {
+  planPinnedReorder,
+  resolveSettledThreadTimestamp,
+  sortActiveThreadsByOrderKey,
+  sortSettledThreads,
+} from "@t3tools/client-runtime/state/thread-sort";
+import type { ThreadRouteTarget } from "../threadRoutes";
 import {
   effectiveSnoozed,
   type ThreadSnoozeShell,
@@ -1083,7 +1089,15 @@ export function firstValidTimestampMs(
   return 0;
 }
 
-export { sortActiveThreadsByOrderKey as sortThreadsForSidebar } from "@t3tools/client-runtime/state/thread-sort";
+export const sortThreadsForSidebar = sortActiveThreadsByOrderKey;
+
+// SidebarV2 (./SidebarV2.tsx) uses the same status and sort model under its
+// own exported names, so each surface can evolve independently.
+export const sortThreadsForSidebarV2 = sortThreadsForSidebar;
+export const sortSettledThreadsForSidebarV2 = sortSettledThreads;
+export function resolveSidebarV2Status(thread: SidebarThreadStatusInput): SidebarThreadStatus {
+  return resolveSidebarThreadStatus(thread);
+}
 // The Working section beta folds and orders the inbox the same way on mobile.
 export {
   isThreadWorking as isSidebarThreadWorking,

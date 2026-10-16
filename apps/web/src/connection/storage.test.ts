@@ -65,8 +65,8 @@ describe("ConnectionStorage.makeCatalogStore", () => {
             persisted = raw;
           }),
       };
-      const winner = yield* makeCatalogStore(backend);
-      const loser = yield* makeCatalogStore(backend);
+      const winner = yield* ConnectionStorage.makeCatalogStore(backend);
+      const loser = yield* ConnectionStorage.makeCatalogStore(backend);
       expect(tokens(yield* loser.read)).toEqual(["old-token"]);
 
       yield* winner.update((document) => ({
@@ -79,7 +79,7 @@ describe("ConnectionStorage.makeCatalogStore", () => {
       expect(tokens(yield* loser.read)).toEqual(["renewed-token"]);
 
       // ...and an unrelated write from a stale window keeps the renewed token.
-      const stale = yield* makeCatalogStore(backend);
+      const stale = yield* ConnectionStorage.makeCatalogStore(backend);
       yield* stale.read;
       yield* winner.update((document) => ({
         ...document,

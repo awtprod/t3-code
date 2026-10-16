@@ -18,7 +18,7 @@ import { Check, ChevronDown, ChevronUp, Copy } from "lucide";
 import { cn } from "~/lib/utils";
 import { Button, buttonVariants } from "~/components/ui/button";
 import { MorphIcon } from "~/components/MorphIcon";
-import { useComposerDraftStore } from "~/composerDraftStore";
+import { useActiveThreadRefFromRoute } from "~/hooks/useActiveThreadRef";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import {
   buildVisibleToastLayout,

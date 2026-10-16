@@ -127,9 +127,16 @@ export function useLiveRefresh(
     readonly enabled?: boolean;
     readonly key?: string;
     readonly intervalMs?: number;
+    /** Keep refreshing while the window is visible instead of stopping after idle time. */
+    readonly refreshWhileVisible?: boolean;
   } = {},
 ): void {
-  const { enabled = true, key, intervalMs = LIVE_REFRESH_INTERVAL_MS } = options;
+  const {
+    enabled = true,
+    key,
+    intervalMs = LIVE_REFRESH_INTERVAL_MS,
+    refreshWhileVisible = false,
+  } = options;
   // Held in a ref so a caller can pass a fresh closure every render without re-arming the
   // listeners, which would otherwise refresh on every render that changed anything at all.
   const latest = useRef(refresh);
@@ -203,5 +210,5 @@ export function useLiveRefresh(
       document.removeEventListener("visibilitychange", onVisibilityChange);
       stopWatchingInteraction();
     };
-  }, [enabled, viewId, intervalMs]);
+  }, [enabled, refreshWhileVisible, viewId, intervalMs]);
 }

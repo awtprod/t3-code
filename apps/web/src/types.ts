@@ -3,6 +3,7 @@ import type {
   ChatFileAttachment as ContractChatFileAttachment,
   ChatImageAttachment as ContractChatImageAttachment,
   ChatUnknownAttachment as ContractChatUnknownAttachment,
+  ChatWindowsFileAttachment as ContractChatWindowsFileAttachment,
   MessageId,
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,

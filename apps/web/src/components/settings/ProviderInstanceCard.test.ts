@@ -15,6 +15,7 @@ import {
   ProviderInstanceCard,
   readProviderEnvironmentVariable,
 } from "./ProviderInstanceCard";
+import { getProviderMaintenancePresentation } from "./providerStatus";
 
 describe("deriveProviderModelsForDisplay", () => {
   it("uses current config custom models instead of stale live custom rows", () => {
@@ -232,5 +233,35 @@ describe("provider environment helpers", () => {
     expect(providerEnvironmentWithoutNames(environment, new Set(["CURSOR_API_KEY"]))).toEqual([
       { name: "EXTRA_FLAG", value: "1", sensitive: false },
     ]);
+  });
+});
+
+describe("getProviderMaintenancePresentation", () => {
+  it("offers update or reinstall even when the installed version is current", () => {
+    expect(
+      getProviderMaintenancePresentation({
+        status: "current",
+        currentVersion: "1.2.3",
+        latestVersion: "1.2.3",
+        updateCommand: "npm install -g @openai/codex@latest",
+        canUpdate: true,
+        checkedAt: null,
+        message: null,
+      }),
+    ).toEqual({ updateCommand: "npm install -g @openai/codex@latest" });
+  });
+
+  it("withholds maintenance when the installation cannot be updated safely", () => {
+    expect(
+      getProviderMaintenancePresentation({
+        status: "unknown",
+        currentVersion: null,
+        latestVersion: null,
+        updateCommand: null,
+        canUpdate: false,
+        checkedAt: null,
+        message: null,
+      }),
+    ).toBeNull();
   });
 });

@@ -2,10 +2,18 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const readPreparedConnection = vi.fn();
+const readServerConfig = vi.fn();
 const env = vi.hoisted(() => ({ isElectron: false }));
 
 vi.mock("~/state/session", () => ({ readPreparedConnection }));
+vi.mock("~/state/server", () => ({ readServerConfig }));
 vi.mock("~/env", () => env);
+
+/** A server advertising a gateway that is published for other machines. */
+const withPublishedGateway = () =>
+  readServerConfig.mockReturnValue({
+    previewGateway: { loopbackPort: 3774, publicHttpsPort: 8445 },
+  });
 
 describe("browser target resolver", () => {
   beforeEach(() => {

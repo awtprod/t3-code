@@ -7,6 +7,7 @@ import { APP_DISPLAY_NAME } from "../../branding";
 import { connectPairing } from "../../connection/onboarding";
 import {
   peekPairingTokenFromUrl,
+  reconnectSavedDesktopEnvironment,
   stripPairingTokenFromUrl,
   submitServerAuthCredential,
 } from "../../environments/primary";
@@ -37,7 +38,13 @@ export function PairingRouteSurface({
   initialErrorMessage?: string;
   onAuthenticated: () => void;
 }) {
-  const autoPairTokenRef = useRef<string | null>(peekPairingTokenFromUrl());
+  // The desktop app pairs through Connections; at the gate it reconnects with
+  // the credential it already saved for the selected server.
+  const desktopRecovery = window.desktopBridge !== undefined;
+  const recoverySupported = typeof window.desktopBridge?.recoverRemotePrimarySession === "function";
+  const autoPairTokenRef = useRef<string | null>(
+    desktopRecovery ? null : peekPairingTokenFromUrl(),
+  );
   const [credential, setCredential] = useState(() => autoPairTokenRef.current ?? "");
   const [errorMessage, setErrorMessage] = useState(initialErrorMessage ?? "");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -67,6 +74,19 @@ export function PairingRouteSurface({
     [onAuthenticated],
   );
 
+  const reconnectSavedEnvironment = useCallback(async () => {
+    setIsSubmitting(true);
+    setErrorMessage("");
+    try {
+      await reconnectSavedDesktopEnvironment();
+      startTransition(() => onAuthenticated());
+    } catch (error) {
+      setErrorMessage(errorMessageFromUnknown(error));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [onAuthenticated]);
+
   const handleSubmit = useCallback(
     async (event?: React.SubmitEvent<HTMLFormElement>) => {
       event?.preventDefault();
@@ -91,52 +111,80 @@ export function PairingRouteSurface({
       <StandalonePageHeader
         eyebrow={APP_DISPLAY_NAME}
         title="Pair with this environment"
-        description={describeAuthGate(auth.bootstrapMethods)}
+        description={
+          desktopRecovery
+            ? "Reconnect using the credential already saved on this device for the selected server."
+            : describeAuthGate(auth.bootstrapMethods)
+        }
       />
 
-      <form className="mt-6 space-y-4" onSubmit={(event) => void handleSubmit(event)}>
-        <div className="space-y-2">
-          <label className="text-sm font-medium" htmlFor="pairing-token">
-            Pairing token
-          </label>
-          <Input
-            id="pairing-token"
-            autoCapitalize="none"
-            autoComplete="off"
-            autoCorrect="off"
-            disabled={isSubmitting}
-            nativeInput
-            onChange={(event) => setCredential(event.currentTarget.value)}
-            placeholder="Paste a one-time token or pairing secret"
-            spellCheck={false}
-            value={credential}
-          />
-        </div>
-
-        {errorMessage ? (
-          <Alert variant="error">
-            <AlertDescription>{errorMessage}</AlertDescription>
-          </Alert>
-        ) : null}
-
-        <div className="flex flex-wrap gap-2">
-          <Button disabled={isSubmitting} size="sm" type="submit">
-            {isSubmitting ? "Pairing..." : "Continue"}
-          </Button>
+      {desktopRecovery ? (
+        <div className="mt-6 space-y-4">
           <Button
-            disabled={isSubmitting}
-            onClick={() => window.location.reload()}
+            disabled={isSubmitting || !recoverySupported}
             size="sm"
-            variant="outline"
+            onClick={() => void reconnectSavedEnvironment()}
           >
-            Reload app
+            {isSubmitting ? "Reconnecting..." : "Reconnect saved environment"}
           </Button>
+          {!recoverySupported ? (
+            <p className="text-sm text-muted-foreground">
+              A desktop update is required to reconnect saved environments from this screen.
+            </p>
+          ) : null}
+          {errorMessage ? (
+            <Alert variant="error">
+              <AlertDescription>{errorMessage}</AlertDescription>
+            </Alert>
+          ) : null}
         </div>
-      </form>
+      ) : (
+        <form className="mt-6 space-y-4" onSubmit={(event) => void handleSubmit(event)}>
+          <div className="space-y-2">
+            <label className="text-sm font-medium" htmlFor="pairing-token">
+              Pairing token
+            </label>
+            <Input
+              id="pairing-token"
+              autoCapitalize="none"
+              autoComplete="off"
+              autoCorrect="off"
+              disabled={isSubmitting}
+              nativeInput
+              onChange={(event) => setCredential(event.currentTarget.value)}
+              placeholder="Paste a one-time token or pairing secret"
+              spellCheck={false}
+              value={credential}
+            />
+          </div>
 
-      <div className="mt-6 rounded-lg border border-border/70 bg-background/55 px-3 py-3 text-xs leading-relaxed text-muted-foreground">
-        {describeSupportedMethods(auth.bootstrapMethods)}
-      </div>
+          {errorMessage ? (
+            <Alert variant="error">
+              <AlertDescription>{errorMessage}</AlertDescription>
+            </Alert>
+          ) : null}
+
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={isSubmitting} size="sm" type="submit">
+              {isSubmitting ? "Pairing..." : "Continue"}
+            </Button>
+            <Button
+              disabled={isSubmitting}
+              onClick={() => window.location.reload()}
+              size="sm"
+              variant="outline"
+            >
+              Reload app
+            </Button>
+          </div>
+        </form>
+      )}
+
+      {!desktopRecovery ? (
+        <div className="mt-6 rounded-lg border border-border/70 bg-background/55 px-3 py-3 text-xs leading-relaxed text-muted-foreground">
+          {describeSupportedMethods(auth.bootstrapMethods)}
+        </div>
+      ) : null}
     </StandalonePage>
   );
 }

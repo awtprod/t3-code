@@ -2,6 +2,7 @@ import { parseNewThreadLink } from "@t3tools/shared/promptLinks";
 import { createFileRoute, useLocation } from "@tanstack/react-router";
 import { useMemo } from "react";
 
+import { NewThreadDraftLanding } from "../components/NewThreadDraftLanding";
 import { NewThreadLinkView } from "../components/promptLinks/NewThreadLinkView";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { SidebarInset } from "../components/ui/sidebar";
@@ -10,6 +11,11 @@ import { SidebarInset } from "../components/ui/sidebar";
 function NewThreadLinkRoute() {
   const search = useLocation({ select: (location) => location.searchStr });
   const parsed = useMemo(() => parseNewThreadLink(search), [search]);
+  // A bare `/new` (the Command Center sidebar's "New thread" entry) starts a
+  // draft in the most recently active project; links carry a query.
+  if (search === "" || search === "?") {
+    return <NewThreadDraftLanding pathname="/new" />;
+  }
   if (!parsed.ok) {
     return (
       <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">

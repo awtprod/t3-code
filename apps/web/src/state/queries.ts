@@ -11,6 +11,7 @@ import {
 import { type VcsRefTarget } from "@t3tools/client-runtime/state/vcs";
 import type {
   EnvironmentId,
+  OrchestrationV2ThreadProjection,
   ProjectContentMatch,
   ProjectEntry,
   ProjectEntryKind,
@@ -57,6 +58,27 @@ const threadSearchResultsAtom = createThreadSearchResultsAtomFamily({
     }),
   labelPrefix: "web:thread-search",
 });
+
+export interface ThreadDetailView {
+  readonly data: OrchestrationV2ThreadProjection | null;
+  readonly error: string | null;
+  readonly isPending: boolean;
+  readonly isDeleted: boolean;
+}
+
+/** One thread's full v2 projection, for screens outside the chat view (Command Center). */
+export function useThreadDetail(
+  environmentId: EnvironmentId | null,
+  threadId: ThreadId | null,
+): ThreadDetailView {
+  const state = useEnvironmentThread(environmentId, threadId);
+  return {
+    data: Option.getOrNull(state.data),
+    error: Option.getOrNull(state.error),
+    isPending: state.status === "synchronizing",
+    isDeleted: state.status === "deleted",
+  };
+}
 
 export function useDebouncedValue<A>(value: A, delayMs: number): A {
   const [debounced, setDebounced] = useState(value);

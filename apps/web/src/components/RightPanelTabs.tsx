@@ -33,7 +33,6 @@ import {
   FileDiff,
   Files,
   Globe2,
-  MonitorUp,
   Plus,
   TerminalSquare,
 } from "lucide-react";
@@ -395,16 +394,6 @@ function RightPanelEmptyState(props: {
       onClick: props.onAddPullRequest,
     },
     {
-      label: "Sandbox",
-      description: "Inspect, stop, or export the thread sandbox.",
-      icon: MonitorUp,
-      shortcut: "I",
-      available: props.desktopAvailable === true,
-      disabledReason: SURFACE_UNAVAILABLE_HINTS.desktop,
-      onClick: props.onAddDesktop ?? (() => undefined),
-      badgeCount: 0,
-    },
-    {
       label: "Linked pull requests",
       icon: PullRequestGlyph.link,
       shortcut: "L",
@@ -691,8 +680,6 @@ function SurfaceIcon({
       return <FileDiff className="size-3 shrink-0" />;
     case "files":
       return <Files className="size-3 shrink-0" />;
-    case "desktop":
-      return <MonitorUp className="size-3 shrink-0" />;
     case "file":
       return (
         <PierreEntryIcon
@@ -987,14 +974,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       available: props.pullRequestAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.pullRequest,
       onClick: props.onAddPullRequest,
-    },
-    {
-      label: "Sandbox",
-      icon: MonitorUp,
-      shortcut: "I",
-      available: props.desktopAvailable === true,
-      disabledReason: SURFACE_DISABLED_REASONS.desktop,
-      onClick: props.onAddDesktop ?? (() => undefined),
     },
     {
       label: "Linked pull requests",

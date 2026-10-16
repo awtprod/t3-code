@@ -130,7 +130,10 @@ import { PullRequestCopyableCode } from "./PullRequestCopyableCode";
 import { PullRequestActivityUnavailableState } from "./PullRequestActivityUnavailableState";
 import { DiffPanelLoadingState } from "../DiffPanelShell";
 import { PullRequestsUnavailableState } from "./PullRequestsUnavailableState";
-import type { PullRequestAgentSelectionInput } from "./PullRequestCodeTab";
+import type {
+  PullRequestAgentSelectionInput,
+  PullRequestAskSelectionInput,
+} from "./PullRequestCodeTab";
 import { openOnHostLabel, showPullRequestLinkContextMenu } from "./pullRequestLinkContextMenu";
 import { PullRequestMarkdownContext } from "./PullRequestMarkdown";
 import { PullRequestComposer } from "./PullRequestComposer";
@@ -138,6 +141,7 @@ import { PullRequestSummaryTab } from "./PullRequestSummaryTab";
 import { PullRequestTimelineTab } from "./PullRequestTimelineTab";
 import {
   buildAddSelectionToAgentHandoff,
+  buildAskAboutLinesHandoff,
   buildAskAboutGuideStopHandoff,
   buildAskAboutPullRequestHandoff,
   buildExplainPullRequestHandoff,
@@ -1479,6 +1483,25 @@ export function PullRequestDetailPanel({
         request: selection.request,
       }),
       options,
+    );
+  };
+
+  /** Lines the reader marked in the diff, asked about rather than commented on. */
+  const askAboutSelection = (selection: PullRequestAskSelectionInput) => {
+    if (!detail) return;
+    void startAsk(
+      `ask:${selection.comment.id}`,
+      buildAskAboutLinesHandoff({
+        number: detail.number,
+        title: detail.title,
+        url: detail.url,
+        headBranch: detail.headBranch,
+        baseBranch: detail.baseBranch,
+        state: detail.state,
+        isDraft: detail.isDraft,
+        comment: selection.comment,
+        question: selection.question,
+      }),
     );
   };
 
@@ -3060,6 +3083,7 @@ export function PullRequestDetailPanel({
                   <PullRequestCodeTab
                     scrollerRef={scrollerRefs.code}
                     onAddToAgentSelection={addSelectionToAgent}
+                    onAskAboutSelection={askAboutSelection}
                     environmentId={environmentId}
                     reference={reference}
                     detail={detail}

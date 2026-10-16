@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
 
+const MAX_TRACKED_WORKSPACE_RESOURCES = 128;
+
 export function workspaceMutationRefreshToken(
   resourceKey: string,
   mutationId: string | null,

@@ -30,6 +30,8 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { SpaceAgentThreadControls } from "../../command-center/space-agent/SpaceAgentThreadControls";
+import { isSpaceAgentThreadId } from "../../command-center/space-agent/SpaceAgent.logic";
 import {
   WorkspaceBreadcrumb,
   WorkspaceBreadcrumbItem,
@@ -436,6 +438,17 @@ export const ChatHeader = memo(function ChatHeader({
           )}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      {/* Space agent threads carry their own wake/pause/activity controls. Upstream moved
+          the other header actions into the thread details panel; these stay in the header
+          because they belong to the agent, not to the workspace. */}
+      {isServerThread && isSpaceAgentThreadId(activeThreadId) ? (
+        <div className="flex shrink-0 items-center gap-2">
+          <SpaceAgentThreadControls
+            environmentId={activeThreadEnvironmentId}
+            threadId={activeThreadId}
+          />
+        </div>
+      ) : null}
     </div>
   );
 });

@@ -119,9 +119,9 @@ export function UsageSettingsPanel() {
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [priceDraft, setPriceDraft] = useState({
-    driver: "kimi",
+    driver: "",
     instanceId: "",
-    model: "kimi-code/k3",
+    model: "",
     uncached: "3.00",
     cached: "0.30",
     cacheWrite: "3.00",

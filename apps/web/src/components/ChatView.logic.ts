@@ -1295,6 +1295,12 @@ export function hasServerAcknowledgedLocalDispatch(input: {
   if (input.hasPendingApproval || input.hasPendingUserInput || Boolean(input.threadError)) {
     return true;
   }
+  if (
+    input.latestUserMessageDelegated === true &&
+    input.localDispatch.latestUserMessageId !== (input.latestUserMessageId ?? null)
+  ) {
+    return true;
+  }
   // The thread shell can report a preparing or starting run before the detail
   // projection behind `phase` loads, so either source still connecting holds
   // the send.

@@ -401,6 +401,10 @@ const VERCEL_DARK_COLORS: ThemeColors = {
   terminalSelection: "#1f1f1f",
   terminalScrollbar: "#676767",
   terminalScrollbarHover: "#a1a1a1",
+  searchMatchBackground: "#8c6c1f",
+  searchMatchForeground: "#ededed",
+  searchMatchActiveBackground: "#ff9907",
+  searchMatchActiveForeground: "#000000",
 };
 
 /**

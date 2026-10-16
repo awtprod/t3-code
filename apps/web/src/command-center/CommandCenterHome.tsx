@@ -11,12 +11,14 @@ import {
   SpaceId,
 } from "@command-center/core";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import * as DateTime from "effect/DateTime";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
 import { SidebarInset } from "~/components/ui/sidebar";
 import { newMessageId, newThreadId, randomUUID } from "~/lib/utils";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
-import { useProjects } from "~/state/entities";
+import { useProjects, useThreadShell } from "~/state/entities";
 import { useEnvironmentQuery } from "~/state/query";
 import { useThreadDetail } from "~/state/queries";
 import { threadEnvironment } from "~/state/threads";
@@ -163,6 +165,14 @@ export function CommandCenterHome({
     delegatedDesktopRun?.environmentId ?? null,
     delegatedDesktopRun?.threadId ?? null,
   );
+  const delegatedThreadRef = useMemo(
+    () =>
+      delegatedDesktopRun === null
+        ? null
+        : scopeThreadRef(delegatedDesktopRun.environmentId, delegatedDesktopRun.threadId),
+    [delegatedDesktopRun],
+  );
+  const delegatedThreadShell = useThreadShell(delegatedThreadRef);
   const selectedSpaceId = spaceFilterId === undefined ? undefined : SpaceId.make(spaceFilterId);
   const bootstrapQuery = useEnvironmentQuery(
     environmentId === null
@@ -279,7 +289,7 @@ export function CommandCenterHome({
           author: "assistant" as const,
           authorLabel: delegatedDesktopRun?.environmentLabel ?? "Desktop worker",
           body: message.text,
-          createdAtLabel: new Date(message.createdAt).toLocaleTimeString(undefined, {
+          createdAtLabel: DateTime.toDateUtc(message.createdAt).toLocaleTimeString(undefined, {
             hour: "numeric",
             minute: "2-digit",
           }),
@@ -301,13 +311,13 @@ export function CommandCenterHome({
     [authoritativeMessages, delegatedMessages, optimisticMessages],
   );
   useEffect(() => {
-    const thread = delegatedThread.data;
-    const session = thread?.session;
-    if (delegatedDesktopRun === null || thread === null || thread === undefined) return;
+    const thread = delegatedThreadShell;
+    if (delegatedDesktopRun === null || thread === null) return;
+    const latestRunStatus = thread.latestRun?.status;
     const status =
-      thread.latestTurn?.state === "error" || session?.status === "error"
+      latestRunStatus === "failed" || thread.runtime?.status === "failed"
         ? "failed"
-        : thread.latestTurn?.state === "completed"
+        : latestRunStatus === "completed"
           ? "complete"
           : "running";
     setLastReceipt((current) =>
@@ -322,12 +332,12 @@ export function CommandCenterHome({
                 status === "complete"
                   ? `Desktop work completed on ${delegatedDesktopRun.environmentLabel}.`
                   : status === "failed"
-                    ? (session?.lastError ?? "The desktop worker failed.")
+                    ? (thread.runtime?.lastError ?? "The desktop worker failed.")
                     : current.receipt.summary,
             },
           },
     );
-  }, [delegatedDesktopRun, delegatedThread.data]);
+  }, [delegatedDesktopRun, delegatedThreadShell]);
   const routeReceipt = useMemo(() => {
     if (lastReceipt !== null) {
       const timelineEntry =

@@ -267,7 +267,9 @@ describe("project query refresh", () => {
       authorizationMocks.sessionAtom = Atom.make(
         sessionError === null
           ? AsyncResult.initial()
-          : AsyncResult.failure(Cause.fail(new Error(sessionError))),
+          : AsyncResult.failure<Pick<AuthSessionState, "authenticated" | "scopes">, Error>(
+              Cause.fail(new Error(sessionError)),
+            ),
       );
       const registry = AtomRegistry.make();
       atomHooks.registry = registry;

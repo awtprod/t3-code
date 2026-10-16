@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { projectThreadAwareness, type AgentAwarenessPhase } from "@t3tools/shared/agentAwareness";
+import { projectThreadAwarenessV2, type AgentAwarenessPhase } from "@t3tools/shared/agentAwareness";
 
 import { isElectron } from "~/env";
 import { getClientSettings } from "~/hooks/useSettings";
@@ -94,10 +94,10 @@ export function AgentActivityNotifications() {
       let playedChimeThisBatch = false;
 
       for (const thread of threads) {
-        const awareness = projectThreadAwareness({
+        const awareness = projectThreadAwarenessV2({
           environmentId: thread.environmentId,
           project: { title: projectTitles.get(projectTitleKey(thread)) ?? "" },
-          thread,
+          thread: thread.source,
         });
         if (awareness === null) continue;
 

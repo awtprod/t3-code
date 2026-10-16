@@ -21,8 +21,9 @@ import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { APP_BASE_NAME } from "../../branding";
 import { cn } from "../../lib/utils";
-import { usePullRequestsSupported } from "../../state/environments";
-import { T3Wordmark } from "../T3Wordmark";
+import { commandCenterEnvironment } from "../../state/commandCenter";
+import { usePrimaryEnvironmentId, usePullRequestsSupported } from "../../state/environments";
+import { useEnvironmentQuery } from "../../state/query";
 import {
   resolveEnvironmentIdentificationPillLabel,
   resolveSidebarStageBackdropVariant,
@@ -146,15 +147,15 @@ function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
   return (
     // Center the visible capitals, without the font's ascender/descender space.
     // Padding keeps ascenders and round-letter overshoot inside the truncation clip.
-    <span className="inline-flex min-w-0 items-baseline gap-1 text-sm font-medium tracking-tight">
-      <T3Wordmark aria-label="T3" className="h-[1cap] w-auto shrink-0" />
-      <span
-        className={cn(
-          "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
-          onBackdrop ? "text-white/70" : "text-muted-foreground",
-        )}
-      >
-        Code
+    <span
+      className={cn(
+        "inline-flex min-w-0 items-center gap-1.5",
+        onBackdrop ? "text-white" : "text-foreground",
+      )}
+    >
+      <CommandIcon className="size-3.5 shrink-0" />
+      <span className="truncate text-sm font-semibold tracking-tight [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1">
+        {APP_BASE_NAME}
       </span>
     </span>
   );
@@ -265,5 +266,139 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
       <SidebarUpdateArchitectureWarning />
       <SidebarUtilityMenu />
     </SidebarFooter>
+  );
+});
+
+/** Command Center-owned navigation shared by both sidebar generations. */
+export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenterNavigation() {
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const environmentId = usePrimaryEnvironmentId();
+  const bootstrapQuery = useEnvironmentQuery(
+    environmentId === null
+      ? null
+      : commandCenterEnvironment.bootstrap({ environmentId, input: {} }),
+  );
+  const { isMobile, setOpenMobile } = useSidebar();
+  const closeMobileSidebar = useCallback(() => {
+    if (isMobile) setOpenMobile(false);
+  }, [isMobile, setOpenMobile]);
+  const entries = [
+    {
+      to: "/inbox" as const,
+      label: "Needs You",
+      icon: InboxIcon,
+      active: pathname === "/" || pathname.startsWith("/inbox"),
+    },
+    { to: "/new" as const, label: "New thread", icon: SquarePenIcon, active: pathname === "/new" },
+    {
+      to: "/command" as const,
+      label: "Command",
+      icon: CommandIcon,
+      active: pathname.startsWith("/command"),
+    },
+    {
+      to: "/automations" as const,
+      label: "Automations",
+      icon: WorkflowIcon,
+      active: pathname.startsWith("/automations"),
+    },
+    {
+      to: "/responsibilities" as const,
+      label: "Responsibilities",
+      icon: ListChecksIcon,
+      active: pathname.startsWith("/responsibilities"),
+    },
+    {
+      to: "/prospects" as const,
+      label: "Prospects",
+      icon: ContactRoundIcon,
+      active: pathname.startsWith("/prospects"),
+    },
+    {
+      to: "/sprint-plan" as const,
+      label: "Sprint plan",
+      icon: CalendarDaysIcon,
+      active: pathname.startsWith("/sprint-plan"),
+    },
+    {
+      to: "/observations" as const,
+      label: "Observations",
+      icon: ListFilterIcon,
+      active: pathname.startsWith("/observations"),
+    },
+    {
+      to: "/lessons" as const,
+      label: "Lessons",
+      icon: LightbulbIcon,
+      active: pathname.startsWith("/lessons"),
+    },
+    {
+      to: "/resources" as const,
+      label: "Resources",
+      icon: HardDriveIcon,
+      active: pathname.startsWith("/resources"),
+    },
+  ];
+  const inboxUnavailable = bootstrapQuery.error !== null && environmentId !== null;
+
+  if (isMobile) {
+    // The phone drawer is mostly for switching threads. Wrapping chips keep
+    // every destination one tap away in about a third of the rows' height.
+    return (
+      <SidebarGroup>
+        <nav aria-label="Command Center" className="flex flex-wrap gap-1">
+          {entries.map((entry) => {
+            const Icon = entry.icon;
+            return (
+              <Link
+                key={entry.label}
+                aria-current={entry.active ? "page" : undefined}
+                className="inline-flex h-8 items-center gap-1.5 rounded-full bg-sidebar-control-surface px-2 text-xs font-medium text-sidebar-muted-foreground ring-1 ring-sidebar-border outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:bg-sidebar-row-active data-[active=true]:bg-sidebar-row-selected data-[active=true]:text-sidebar-foreground [&>svg]:size-3.5 [&>svg]:shrink-0"
+                data-active={entry.active}
+                onClick={closeMobileSidebar}
+                to={entry.to}
+              >
+                <Icon />
+                <span>{entry.label}</span>
+              </Link>
+            );
+          })}
+        </nav>
+        {inboxUnavailable ? (
+          <div className="px-2 pt-2 text-xs text-muted-foreground">
+            <CircleAlertIcon className="mr-2 inline size-3.5" /> Inbox unavailable
+          </div>
+        ) : null}
+      </SidebarGroup>
+    );
+  }
+
+  return (
+    <SidebarGroup>
+      <SidebarMenu>
+        {entries.map((entry) => {
+          const Icon = entry.icon;
+          return (
+            <SidebarMenuItem key={entry.label}>
+              <SidebarMenuButton
+                isActive={entry.active}
+                render={<Link to={entry.to} onClick={closeMobileSidebar} />}
+                size="sm"
+              >
+                <Icon />
+                <span>{entry.label}</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          );
+        })}
+        {inboxUnavailable ? (
+          <SidebarMenuItem>
+            <div className="px-2 py-1 text-xs text-muted-foreground">
+              <CircleAlertIcon className="mr-2 inline size-3.5" /> Inbox unavailable
+            </div>
+          </SidebarMenuItem>
+        ) : null}
+      </SidebarMenu>
+    </SidebarGroup>
   );
 });

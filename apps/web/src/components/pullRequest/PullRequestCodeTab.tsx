@@ -20,6 +20,7 @@ import {
   PilcrowIcon,
   Rows3Icon,
   Settings2Icon,
+  SparklesIcon,
   TextWrapIcon,
   TriangleAlertIcon,
 } from "lucide-react";
@@ -158,6 +159,14 @@ interface DraftAnchor {
   readonly position: PullRequestReviewPosition;
   /** The whole selection, which the comment collapses to one line but a question keeps. */
   readonly range: SelectedLineRange;
+}
+
+/** A range of the diff, and whatever the reader wants to know about it. */
+export interface PullRequestAskSelectionInput {
+  /** The marked lines, already in the shape the composer draws and the agent reads. */
+  readonly comment: ReviewCommentContext;
+  /** Empty where the reader pressed Ask without typing: the lines are the question. */
+  readonly question: string;
 }
 
 /** A range of the diff and the reader's request for the agent. */

@@ -74,6 +74,7 @@ import {
   hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
+  loadComposerImagesForRetry,
   reconcileMountedTerminalThreadIds,
   resolveDraftPromotionNavigationTarget,
   resolveEffectiveInteractionMode,
@@ -725,6 +726,29 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
         threadError: null,
       }),
     ).toBe(true);
+  });
+
+  it("acknowledges a message the server handed to a subagent thread", () => {
+    const localDispatch = createLocalDispatchSnapshot(
+      makeThread({ latestRun: completedTurn, runtime: readySession }),
+    );
+    const input = {
+      localDispatch,
+      phase: "ready" as const,
+      latestRun: completedTurn,
+      latestUserMessageId: MessageId.make("message-delegated"),
+      runtime: readySession,
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+      threadError: null,
+    };
+
+    // Neither the run nor the runtime moves on a delegated send; only the
+    // delegation marks it received.
+    expect(hasServerAcknowledgedLocalDispatch(input)).toBe(false);
+    expect(hasServerAcknowledgedLocalDispatch({ ...input, latestUserMessageDelegated: true })).toBe(
+      true,
+    );
   });
 
   it("acknowledges pending user interaction and errors immediately", () => {
