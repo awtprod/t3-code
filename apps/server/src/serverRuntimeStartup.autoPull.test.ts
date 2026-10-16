@@ -12,6 +12,13 @@ import * as NetAddress from "effect/net/NetAddress";
 
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
+import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as ReadinessGate from "./command-center/ReadinessGate.ts";
+import * as RunRecoveryCoordinator from "./command-center/RunRecoveryCoordinator.ts";
+import * as CommandCenterService from "./command-center/Service.ts";
+import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
+import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
+import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as ServerConfig from "./config.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -23,6 +30,7 @@ import * as ProviderRuntimeRecovery from "./orchestration-v2/ProviderRuntimeReco
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunch from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
+import { layerMemory as SqlitePersistenceMemory } from "./persistence/Sqlite.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
@@ -30,8 +38,10 @@ import { ServerActivation } from "./serverActivation.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import * as HostUsage from "./resourceTelemetry/HostUsage.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+import * as WorktreeCleanup from "./worktreeCleanup.ts";
 
 it.effect("parks automatic pull until activation without delaying command readiness", () =>
   Effect.scoped(
@@ -94,6 +104,9 @@ it.effect("parks automatic pull until activation without delaying command readin
           logWebSocketEvents: false,
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
+          previewGatewayEnabled: false,
+          previewGatewayPort: 0,
+          previewGatewayServePort: ServerConfig.DEFAULT_PREVIEW_GATEWAY_SERVE_PORT,
           mode: "desktop",
           cwd,
           host: "localhost",
@@ -170,6 +183,26 @@ it.effect("parks automatic pull until activation without delaying command readin
           address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 3773),
         }),
         Path.layer,
+        // Command Center startup dependencies (fork): an empty audit chain and
+        // idle workers, so startup reaches the auto-pull phase unchanged.
+        Layer.orDie(SqlitePersistenceMemory),
+        Layer.mock(WorktreeCleanup.WorktreeCleanup)({ start: () => Effect.void }),
+        Layer.mock(HostUsage.HostUsage)({ start: () => Effect.void }),
+        Layer.mock(AutomationScheduleRunner.AutomationScheduleRunner)({
+          start: () => Effect.void,
+        }),
+        Layer.mock(SpaceAgentWaker.SpaceAgentWaker)({ start: () => Effect.void }),
+        Layer.mock(AutomationRecoveryCoordinator.AutomationRecoveryCoordinator)({
+          start: () => Effect.void,
+        }),
+        Layer.mock(RunRecoveryCoordinator.RunRecoveryCoordinator)({ start: () => Effect.void }),
+        Layer.mock(CommandCenterService.CommandCenterService)({
+          queryConnections: () => Effect.succeed({ connections: [] }),
+          // Parked forever: the periodic config refresh is not under test.
+          syncConfiguration: () => Effect.never,
+        }),
+        Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+        ReadinessGate.layer,
       );
 
       yield* Effect.gen(function* () {

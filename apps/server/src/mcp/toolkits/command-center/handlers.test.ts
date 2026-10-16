@@ -12,8 +12,11 @@ import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
 import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
-import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
+import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
+import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 
 import {
   automationDefinitionFitsScope,
@@ -253,9 +256,13 @@ const activityScope = (
   overrides: Partial<McpInvocationContext.McpInvocationScope> = {},
 ): McpInvocationContext.McpInvocationScope => ({
   environmentId: EnvironmentId.make("environment-1"),
-  threadId: ThreadId.make("cc-space-agent-command-center"),
-  providerSessionId: "session-1",
-  providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  requestNamespace: "session-1",
+  thread: {
+    threadId: ThreadId.make("cc-space-agent-command-center"),
+    providerSessionId: "session-1",
+    providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  },
+  client: undefined,
   capabilities: new Set(["cc.items.read"]),
   spaceId: SpaceId.make("command-center"),
   issuedAt: 0,
@@ -276,10 +283,19 @@ const invokeSpaceActivity = (
       // Typed tool failures surface as a failed effect.
       Effect.catch(() => Effect.succeed([true])),
       Effect.provide(
-        CommandCenterToolkitHandlersLive.pipe(
+        McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
           Layer.provideMerge(
             Layer.mergeAll(
               Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+              // Write tools check that the calling thread's run is live.
+              Layer.mock(ThreadManagement.ThreadManagementService)({
+                getThreadShell: (id) =>
+                  Effect.succeed({
+                    ...liveThreadShell(id),
+                    providerInstanceId:
+                      scope.thread?.providerInstanceId ?? ProviderInstanceId.make("codex"),
+                  }),
+              }),
               // Unused by this tool; the toolkit still requires them.
               Layer.mock(CommandCenterService.CommandCenterService)({}),
               Layer.mock(AutomationRuns.AutomationRuns)({}),
@@ -356,9 +372,13 @@ const itemScope = (
   overrides: Partial<McpInvocationContext.McpInvocationScope> = {},
 ): McpInvocationContext.McpInvocationScope => ({
   environmentId: EnvironmentId.make("environment-1"),
-  threadId: ThreadId.make("cc-space-agent-acme"),
-  providerSessionId: "session-1",
-  providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  requestNamespace: "session-1",
+  thread: {
+    threadId: ThreadId.make("cc-space-agent-acme"),
+    providerSessionId: "session-1",
+    providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  },
+  client: undefined,
   capabilities: new Set(["cc.items.write"]),
   spaceId: SpaceId.make("acme"),
   role: "space-agent",
@@ -399,10 +419,19 @@ const invokeItemTool = (
     }).pipe(
       Effect.catch(() => Effect.succeed([true])),
       Effect.provide(
-        CommandCenterToolkitHandlersLive.pipe(
+        McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
           Layer.provideMerge(
             Layer.mergeAll(
               Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+              // Write tools check that the calling thread's run is live.
+              Layer.mock(ThreadManagement.ThreadManagementService)({
+                getThreadShell: (id) =>
+                  Effect.succeed({
+                    ...liveThreadShell(id),
+                    providerInstanceId:
+                      scope.thread?.providerInstanceId ?? ProviderInstanceId.make("codex"),
+                  }),
+              }),
               Layer.mock(CommandCenterService.CommandCenterService)({
                 getConfiguredSpace: () =>
                   Effect.succeed({

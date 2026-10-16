@@ -1,8 +1,13 @@
-import type { OrchestrationProjectShell, OrchestrationThreadShell } from "@t3tools/contracts";
-import { ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import type { OrchestrationProjectShell, OrchestrationV2ThreadShell } from "@t3tools/contracts";
+import { ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 
-import { artifactDirectoryNamesForEntries, groupManagedWorktrees } from "./worktreeCleanup.ts";
+import {
+  artifactDirectoryNamesForEntries,
+  groupManagedWorktrees,
+  threadIsBusy,
+} from "./worktreeCleanup.ts";
 
 describe("artifactDirectoryNamesForEntries", () => {
   it("only flags a build-tool directory when its marker sibling is also present", () => {
@@ -71,28 +76,46 @@ function makeThread(input: {
   readonly worktreePath: string | null;
   readonly updatedAt: string;
   readonly branch?: string | null;
-}): OrchestrationThreadShell {
+  readonly activeRunId?: RunId | null;
+  readonly pendingBackgroundTasks?: OrchestrationV2ThreadShell["pendingBackgroundTasks"];
+}): OrchestrationV2ThreadShell {
+  const id = ThreadId.make(input.id);
+  const updatedAt = DateTime.makeUnsafe(input.updatedAt);
   return {
-    id: ThreadId.make(input.id),
+    id,
     projectId: ProjectId.make(input.projectId),
     title: input.id,
+    providerInstanceId: modelSelection.instanceId,
     modelSelection,
     runtimeMode: "full-access",
-    interactionMode: "agentic",
+    interactionMode: "default",
     branch: input.branch ?? null,
     worktreePath: input.worktreePath,
-    latestTurn: null,
-    createdAt: input.updatedAt,
-    updatedAt: input.updatedAt,
+    createdBy: "user",
+    creationSource: "web",
+    activeProviderThreadId: null,
+    lineage: { rootThreadId: id, parentThreadId: null, relationshipToParent: null },
+    forkedFrom: null,
+    latestRunId: null,
+    activeRunId: input.activeRunId ?? null,
+    status: "idle",
+    pendingRuntimeRequest: null,
+    latestVisibleMessage: null,
+    latestUserMessageAt: null,
+    hasActionableProposedPlan: false,
+    itemCount: 0,
+    visibleItemCount: 0,
+    createdAt: updatedAt,
+    updatedAt,
     archivedAt: null,
     settledOverride: null,
     settledAt: null,
-    session: null,
-    latestUserMessageAt: null,
-    hasPendingApprovals: false,
-    hasPendingUserInput: false,
-    hasActionableProposedPlan: false,
-  } as unknown as OrchestrationThreadShell;
+    lastVisitedAt: null,
+    deletedAt: null,
+    ...(input.pendingBackgroundTasks === undefined
+      ? {}
+      : { pendingBackgroundTasks: input.pendingBackgroundTasks }),
+  };
 }
 
 describe("groupManagedWorktrees", () => {
@@ -173,5 +196,34 @@ describe("groupManagedWorktrees", () => {
 
     const groups = groupManagedWorktrees({ projects: [project], threads: [threadA, threadB] });
     expect(groups.map((g) => g.path).toSorted()).toEqual(["/worktrees/p1/a", "/worktrees/p1/b"]);
+  });
+});
+
+describe("threadIsBusy", () => {
+  const idle = makeThread({
+    id: "t-idle",
+    projectId: "p1",
+    worktreePath: "/worktrees/p1/a",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  it("treats an idle V2 thread with no terminal as not busy", () => {
+    expect(threadIsBusy(idle, new Set())).toBe(false);
+  });
+
+  it("treats a running terminal, an in-flight run, or background work as busy", () => {
+    expect(threadIsBusy(idle, new Set([idle.id]))).toBe(true);
+    expect(
+      threadIsBusy(
+        makeThread({
+          id: "t-run",
+          projectId: "p1",
+          worktreePath: "/worktrees/p1/a",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          activeRunId: RunId.make("run-1"),
+        }),
+        new Set(),
+      ),
+    ).toBe(true);
   });
 });

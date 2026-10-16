@@ -45,6 +45,7 @@ describe("ThreadPullRequestServiceV2 project guard", () => {
       const result = yield* ThreadPullRequestService.resolveProjectForPullRequestDiscovery(
         project,
         {
+          resolveRemoteKeys: () => Effect.succeed([]),
           resolve: (root) => {
             resolvedRoot = root;
             return Effect.succeed({
@@ -82,6 +83,7 @@ describe("ThreadPullRequestServiceV2 project guard", () => {
       };
       const refreshes: Array<boolean | undefined> = [];
       const resolver = {
+        resolveRemoteKeys: () => Effect.succeed([]),
         resolve: (_root: string, options?: { readonly refresh?: boolean }) => {
           refreshes.push(options?.refresh);
           return Effect.succeed(null);

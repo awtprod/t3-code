@@ -1036,7 +1036,7 @@ describe("AssetAccess", () => {
         mimeType: "video/mp4",
       });
       expect(yield* resolveAsset(token, "other.mp4")).toBeNull();
-    }).pipe(Effect.provide(testLayer)),
+    }).pipe(Effect.provide(layerTest)),
   );
 
   it.effect("issues exact attachment capabilities by attachment id", () =>

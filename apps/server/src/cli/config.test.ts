@@ -39,6 +39,9 @@ const minimalDesktopFlags = (baseDir: string) => ({
   logWebSocketEvents: Option.none<boolean>(),
   tailscaleServeEnabled: Option.none<boolean>(),
   tailscaleServePort: Option.none<number>(),
+  previewGatewayEnabled: Option.none<boolean>(),
+  previewGatewayPort: Option.none<number>(),
+  previewGatewayServePort: Option.none<number>(),
 });
 
 const encodeDesktopBootstrap = Schema.encodeEffect(Schema.fromJsonString(DesktopBackendBootstrap));

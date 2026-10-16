@@ -480,25 +480,25 @@ describe("ModelManifest service", () => {
     Effect.gen(function* () {
       let fetchCount = 0;
       const settings = yield* ServerSettings.ServerSettingsService;
-      const service = yield* make.pipe(
+      const service = yield* ModelManifest.make.pipe(
         Effect.provideService(ServerSettings.ServerSettingsService, {
           ...settings,
           getSettings: Effect.die("settings unavailable"),
         }),
         Effect.provide(
-          httpClientLayer(() => {
+          layerHttpClient(() => {
             fetchCount += 1;
             return Response.json(REMOTE_MANIFEST);
           }),
         ),
       );
 
-      assert.deepStrictEqual(yield* service.refresh, BUNDLED_MODEL_MANIFEST);
+      assert.deepStrictEqual(yield* service.refresh, ModelManifest.BUNDLED_MODEL_MANIFEST);
       assert.strictEqual(fetchCount, 0);
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        serviceLayers({
+        layerService({
           prefix: "model-manifest-settings-failure-test",
           response: () => Response.json(REMOTE_MANIFEST),
         }),

@@ -1,12 +1,11 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { AuthStandardClientScopes, EnvironmentId } from "@t3tools/contracts";
+import { AuthSessionId, AuthStandardClientScopes, EnvironmentId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
-import * as Deferred from "effect/Deferred";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -61,9 +60,9 @@ const makeSessionStoreWithRepositoryLayer = (
   Layer.effect(SessionStore.SessionStore, SessionStore.make).pipe(
     Layer.provide(Layer.succeed(AuthSessions.AuthSessionRepository, repository)),
     Layer.provide(ServerSecretStore.layer),
-    Layer.provide(SqlitePersistenceMemory),
-    Layer.provide(makeServerEnvironmentLayer(EnvironmentId.make("test-environment"))),
-    Layer.provide(makeServerConfigLayer()),
+    Layer.provide(SqlitePersistence.layerMemory),
+    Layer.provide(layerServerEnvironment(EnvironmentId.make("test-environment"))),
+    Layer.provide(layerServerConfig()),
   );
 
 const connectionSessionId = AuthSessionId.make("connection-test-session");
@@ -994,8 +993,37 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
         lastConnectedAt: first?.lastConnectedAt,
       });
 
-      yield* sessions.recordClientConnection(issued.sessionId, {});
-      expect((yield* readRow)[0]).toEqual({ surface: "mobile", appVersion: "1.3.0" });
-    }).pipe(Effect.provide(Layer.mergeAll(layerSessionStore(), SqlitePersistence.layerMemory))),
+      yield* sessions.markConnected(issued.sessionId);
+      expect((yield* readRow)[0]).toEqual(second);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(layerSessionStore(), SqlitePersistence.layerMemory, TestClock.layer()),
+      ),
+    ),
+  );
+
+  it.effect("cleans up an acquired connection when the connection write fails", () =>
+    Effect.gen(function* () {
+      const connectionFailure = new PersistenceSqlError({
+        operation: "AuthSessionRepository.setConnection:query",
+        detail: "sqlite is unavailable",
+      });
+      const { repository, writes } = yield* makeConnectionRepositoryHarness(connectionFailure);
+      const useEntered = yield* Deferred.make<void>();
+
+      yield* Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+
+        yield* Effect.acquireUseRelease(
+          sessions.markConnected(connectionSessionId, { surface: "web" }),
+          () => Deferred.succeed(useEntered, undefined),
+          () => sessions.markDisconnected(connectionSessionId),
+        );
+        yield* Deferred.await(useEntered);
+
+        expect(yield* Ref.get(writes)).toHaveLength(1);
+        expect((yield* sessions.listActive())[0]?.connected).toBe(false);
+      }).pipe(Effect.provide(makeSessionStoreWithRepositoryLayer(repository)));
+    }),
   );
 });

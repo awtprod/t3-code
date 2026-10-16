@@ -22,6 +22,7 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import type * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcTest from "effect/rpc/RpcTest";
 
 import {
@@ -30,6 +31,10 @@ import {
   requiredScopeForDeviceList,
 } from "./RpcAuthorization.ts";
 import * as RpcAuthorization from "./RpcAuthorization.ts";
+
+// The group's own tags: the fork's Command Center scopes are spread in from an
+// entries list, so `keyof typeof RPC_REQUIRED_SCOPES` no longer names them.
+type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
 describe("RPC authorization scopes", () => {
   it("declares exactly one scope for every RPC in the server group", () => {
@@ -220,7 +225,7 @@ describe("RPC scope middleware", () => {
   const tested = [WS_METHODS.serverProbe, WS_METHODS.serverRetryResourceTelemetry] as const;
   const group = WsRpcGroup.omit(
     ...[...WsRpcGroup.requests.keys()].filter(
-      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof tested)[number]> =>
+      (tag): tag is Exclude<WsRpcMethod, (typeof tested)[number]> =>
         !(tested as ReadonlyArray<string>).includes(tag),
     ),
   );
@@ -265,9 +270,7 @@ describe("RPC scope middleware", () => {
 describe("settings mutation authorization", () => {
   const group = WsRpcGroup.omit(
     ...[...WsRpcGroup.requests.keys()].filter(
-      (
-        tag,
-      ): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.serverUpdateSettings> =>
+      (tag): tag is Exclude<WsRpcMethod, typeof WS_METHODS.serverUpdateSettings> =>
         tag !== WS_METHODS.serverUpdateSettings,
     ),
   );
@@ -335,12 +338,8 @@ it.effect("requires task permission before attaching a prepared worktree to a th
   Effect.gen(function* () {
     const group = WsRpcGroup.omit(
       ...[...WsRpcGroup.requests.keys()].filter(
-        (
-          tag,
-        ): tag is Exclude<
-          keyof typeof RPC_REQUIRED_SCOPES,
-          typeof WS_METHODS.gitPreparePullRequestThread
-        > => tag !== WS_METHODS.gitPreparePullRequestThread,
+        (tag): tag is Exclude<WsRpcMethod, typeof WS_METHODS.gitPreparePullRequestThread> =>
+          tag !== WS_METHODS.gitPreparePullRequestThread,
       ),
     );
     let handled = false;
@@ -372,9 +371,7 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
   Effect.gen(function* () {
     const group = WsRpcGroup.omit(
       ...[...WsRpcGroup.requests.keys()].filter(
-        (
-          tag,
-        ): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.assetsCreateUrl> =>
+        (tag): tag is Exclude<WsRpcMethod, typeof WS_METHODS.assetsCreateUrl> =>
           tag !== WS_METHODS.assetsCreateUrl,
       ),
     );
@@ -415,12 +412,8 @@ it.effect("denies manual cleanup before the handler without settings permission"
   Effect.gen(function* () {
     const group = WsRpcGroup.omit(
       ...[...WsRpcGroup.requests.keys()].filter(
-        (
-          tag,
-        ): tag is Exclude<
-          keyof typeof RPC_REQUIRED_SCOPES,
-          typeof WS_METHODS.serverRunStorageCleanup
-        > => tag !== WS_METHODS.serverRunStorageCleanup,
+        (tag): tag is Exclude<WsRpcMethod, typeof WS_METHODS.serverRunStorageCleanup> =>
+          tag !== WS_METHODS.serverRunStorageCleanup,
       ),
     );
     let handled = false;

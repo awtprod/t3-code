@@ -10,6 +10,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -38,7 +39,6 @@ import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import { CommandCenterToolkit } from "./toolkits/command-center/tools.ts";
 import { PreviewToolkit } from "./toolkits/preview/tools.ts";
 import { SupabaseToolkit } from "./toolkits/supabase/tools.ts";
-import { Tool } from "effect/ai";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
@@ -153,7 +153,7 @@ it("normalizes empty successful notification responses to accepted", () => {
   expect(resultResponse.status).toBe(200);
 });
 
-it("discovers exactly the 14 preview tools for a preview-only scope", () => {
+it("discovers exactly the 19 preview tools for a preview-only scope", () => {
   const allTools = [PreviewToolkit, CommandCenterToolkit, SupabaseToolkit]
     .flatMap((toolkit) => Object.values(toolkit.tools))
     .map(
@@ -169,7 +169,7 @@ it("discovers exactly the 14 preview tools for a preview-only scope", () => {
     McpHttpServer.toolVisibleToCapabilities(tool, new Set(["preview"])),
   );
   expect(visible.map((tool) => tool.name)).toEqual(Object.keys(PreviewToolkit.tools));
-  expect(visible).toHaveLength(14);
+  expect(visible).toHaveLength(19);
 });
 
 it.effect.each([{}, { includeImage: false }])(

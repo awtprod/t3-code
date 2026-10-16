@@ -23,6 +23,9 @@ export const layer = Layer.succeed(
     touch: () => Effect.void,
     revokeProviderSession: () => Effect.void,
     revokeThread: () => Effect.void,
+    registerThreadScope: () => Effect.void,
+    unregisterThreadScope: () => Effect.void,
+    scopeForThread: () => Effect.succeed(undefined),
     revokeAll: Effect.void,
   }),
 );

@@ -214,7 +214,13 @@ const makeHarness = (options: HarnessOptions = {}) => {
   const resolveRemoteTrackingCommit = vi.fn((_: unknown) =>
     options.resolveRemoteFails
       ? (Effect.fail("simulated remote resolve failure") as never)
-      : Effect.succeed({ commitSha: "abc123", remoteRefName: "origin/dev" }),
+      : Effect.succeed({
+          commitSha: "abc123",
+          remoteRefName: "origin/dev",
+          remoteName: "origin",
+          remoteUrl: "git@github.com:acme/repo.git",
+          remotePushUrl: "git@github.com:acme/repo.git",
+        }),
   );
   const createWorktree = vi.fn(
     (input: { readonly newRefName?: string | undefined; readonly path: string | null }) =>

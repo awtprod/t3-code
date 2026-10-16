@@ -9,7 +9,7 @@ import {
   type ProviderTurnSendDeliveryState,
 } from "../Services/ProviderTurnSendClaims.ts";
 import { ProviderTurnSendClaimRepositoryLive } from "./ProviderTurnSendClaims.ts";
-import { SqlitePersistenceMemory } from "./Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../Sqlite.ts";
 
 // One in-memory database is shared by every case below, so each uses its own
 // thread id rather than relying on a fresh table per test.

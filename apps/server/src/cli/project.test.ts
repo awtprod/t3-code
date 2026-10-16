@@ -83,6 +83,9 @@ const makeConfig = (baseDir: string) =>
       logWebSocketEvents: false,
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      previewGatewayEnabled: false,
+      previewGatewayPort: 0,
+      previewGatewayServePort: ServerConfig.DEFAULT_PREVIEW_GATEWAY_SERVE_PORT,
     } satisfies ServerConfig.ServerConfig["Service"];
   });
 

@@ -34,6 +34,14 @@ import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
+import * as AutomationDefinitionConfig from "../../../command-center/AutomationDefinitionConfig.ts";
+import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
+import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
+import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts";
+import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
+import * as CommandCenterService from "../../../command-center/Service.ts";
+import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
+import * as SupabaseMcpConnector from "../../../database/SupabaseMcpConnector.ts";
 
 const layerStubServices = Layer.mergeAll(
   Layer.mock(Orchestrator.OrchestratorV2)({}),
@@ -57,6 +65,15 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
   Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
   Layer.mock(ThreadSearch.ThreadSearch)({}),
+  // Command Center toolkits (fork) registered by the production MCP layer.
+  Layer.mock(AutomationDefinitionConfig.AutomationDefinitionConfig)({}),
+  Layer.mock(AutomationRuns.AutomationRuns)({}),
+  Layer.mock(CommandCenterService.CommandCenterService)({}),
+  Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+  Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+  Layer.mock(SpaceActivity.SpaceActivity)({}),
+  Layer.mock(SupabaseMcpConnector.SupabaseMcpConnector)({}),
+  ReadinessGate.layer,
 );
 
 const ToolsListPayload = Schema.fromJsonString(

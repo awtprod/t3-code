@@ -237,8 +237,6 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
     Layer.provideMerge(McpProviderSessions.layer),
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(ResetCreditCoordinator.layerTest),
-    // ClaudeDriver.create yields the efficiency Judge for the tool-result sieve.
-    Layer.provideMerge(Judge.layerTest),
   );
   const layerBase = ProviderHostLive.layer.pipe(Layer.provideMerge(layerBaseDeps));
   const layerTest = ProviderOrchestrationAdapterInfrastructure.layer.pipe(
@@ -658,8 +656,6 @@ describe("ProviderInstanceRegistry — all drivers slice", () => {
     Layer.provideMerge(McpProviderSessions.layer),
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(ResetCreditCoordinator.layerTest),
-    // ClaudeDriver.create yields the efficiency Judge for the tool-result sieve.
-    Layer.provideMerge(Judge.layerTest),
   );
   const layerBase = ProviderHostLive.layer.pipe(Layer.provideMerge(layerBaseDeps));
   const layerTest = ProviderOrchestrationAdapterInfrastructure.layer.pipe(

@@ -12,6 +12,8 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
@@ -715,7 +717,7 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
 
 const makeRenewalLayer = () =>
   Layer.merge(
-    makeEnvironmentAuthLayer({ desktopBootstrapToken: "desktop-bootstrap-token" }),
+    layerEnvironmentAuth({ desktopBootstrapToken: "desktop-bootstrap-token" }),
     TestClock.layer(),
   );
 

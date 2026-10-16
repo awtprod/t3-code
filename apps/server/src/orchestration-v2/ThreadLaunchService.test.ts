@@ -5,7 +5,11 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 import * as ServerConfig from "../config.ts";
-import { createPendingAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
+import {
+  createPendingAttachmentId,
+  PENDING_ATTACHMENT_THREAD_SEGMENT,
+  resolveAttachmentPath,
+} from "../attachmentStore.ts";
 import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -186,7 +190,13 @@ function makeHarness(options: HarnessOptions = {}) {
       remoteBranchExists: () => Effect.succeed(true),
       removeWorktree,
       resolveRemoteTrackingCommit: () =>
-        Effect.succeed({ commitSha: "remote-main-sha", remoteRefName: "origin/main" }),
+        Effect.succeed({
+          commitSha: "remote-main-sha",
+          remoteRefName: "origin/main",
+          remoteName: "origin",
+          remoteUrl: "git@github.com:acme/repo.git",
+          remotePushUrl: "git@github.com:acme/repo.git",
+        }),
       ...options.git,
     }),
     Layer.succeed(ProjectSetupScriptRunner.ProjectSetupScriptRunner, {
@@ -2304,7 +2314,8 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     assert.equal(replayed.projection.messages[0]?.id, stored.id);
     assert.deepEqual(replayed.projection.messages[0]?.attachments, stored.attachments);
     const claimedFiles = Effect.map(fs.readDirectory(config.attachmentsDir), (files) =>
-      files.filter((name) => !name.startsWith("pending-")),
+      // The fork's pending segment is `__pending`; follow the store's constant.
+      files.filter((name) => !name.startsWith(`${PENDING_ATTACHMENT_THREAD_SEGMENT}-`)),
     );
     assert.equal((yield* claimedFiles).length, 1);
 
