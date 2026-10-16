@@ -76,40 +76,6 @@ describe("T3ProjectFile", () => {
     expect(() => decode({ defaultThreadEnvMode: "remote" })).toThrow();
   });
 
-  it("decodes bounded digest-pinned sandbox declarations", () => {
-    const sandbox = decode({
-      sandbox: {
-        image: `desktop@sha256:${"a".repeat(64)}`,
-        services: [
-          {
-            name: "db",
-            image: `postgres@sha256:${"b".repeat(64)}`,
-            internalPorts: [5432],
-            generatedEnvironment: [{ key: "POSTGRES_PASSWORD", kind: "password" }],
-          },
-        ],
-        setup: [{ executable: "pnpm", args: ["install", "--frozen-lockfile"] }],
-        caches: [{ digest: "c".repeat(64), target: "/cache/pnpm" }],
-        previewPorts: [3000],
-        limits: {
-          cpuCount: 4,
-          memoryBytes: 12 * 1024 ** 3,
-          diskBytes: 20 * 1024 ** 3,
-          processCount: 512,
-          idleTimeoutSeconds: 3600,
-          maximumLifetimeSeconds: 28_800,
-        },
-      },
-    }).sandbox;
-    expect(sandbox?.services?.[0]?.name).toBe("db");
-    expect(sandbox?.services?.[0]?.generatedEnvironment?.[0]?.key).toBe("POSTGRES_PASSWORD");
-    expect(sandbox?.limits?.memoryBytes).toBe(12 * 1024 ** 3);
-    expect(() => decode({ sandbox: { image: "desktop:latest" } })).toThrow();
-    expect(() =>
-      decode({ sandbox: { image: `desktop@sha256:${"a".repeat(64)}`, previewPorts: [0] } }),
-    ).toThrow();
-  });
-
   it("decodes worktreeSubmodules and rejects unknown modes", () => {
     expect(decode({ worktreeSubmodules: "none" }).worktreeSubmodules).toBe("none");
     expect(decode({ worktreeSubmodules: "top-level" }).worktreeSubmodules).toBe("top-level");

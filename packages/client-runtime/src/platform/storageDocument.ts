@@ -3,7 +3,6 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
-  type BearerConnectionProfile,
   type ConnectionRegistration,
   ConnectionCredential,
   ConnectionProfile,
@@ -146,25 +145,19 @@ export function registerConnectionInCatalog(
   switch (registration._tag) {
     case "RelayConnectionRegistration":
       return next;
-    case "BearerConnectionRegistration": {
-      // Removing only the previous target's connection leaves any other bearer
-      // saved for this server behind (for example one whose target was already
-      // gone), and the desktop main process could pick its stale token. The new
-      // bearer supersedes every unreferenced one for the same environment and URL.
-      const pruned = dropSupersededBearerConnections(next, registration.profile).document;
+    case "BearerConnectionRegistration":
       return {
-        ...pruned,
+        ...next,
         profiles: replaceCatalogValue(
-          pruned.profiles,
+          next.profiles,
           (value) => value.connectionId,
           registration.profile,
         ),
-        credentials: replaceCatalogValue(pruned.credentials, (value) => value.connectionId, {
+        credentials: replaceCatalogValue(next.credentials, (value) => value.connectionId, {
           connectionId: registration.target.connectionId,
           credential: registration.credential,
         }),
       };
-    }
     case "SshConnectionRegistration":
       return {
         ...next,
