@@ -44,7 +44,10 @@ import {
 } from "./fixtures/shared.ts";
 import { runOrchestratorV2ProviderReplayScenario } from "./ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
-import { materializeReplayTranscriptRuntimeInstructions } from "./ReplayRuntimeInstructions.ts";
+import {
+  materializeReplayTranscriptRuntimeInstructions,
+  rebrandRecordedCodexClientInfo,
+} from "./ReplayRuntimeInstructions.ts";
 import {
   materializeReplayTranscriptWorkspace,
   readProviderReplayTranscript,
@@ -63,7 +66,9 @@ const readCodexTranscript = Effect.fn("readCodexRecoveryTranscript")(function* (
   const transcript = yield* readRawTranscript(
     new URL("./fixtures/provider_thread_resume/codex_transcript.ndjson", import.meta.url),
   );
-  return yield* decodeCodexTranscript(materializeReplayTranscriptWorkspace(transcript, workspace));
+  return rebrandRecordedCodexClientInfo(
+    yield* decodeCodexTranscript(materializeReplayTranscriptWorkspace(transcript, workspace)),
+  );
 });
 const decodePromptPair = Schema.decodeUnknownEffect(Schema.Tuple([Schema.String, Schema.String]));
 const readClaudeSubagentResumeTranscript = Effect.fn("readClaudeSubagentResumeTranscript")(

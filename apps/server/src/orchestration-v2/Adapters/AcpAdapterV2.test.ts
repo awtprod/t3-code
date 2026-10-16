@@ -856,7 +856,7 @@ describe("AcpAdapterV2", () => {
       assert.notInclude(command.prompt, "<t3_code_instructions>");
       const firstDefault = yield* runTurn(1, defaultPolicy, "First default request.");
       assert.include(firstDefault.prompt, "T3 Code interaction mode: Default");
-      assert.include(firstDefault.prompt, "T3 Code collaborative browser");
+      assert.include(firstDefault.prompt, "Command Center collaborative browser");
       assert.include(firstDefault.prompt, "T3 Code orchestration");
       assert.notInclude(
         firstDefault.methods,
