@@ -156,9 +156,12 @@ export const withServerSettingsFileLock = <A, E, R>(
         ),
       ),
     ).pipe(
-      Effect.catchTags({
-        SqlError: (cause) =>
-          new ServerSettingsFileLockError({ settingsPath, operation: "open", cause }),
-      }),
+      // The caller's error channel is generic, which `catchTags` cannot type; this maps
+      // the lock database's SqlError (opening the lock file), as before the lint rule.
+      // oxlint-disable-next-line t3code/prefer-catch-tags
+      Effect.catchTag(
+        "SqlError",
+        (cause) => new ServerSettingsFileLockError({ settingsPath, operation: "open", cause }),
+      ),
     );
   });
