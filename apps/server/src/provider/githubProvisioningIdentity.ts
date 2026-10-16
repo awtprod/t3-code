@@ -39,9 +39,6 @@ import type {
 export const GITHUB_IDENTITY_VARIABLE = "COMMAND_CENTER_GITHUB_IDENTITY";
 export const GITHUB_PROVISIONING_IDENTITY_VARIABLE = "COMMAND_CENTER_GITHUB_PROVISIONING_IDENTITY";
 
-// V2PORT: v1 ProviderService resolved this per provider session; no v2 session
-// launch path calls it yet, so provider instances run without their configured
-// GitHub identity until S3 wires it into the v2 provider environment.
 export function resolveProviderInstanceGitHubIdentity(
   instanceId: ProviderInstanceId,
   instance: ProviderInstanceConfig | undefined,
