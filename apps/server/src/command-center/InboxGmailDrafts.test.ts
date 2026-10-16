@@ -7,7 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import { CommandCenterConfig } from "./Config.ts";
 import { InboxGmailDrafts, layer as draftsLayer } from "./InboxGmailDrafts.ts";
 import { CommandCenterService, type CommandCenterServiceShape } from "./Service.ts";

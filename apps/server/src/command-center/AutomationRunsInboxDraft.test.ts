@@ -17,7 +17,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import {
   AutomationRuns,
   layer as automationRunsLayer,

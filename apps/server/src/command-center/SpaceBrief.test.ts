@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import { layer as spaceActivityLayer, SpaceActivity } from "./SpaceActivity.ts";
 import {
   EMPTY_SPACE_ACTIVITY,

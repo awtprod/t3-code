@@ -4,25 +4,25 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
-  CommandId,
-  EventId,
-  type OrchestrationEvent,
   ProviderRuntimeEvent,
-  type OrchestrationThreadShell,
+  type OrchestrationV2ThreadShell,
   type ProviderSession,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  RunId as OrchestrationRunId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import { CommandCenterEventStream, layer as eventStreamLayer } from "./EventStream.ts";
+import type { LegacyOrchestrationEvent } from "./OrchestrationBridge.ts";
 import {
   makeRunLifecyclePersistence,
   makeWithDependencies,
@@ -124,17 +124,12 @@ const failedSessionEvent = (input: {
   readonly eventId: string;
   readonly threadId: string;
   readonly errorMessage: string;
-}): OrchestrationEvent => ({
-  sequence: 1,
-  eventId: EventId.make(input.eventId),
+}): LegacyOrchestrationEvent => ({
+  eventId: input.eventId,
   type: "thread.session-set",
   aggregateKind: "thread",
-  aggregateId: ThreadId.make(input.threadId),
+  aggregateId: input.threadId,
   occurredAt: fixtureTime,
-  commandId: CommandId.make(`command-${input.eventId}`),
-  causationEventId: null,
-  correlationId: null,
-  metadata: {},
   payload: {
     threadId: ThreadId.make(input.threadId),
     session: {
@@ -164,7 +159,7 @@ it.effect("projects provider completion, preserves the audit chain, and revokes 
     const revoked: Array<string> = [];
     const lifecycle = makeWithDependencies({
       persistence,
-      getThread: () => Effect.sync((): OrchestrationThreadShell | undefined => undefined),
+      getThread: () => Effect.sync((): OrchestrationV2ThreadShell | undefined => undefined),
       listProviderSessions: Effect.succeed([]),
       revokeThread: (threadId) =>
         Effect.sync(() => {
@@ -221,7 +216,7 @@ it.effect("records one actionable failure and one urgent Needs You alert under r
     const revoked: Array<string> = [];
     const lifecycle = makeWithDependencies({
       persistence,
-      getThread: () => Effect.sync((): OrchestrationThreadShell | undefined => undefined),
+      getThread: () => Effect.sync((): OrchestrationV2ThreadShell | undefined => undefined),
       listProviderSessions: Effect.succeed([]),
       revokeThread: (threadId) =>
         Effect.sync(() => {
@@ -293,7 +288,7 @@ it.effect(
       const revoked: Array<string> = [];
       const lifecycle = makeWithDependencies({
         persistence,
-        getThread: () => Effect.sync((): OrchestrationThreadShell | undefined => undefined),
+        getThread: () => Effect.sync((): OrchestrationV2ThreadShell | undefined => undefined),
         listProviderSessions: Effect.succeed([]),
         revokeThread: (threadId) =>
           Effect.sync(() => {
@@ -322,38 +317,42 @@ it.effect(
     }).pipe(Effect.provide(testLayer)),
 );
 
+const v2StatusForLegacyTurnState = {
+  running: "running",
+  interrupted: "interrupted",
+  completed: "completed",
+  error: "failed",
+} as const;
+
 const threadShell = (input: {
   readonly threadId: string;
   readonly state: "running" | "interrupted" | "completed" | "error";
-}): OrchestrationThreadShell => ({
-  id: ThreadId.make(input.threadId),
-  projectId: ProjectId.make("project-example"),
-  title: "Example thread",
-  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "example-model" },
-  runtimeMode: "auto-accept-edits",
-  interactionMode: "default",
-  branch: null,
-  worktreePath: null,
-  latestTurn: {
-    turnId: TurnId.make(`turn-${input.threadId}`),
-    state: input.state,
-    requestedAt: fixtureTime,
-    startedAt: fixtureTime,
-    completedAt: input.state === "running" ? null : fixtureTime,
-    assistantMessageId: null,
-  },
-  createdAt: fixtureTime,
-  updatedAt: fixtureTime,
-  archivedAt: null,
-  settledOverride: null,
-  settledAt: null,
-  pullRequests: [],
-  session: null,
-  latestUserMessageAt: fixtureTime,
-  hasPendingApprovals: false,
-  hasPendingUserInput: false,
-  hasActionableProposedPlan: false,
-});
+}): OrchestrationV2ThreadShell =>
+  ({
+    id: ThreadId.make(input.threadId),
+    projectId: ProjectId.make("project-example"),
+    title: "Example thread",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "example-model" },
+    runtimeMode: "auto-accept-edits",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    latestRunId: OrchestrationRunId.make(`run-${input.threadId}`),
+    activeRunId:
+      input.state === "running" ? OrchestrationRunId.make(`run-${input.threadId}`) : null,
+    status: v2StatusForLegacyTurnState[input.state],
+    latestRunCompletedAt: input.state === "running" ? null : DateTime.makeUnsafe(fixtureTime),
+    createdAt: DateTime.makeUnsafe(fixtureTime),
+    updatedAt: DateTime.makeUnsafe(fixtureTime),
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    pendingRuntimeRequest: null,
+    latestVisibleMessage: null,
+    latestUserMessageAt: null,
+    hasActionableProposedPlan: false,
+  }) as unknown as OrchestrationV2ThreadShell;
 
 it.effect("reconciles completed and orphaned Runs while preserving a live in-flight session", () =>
   Effect.gen(function* () {
@@ -363,7 +362,7 @@ it.effect("reconciles completed and orphaned Runs while preserving a live in-fli
     yield* insertRun(sql, { id: "run-orphaned", threadId: "thread-orphaned" });
     yield* insertRun(sql, { id: "run-live", threadId: "thread-live" });
 
-    const threads = new Map<string, OrchestrationThreadShell>([
+    const threads = new Map<string, OrchestrationV2ThreadShell>([
       ["thread-recovered", threadShell({ threadId: "thread-recovered", state: "completed" })],
       ["thread-orphaned", threadShell({ threadId: "thread-orphaned", state: "running" })],
       ["thread-live", threadShell({ threadId: "thread-live", state: "running" })],

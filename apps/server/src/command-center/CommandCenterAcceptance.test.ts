@@ -11,7 +11,6 @@ import {
   type ProviderAvailability as ProviderAvailabilityType,
 } from "@command-center/core";
 import {
-  type ClientOrchestrationCommand,
   CommandCenterAutomationDefinitionCreateInput,
   CommandCenterAutomationDefinitionSnapshot,
   type CommandCenterCommandSubmitInput as CommandCenterCommandSubmitInputType,
@@ -42,17 +41,21 @@ import * as NetAddress from "effect/net/NetAddress";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import { CommandCenterToolkitHandlersLive } from "../mcp/toolkits/command-center/handlers.ts";
 import { CommandCenterToolkit } from "../mcp/toolkits/command-center/tools.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import * as ProcessRunner from "../processRunner.ts";
-import * as ProviderRegistry from "../provider/Services/ProviderRegistry.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as AutomationDefinitionConfig from "./AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./AutomationRuns.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import * as ConnectionHealth from "./ConnectionHealth.ts";
 import * as GoogleReadConnector from "./GoogleReadConnector.ts";
 import * as MemorySearchIndex from "./MemorySearchIndex.ts";
+import type { LegacyOrchestrationCommand as ClientOrchestrationCommand } from "./OrchestrationBridge.ts";
 import * as ReadinessGate from "./ReadinessGate.ts";
 import {
   type DispatcherDependencies,
@@ -534,9 +537,9 @@ const makeToolkitLayer = (input: {
   readonly scope: McpInvocationContext.McpInvocationScope;
   readonly google: GoogleReadConnector.GoogleReadConnectorShape;
   readonly automationDefinitions?: AutomationDefinitionConfig.AutomationDefinitionConfigShape;
-  readonly providerRegistry?: ProviderRegistry.ProviderRegistryShape;
+  readonly providerRegistry?: ProviderRegistry.ProviderRegistry["Service"];
 }) =>
-  CommandCenterToolkitHandlersLive.pipe(
+  McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         Layer.succeed(CommandCenterService, input.service),
@@ -553,6 +556,15 @@ const makeToolkitLayer = (input: {
           ProviderRegistry.ProviderRegistry,
           input.providerRegistry ?? unusedProviderRegistry,
         ),
+        // Write tools check that the calling thread's run is live.
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: (id) =>
+            Effect.succeed({
+              ...liveThreadShell(id),
+              providerInstanceId:
+                input.scope.thread?.providerInstanceId ?? ProviderInstanceId.make("codex"),
+            }),
+        }),
       ),
     ),
   );
@@ -758,7 +770,7 @@ describe("Command Center acceptance prompts", () => {
       expect(projected.items.map((item) => item.id)).toEqual([needsReview.id, routine.id]);
       expect(projected.needsYou.map((item) => item.id)).toEqual([needsReview.id]);
       expect(scope).toMatchObject({
-        threadId: dispatched.threadId,
+        thread: { threadId: dispatched.threadId },
         spaceId: systemSpace.id,
         memoryWriteMode: "propose",
       });
@@ -898,10 +910,15 @@ describe("Command Center acceptance prompts", () => {
             runId: submitted.run.id,
             dispatchCommand: harness.dispatchCommand,
           });
-          const dispatchedCommand = harness.read().commands[0];
-          if (dispatchedCommand?.type !== "thread.turn.start") {
+          const emitted = harness.read().commands[0];
+          if (emitted?.type !== "thread.turn.start") {
             return yield* Effect.die("The Run dispatcher did not emit a T3 thread turn.");
           }
+          // The dispatcher still emits the V1 turn-start shape through the bridge.
+          const dispatchedCommand = emitted as unknown as {
+            readonly message: { readonly text: string };
+            readonly bootstrap?: { readonly prepareWorktree?: unknown };
+          };
           expect(dispatched).toMatchObject({
             projectId: ProjectId.make("command-center:acceptance:sample-mobile-app"),
             state: "running",
@@ -1254,9 +1271,13 @@ describe("Command Center acceptance prompts", () => {
     } satisfies LoadedCommandCenterConfig;
     const agentScope: McpInvocationContext.McpInvocationScope = {
       environmentId: EnvironmentId.make("environment-acceptance"),
-      threadId: ThreadId.make("cc-space-agent-example-studio"),
-      providerSessionId: "space-agent-session",
-      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      requestNamespace: "space-agent-session",
+      thread: {
+        threadId: ThreadId.make("cc-space-agent-example-studio"),
+        providerSessionId: "space-agent-session",
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      },
+      client: undefined,
       capabilities: new Set(CAPABILITY_NAMES),
       spaceId: agentStudioSpace.id,
       memoryWriteMode: "remember",
@@ -1336,9 +1357,13 @@ describe("Command Center acceptance prompts", () => {
             google: makeMockGoogleConnector().service,
             scope: {
               environmentId: EnvironmentId.make("environment-acceptance"),
-              threadId: ThreadId.make("cc-space-agent-example-studio"),
-              providerSessionId: "space-agent-session",
-              providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+              requestNamespace: "space-agent-session",
+              thread: {
+                threadId: ThreadId.make("cc-space-agent-example-studio"),
+                providerSessionId: "space-agent-session",
+                providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+              },
+              client: undefined,
               capabilities: new Set(CAPABILITY_NAMES),
               spaceId: studioSpace.id,
               memoryWriteMode: "remember",

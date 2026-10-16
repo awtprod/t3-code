@@ -18,6 +18,7 @@ function textGenerationLayer(
       generatePrContent: () => Effect.die("unused"),
       generateBranchName: () => Effect.die("unused"),
       generateThreadTitle: () => Effect.die("unused"),
+      generateReviewGuide: () => Effect.die("unused"),
       generateAutomationSchedule: () => Effect.succeed(result),
     }),
   );

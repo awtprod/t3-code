@@ -13,7 +13,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import { CommandCenterEventStream, layer as eventStreamLayer } from "./EventStream.ts";
 
 type Sql = SqlClient.SqlClient;

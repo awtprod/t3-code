@@ -6,7 +6,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import * as SpaceAgent from "./SpaceAgent.ts";
 import { recordSpaceAgentReply, type SpaceAgentReplyKind } from "./SpaceAgentReplies.ts";
 import {

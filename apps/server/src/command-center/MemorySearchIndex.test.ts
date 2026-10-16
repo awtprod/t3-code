@@ -5,7 +5,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import { MemorySearchIndex, layer as memorySearchIndexLayer } from "./MemorySearchIndex.ts";
 
 const fixtureNow = 1_784_548_800_000;

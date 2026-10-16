@@ -3,7 +3,6 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   CommandCenterCommandSubmitInput,
-  type ClientOrchestrationCommand,
   type OrchestrationProjectShell,
   ProjectId,
   ThreadId,
@@ -22,6 +21,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import type * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import type { LegacyOrchestrationCommand as ClientOrchestrationCommand } from "./OrchestrationBridge.ts";
 import {
   type DispatcherDependencies,
   RunDispatcherError,
@@ -307,6 +307,22 @@ function makeFixture(
   };
 }
 
+/** The fields these tests read from the V1-shaped `thread.turn.start` the dispatcher builds. */
+interface LegacyTurnStartView {
+  readonly type: "thread.turn.start";
+  readonly runtimeMode?: string;
+  readonly message: { readonly text: string };
+  readonly bootstrap?: {
+    readonly createThread?: { readonly runtimeMode?: string };
+    readonly prepareWorktree?: unknown;
+  };
+}
+
+const asTurnStart = (command: ClientOrchestrationCommand | undefined): LegacyTurnStartView => {
+  if (command?.type !== "thread.turn.start") throw new Error("Expected a turn start.");
+  return command as unknown as LegacyTurnStartView;
+};
+
 it("renders bounded prior context as reference while keeping the current command authoritative", () => {
   const rendered = renderThreadMessage({
     space,
@@ -359,16 +375,16 @@ it.effect("links one fresh thread and registers the exact Space and repository s
       "cc.runs.start",
     ]);
     expect(dispatchedCommand?.type).toBe("thread.turn.start");
-    if (dispatchedCommand?.type !== "thread.turn.start") return;
-    expect(dispatchedCommand.runtimeMode).toBe("auto-accept-edits");
-    expect(dispatchedCommand.bootstrap?.createThread?.runtimeMode).toBe("auto-accept-edits");
-    expect(dispatchedCommand.bootstrap?.prepareWorktree).toMatchObject({
+    const turnStart = asTurnStart(dispatchedCommand);
+    expect(turnStart.runtimeMode).toBe("auto-accept-edits");
+    expect(turnStart.bootstrap?.createThread?.runtimeMode).toBe("auto-accept-edits");
+    expect(turnStart.bootstrap?.prepareWorktree).toMatchObject({
       projectCwd: targetProject.workspaceRoot,
       baseBranch: "main",
       startFromOrigin: false,
     });
-    expect(dispatchedCommand.message.text).toContain("Command Center route receipt");
-    expect(dispatchedCommand.message.text).toContain("Space instructions");
+    expect(turnStart.message.text).toContain("Command Center route receipt");
+    expect(turnStart.message.text).toContain("Space instructions");
   }),
 );
 
@@ -427,10 +443,10 @@ it.effect("binds explicit Memory writes to the credential and keeps system work 
 
     expect(fixture.read().registeredScope?.memoryWriteMode).toBe("remember");
     expect(dispatchedCommand?.type).toBe("thread.turn.start");
-    if (dispatchedCommand?.type !== "thread.turn.start") return;
-    expect(dispatchedCommand.runtimeMode).toBe("approval-required");
-    expect(dispatchedCommand.bootstrap?.createThread?.runtimeMode).toBe("approval-required");
-    expect(dispatchedCommand.bootstrap?.prepareWorktree).toBeUndefined();
+    const turnStart = asTurnStart(dispatchedCommand);
+    expect(turnStart.runtimeMode).toBe("approval-required");
+    expect(turnStart.bootstrap?.createThread?.runtimeMode).toBe("approval-required");
+    expect(turnStart.bootstrap?.prepareWorktree).toBeUndefined();
   }),
 );
 
@@ -888,9 +904,9 @@ it.effect("starts Space agent Runs as unattended workers that carry the Space br
     });
 
     expect(result.threadId).toBe(ThreadId.make("cc:automation:thread-example"));
-    if (dispatched?.type !== "thread.turn.start") throw new Error("Expected a turn start.");
-    expect(dispatched.message.text).not.toContain("Command Center router role");
-    expect(dispatched.message.text).toContain("[procedure] Run the tests");
+    const turnStart = asTurnStart(dispatched);
+    expect(turnStart.message.text).not.toContain("Command Center router role");
+    expect(turnStart.message.text).toContain("[procedure] Run the tests");
   }),
 );
 
