@@ -29,7 +29,7 @@ layer("053_ProjectionTurnUsage", (it) => {
           pending_user_input_count, has_actionable_proposed_plan
         ) VALUES (
           'thread-usage', 'project-usage', 'Usage thread',
-          '{"instanceId":"kimi-main","model":"kimi-code/k3"}', 'full-access',
+          '{"instanceId":"codex-main","model":"acme-model-1"}', 'full-access',
           'default', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 0, 0, 0
         )
       `;
@@ -37,7 +37,7 @@ layer("053_ProjectionTurnUsage", (it) => {
         INSERT INTO projection_thread_sessions (
           thread_id, status, provider_name, provider_instance_id, runtime_mode, updated_at
         ) VALUES (
-          'thread-usage', 'ready', 'kimi', 'kimi-main', 'full-access',
+          'thread-usage', 'ready', 'codex', 'codex-main', 'full-access',
           '2026-07-01T00:00:00.000Z'
         )
       `;
@@ -77,7 +77,7 @@ layer("053_ProjectionTurnUsage", (it) => {
           thread_id, turn_id, project_id, provider_instance_id, provider_driver,
           workload, component_kind, component_id, quality, cost_kind, completed_at
         ) VALUES (
-          'thread-detached', 'turn-2', 'project-usage', 'kimi-main', 'kimi',
+          'thread-detached', 'turn-2', 'project-usage', 'codex-main', 'codex',
           'automation', 'main', 'main', 'partial', 'unavailable',
           '2026-07-01T00:02:00.000Z'
         )

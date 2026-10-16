@@ -8,14 +8,15 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { priceTurnUsage, resolveUsagePrice } from "./pricing.ts";
 
-const KIMI = ProviderDriverKind.make("kimi");
-const INSTANCE = ProviderInstanceId.make("kimi");
+const DRIVER = ProviderDriverKind.make("codex");
+const INSTANCE = ProviderInstanceId.make("codex-acme");
+const MODEL = "acme-model-1";
 const completedAt = "2026-08-01T00:00:00.000Z";
 
 function usage(overrides: Partial<TurnUsageRecord> = {}): TurnUsageRecord {
   return {
     component: { kind: "main", id: "main" },
-    model: "kimi-code/k3",
+    model: MODEL,
     workload: "interactive",
     quality: "reported",
     completedAt,
@@ -24,13 +25,23 @@ function usage(overrides: Partial<TurnUsageRecord> = {}): TurnUsageRecord {
 }
 
 describe("usage pricing", () => {
-  it("prices K3 cache reads, cache creation, uncached input, and output independently", () => {
+  it("prices cache reads, cache creation, uncached input, and output independently", () => {
     const rate = resolveUsagePrice({
       providerInstanceId: INSTANCE,
-      driver: KIMI,
-      model: "kimi-code/k3",
+      driver: DRIVER,
+      model: MODEL,
       completedAt,
-      overrides: [],
+      overrides: [
+        {
+          driver: DRIVER,
+          model: MODEL,
+          effectiveAt: "2026-07-01T00:00:00.000Z",
+          uncachedInputMicroUsdPerMillion: 3_000_000,
+          cacheReadInputMicroUsdPerMillion: 300_000,
+          cacheWriteInputMicroUsdPerMillion: 3_000_000,
+          outputMicroUsdPerMillion: 15_000_000,
+        },
+      ],
     });
     const priced = priceTurnUsage(
       usage({
@@ -48,15 +59,15 @@ describe("usage pricing", () => {
   it("uses instance overrides before driver overrides and labels subscriptions as estimates", () => {
     const overrides: ReadonlyArray<UsagePricingOverride> = [
       {
-        driver: KIMI,
-        model: "kimi-code/k3",
+        driver: DRIVER,
+        model: MODEL,
         effectiveAt: "2026-07-01T00:00:00.000Z",
         uncachedInputMicroUsdPerMillion: 4_000_000,
         outputMicroUsdPerMillion: 20_000_000,
       },
       {
         providerInstanceId: INSTANCE,
-        model: "kimi-code/k3",
+        model: MODEL,
         effectiveAt: "2026-07-15T00:00:00.000Z",
         uncachedInputMicroUsdPerMillion: 5_000_000,
         outputMicroUsdPerMillion: 25_000_000,
@@ -64,8 +75,8 @@ describe("usage pricing", () => {
     ];
     const rate = resolveUsagePrice({
       providerInstanceId: INSTANCE,
-      driver: KIMI,
-      model: "kimi-code/k3",
+      driver: DRIVER,
+      model: MODEL,
       completedAt,
       overrides,
     });
@@ -83,8 +94,17 @@ describe("usage pricing", () => {
     expect(
       resolveUsagePrice({
         providerInstanceId: INSTANCE,
-        driver: KIMI,
+        driver: DRIVER,
         model: "custom/model",
+        completedAt,
+        overrides: [],
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveUsagePrice({
+        providerInstanceId: INSTANCE,
+        driver: DRIVER,
+        model: MODEL,
         completedAt,
         overrides: [],
       }),

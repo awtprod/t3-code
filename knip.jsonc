@@ -69,11 +69,7 @@
         "scripts/update-test-shard-weights.ts",
         "scripts/verify-background-live.ts",
         "src/provider/testFixtures/*.mjs",
-        // Run by hand against a real container runtime (see the file header).
-        "integration/sandboxCanary.integration.ts",
       ],
-      // Command Center's sandbox barrel; callers import the modules directly.
-      "ignoreIssues": { "src/sandbox/index.ts": ["files"] },
       // Keep the transitive Effect runtime pinned for standalone npm installs.
       // The Vite+ web build prerequisite.
       // Native and disk-loaded provider packages stay external to the bundle; the
@@ -149,11 +145,6 @@
     "packages/*": {
       // These workspace packages are private to this monorepo.
       "includeEntryExports": true,
-    },
-    "packages/sandbox-bridge": {
-      "includeEntryExports": true,
-      // build.ts bundles each binary into the sandbox image.
-      "entry": ["src/bin/*.ts"],
     },
     "packages/effect-acp": {
       "includeEntryExports": true,

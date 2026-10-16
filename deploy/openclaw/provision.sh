@@ -26,15 +26,13 @@ install -d -o commandcenter -g commandcenter -m 0700 \
   /var/lib/command-center/providers/codex/secondary \
   /var/lib/command-center/providers/claude/primary \
   /var/lib/command-center/providers/claude/secondary \
-  /var/lib/command-center/providers/kimi/primary \
-  /var/lib/command-center/providers/kimi/secondary \
   /srv/command-center/workspaces/primary \
   /srv/command-center/workspaces/secondary
 
 install -o root -g root -m 0755 "$asset_dir/gh" /opt/command-center/bin/gh
 install -o root -g root -m 0755 "$asset_dir/git-credential-gh" /opt/command-center/bin/git-credential-gh
 install -o root -g root -m 0755 "$asset_dir/provider-run" /opt/command-center/bin/provider-run
-for instance in codex-primary codex-secondary claude-primary claude-secondary kimi-primary kimi-secondary; do
+for instance in codex-primary codex-secondary claude-primary claude-secondary; do
   install -o root -g root -m 0755 "$asset_dir/provider-instance" "/opt/command-center/bin/$instance"
 done
 install -o root -g root -m 0644 "$asset_dir/command-center.service" /etc/systemd/system/command-center.candidate.service

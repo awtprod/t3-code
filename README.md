@@ -37,32 +37,9 @@ credentials. Install and sign in to one or more providers before starting your f
 | [Cursor CLI](https://cursor.com/cli)                  | `cursor-agent` | `agent login`         |
 | [Grok Build](https://x.ai/cli)                        | `grok`         | `grok login`          |
 | [OpenCode](https://opencode.ai)                       | `opencode`     | `opencode auth login` |
-| [Kimi K3](https://github.com/MoonshotAI/kimi-code)    | `kimi`         | `/login` inside Kimi  |
 
 See [provider setup](./docs/user/install.md#providers) for binary discovery and multi-account
 guidance.
-
-#### Kimi K3 setup
-
-Command Center supports Kimi K3 through Kimi Code `0.31.1` or newer. Because Node.js is already a
-prerequisite for this repository, the npm installation is the shortest setup path:
-
-```bash
-npm install --global @moonshot-ai/kimi-code@latest
-kimi --version
-kimi
-```
-
-At the Kimi prompt, run `/login` and choose Kimi Code OAuth or a Kimi Platform API key. Then open
-**Settings** → **Providers** in Command Center, enable Kimi, and verify that the `kimi` binary is
-detected. New Kimi threads default to the `kimi-code/k3` model.
-
-Set a separate `KIMI_CODE_HOME` on each provider instance when using multiple Kimi accounts.
-Interactive Kimi sessions can use the npm installation. Scheduled or unattended Command Center
-automation requires Linux, Kimi Code `0.31.1` or newer as a native non-writable ELF executable, and
-Bubblewrap at `/usr/bin/bwrap`; npm and script launchers remain interactive-only. See
-[Kimi provider details](./docs/user/providers-kimi.md) for session, caching, subagent, and isolation
-behavior.
 
 ### 2. Clone and install
 

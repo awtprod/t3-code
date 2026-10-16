@@ -1,8 +1,7 @@
 // @effect-diagnostics preferSchemaOverJson:off cryptoRandomUUID:off globalTimersInEffect:off globalFetchInEffect:off
 // This is a raw HTTP judge client with an injectable `fetch`, a JSON wire
-// protocol, an AbortController-backed timeout, and a UUID operation id — the
-// same shape as the other raw provider runtimes (see `provider/kimiRuntime.ts`),
-// so the corresponding Effect diagnostics are disabled at the file level.
+// protocol, an AbortController-backed timeout, and a UUID operation id, so the
+// corresponding Effect diagnostics are disabled at the file level.
 /**
  * Judge – one implementation of "ask a cheap model typed questions and get
  * calibrated probabilities back".

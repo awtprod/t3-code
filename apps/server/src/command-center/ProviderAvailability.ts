@@ -1,4 +1,3 @@
-import * as NodeProcess from "node:process";
 import {
   CAPABILITY_NAMES,
   ModelId,
@@ -9,9 +8,8 @@ import { isProviderAvailable, type ServerProvider } from "@t3tools/contracts";
 
 /**
  * Command Center provider turns require an isolation boundary that has been
- * verified independently from ordinary T3 project sessions. Kimi enters the
- * candidate set only on Linux; its adapter then runs the executable, version,
- * Bubblewrap, workspace, and private-home probes before starting the turn.
+ * verified independently from ordinary T3 project sessions, so automation
+ * routing only offers Codex providers.
  */
 export type ProviderAvailabilityPurpose = "command-center-automation" | "interactive-routing";
 
@@ -20,16 +18,7 @@ export function providerAvailability(
   purpose: ProviderAvailabilityPurpose,
 ): ReadonlyArray<ProviderAvailability> {
   return providers.flatMap((provider, priority) => {
-    if (
-      purpose === "command-center-automation" &&
-      provider.driver !== "codex" &&
-      !(
-        provider.driver === "kimi" &&
-        NodeProcess.platform === "linux" &&
-        provider.capabilities?.commandCenterAutomation === true
-      )
-    )
-      return [];
+    if (purpose === "command-center-automation" && provider.driver !== "codex") return [];
     const modelIds = provider.models.map((model) => ModelId.make(model.slug));
     const defaultModelId = modelIds[0];
     if (defaultModelId === undefined) return [];

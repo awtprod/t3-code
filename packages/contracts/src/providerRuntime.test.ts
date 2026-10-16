@@ -9,16 +9,16 @@ describe("ProviderRuntimeEvent", () => {
   it("decodes provider-neutral usage with cache writes and subagent identity", () => {
     const parsed = decodeRuntimeEvent({
       type: "turn.usage.recorded",
-      eventId: "event-kimi-usage",
-      provider: "kimi",
-      providerInstanceId: "kimi",
+      eventId: "event-claude-usage",
+      provider: "claudeAgent",
+      providerInstanceId: "claude-acme",
       createdAt: "2026-08-01T00:00:00.000Z",
-      threadId: "thread-kimi",
-      turnId: "turn-kimi",
+      threadId: "thread-claude",
+      turnId: "turn-claude",
       payload: {
         usage: {
           component: { kind: "subagent", id: "agent-1", name: "researcher" },
-          model: "kimi-code/k3",
+          model: "claude-sonnet-5",
           workload: "interactive",
           quality: "reported",
           uncachedInputTokens: 100,

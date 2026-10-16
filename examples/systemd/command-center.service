@@ -18,7 +18,7 @@ TimeoutStopSec=30s
 # Runtime state stays in the non-Git runtime directory. The service may write
 # only its adjacent private config checkout so validated automation edits can
 # create local commits; repository push remains approval-gated and unavailable
-# to this unit's provider sandbox.
+# to this unit's isolated provider sessions.
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true

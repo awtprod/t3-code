@@ -11,7 +11,21 @@ import { ProjectionTurnUsageRepository } from "../Services/ProjectionTurnUsage.t
 import { ProjectionTurnUsageRepositoryLive } from "./ProjectionTurnUsage.ts";
 
 const persistence = NodeSqliteClient.layerMemory();
-const dependencies = Layer.mergeAll(persistence, ServerSettingsService.layerTest());
+const dependencies = Layer.mergeAll(
+  persistence,
+  ServerSettingsService.layerTest({
+    usagePricingOverrides: [
+      {
+        driver: ProviderDriverKind.make("codex"),
+        model: "acme-model-1",
+        effectiveAt: "2026-07-01T00:00:00.000Z",
+        uncachedInputMicroUsdPerMillion: 3_000_000,
+        cacheReadInputMicroUsdPerMillion: 300_000,
+        outputMicroUsdPerMillion: 15_000_000,
+      },
+    ],
+  }),
+);
 const layer = ProjectionTurnUsageRepositoryLive.pipe(Layer.provideMerge(dependencies));
 
 it.layer(layer)("ProjectionTurnUsageRepository", (it) => {
@@ -20,8 +34,8 @@ it.layer(layer)("ProjectionTurnUsageRepository", (it) => {
       yield* runMigrations();
       const sql = yield* SqlClient.SqlClient;
       const repository = yield* ProjectionTurnUsageRepository;
-      const provider = ProviderDriverKind.make("kimi");
-      const providerInstanceId = ProviderInstanceId.make("kimi-main");
+      const provider = ProviderDriverKind.make("codex");
+      const providerInstanceId = ProviderInstanceId.make("codex-main");
       const threadId = ThreadId.make("usage-thread");
       const turnId = TurnId.make("turn-1");
       const completedAt = "2026-08-01T12:00:00.000Z";
@@ -37,7 +51,7 @@ it.layer(layer)("ProjectionTurnUsageRepository", (it) => {
         ...base,
         usage: {
           component: { kind: "main", id: "main" },
-          model: "kimi-code/k3",
+          model: "acme-model-1",
           workload: "interactive",
           quality: "reported",
           uncachedInputTokens: 100,
@@ -52,7 +66,7 @@ it.layer(layer)("ProjectionTurnUsageRepository", (it) => {
           operation_id, operation, provider_instance_id, model, duration_ms,
           input_tokens, output_tokens, cost_micro_usd, status, completed_at
         ) VALUES (
-          'internal-1', 'title', ${providerInstanceId}, 'kimi-code/k3', 42,
+          'internal-1', 'title', ${providerInstanceId}, 'acme-model-1', 42,
           NULL, NULL, NULL, 'success', ${completedAt}
         )
       `;
@@ -61,7 +75,7 @@ it.layer(layer)("ProjectionTurnUsageRepository", (it) => {
         ...base,
         usage: {
           component: { kind: "main", id: "main" },
-          model: "kimi-code/k3",
+          model: "acme-model-1",
           workload: "interactive",
           quality: "reported",
           uncachedInputTokens: 200,
@@ -75,7 +89,7 @@ it.layer(layer)("ProjectionTurnUsageRepository", (it) => {
         ...base,
         usage: {
           component: { kind: "subagent", id: "agent-1" },
-          model: "kimi-code/k3",
+          model: "acme-model-1",
           workload: "interactive",
           quality: "partial",
           cacheReadInputTokens: 5,
@@ -87,7 +101,7 @@ it.layer(layer)("ProjectionTurnUsageRepository", (it) => {
         turnId: TurnId.make("turn-2"),
         usage: {
           component: { kind: "main", id: "main" },
-          model: "kimi-code/k3",
+          model: "acme-model-1",
           workload: "automation",
           quality: "partial",
           completedAt: "2026-08-01T13:00:00.000Z",

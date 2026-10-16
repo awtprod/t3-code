@@ -15,22 +15,9 @@ export interface UsagePriceRate {
   readonly provenance: string;
 }
 
-const KIMI = "kimi";
-
 const BUILT_IN_USAGE_PRICING: ReadonlyArray<
   UsagePriceRate & { readonly driver: string; readonly model: string }
-> = [
-  {
-    driver: KIMI,
-    model: "kimi-code/k3",
-    effectiveAt: "2026-07-01T00:00:00.000Z",
-    uncachedInputMicroUsdPerMillion: 3_000_000,
-    cacheReadInputMicroUsdPerMillion: 300_000,
-    cacheWriteInputMicroUsdPerMillion: 3_000_000,
-    outputMicroUsdPerMillion: 15_000_000,
-    provenance: "Kimi API pricing (2026-07)",
-  },
-];
+> = [];
 
 function latestEffective<T extends { readonly effectiveAt: string }>(
   values: ReadonlyArray<T>,

@@ -296,8 +296,8 @@ export function commandCenterProviderIsolationIssue(input: {
   readonly runtimeMode: RuntimeMode;
 }): string | undefined {
   if (!isCommandCenterThreadId(input.threadId)) return undefined;
-  if (String(input.provider) !== "codex" && String(input.provider) !== "kimi") {
-    return "Command Center runs require Codex or a verified native Kimi provider because the selected provider does not expose a host-filesystem isolation profile.";
+  if (String(input.provider) !== "codex") {
+    return "Command Center runs require Codex because the selected provider does not expose a host-filesystem isolation profile.";
   }
   if (input.runtimeMode === "full-access") {
     return "Command Center runs cannot use full-access provider sessions.";

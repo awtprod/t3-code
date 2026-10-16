@@ -61,7 +61,7 @@ describe("CommandCenterProviderIsolation", () => {
         provider: "claude-code",
         runtimeMode: "approval-required",
       }) ?? "",
-      /require Codex or a verified native Kimi provider/u,
+      /require Codex because/u,
     );
     NodeAssert.match(
       commandCenterProviderIsolationIssue({
@@ -76,14 +76,6 @@ describe("CommandCenterProviderIsolation", () => {
         threadId: "thread-1",
         provider: "claude-code",
         runtimeMode: "full-access",
-      }),
-      undefined,
-    );
-    NodeAssert.equal(
-      commandCenterProviderIsolationIssue({
-        threadId: "cc:run-1",
-        provider: "kimi",
-        runtimeMode: "approval-required",
       }),
       undefined,
     );
