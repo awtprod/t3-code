@@ -226,15 +226,21 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
         },
         client: undefined,
-        capabilities: new Set<McpInvocationContext.McpCapability>([
-          "orchestration",
-          "worktree",
-          "pull-requests",
-          ...(registeredScope?.capabilities ??
-            request.capabilities ??
-            (browserToolsAvailable ? (["preview"] as const) : [])),
-          ...databaseCapabilities,
-        ]),
+        // A Command Center Run or Space agent thread holds exactly its
+        // registered scope (plus any database grant): upstream's base thread
+        // grants (orchestration, worktree, pull requests) would widen what a
+        // scoped credential can reach. Other threads keep upstream's grants.
+        capabilities: new Set<McpInvocationContext.McpCapability>(
+          registeredScope !== undefined
+            ? [...registeredScope.capabilities, ...databaseCapabilities]
+            : [
+                "orchestration",
+                "worktree",
+                "pull-requests",
+                ...(request.capabilities ?? (browserToolsAvailable ? (["preview"] as const) : [])),
+                ...databaseCapabilities,
+              ],
+        ),
         ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
         ...(request.cwd?.trim() ? { cwd: request.cwd.trim() } : {}),
         ...(spaceId === undefined ? {} : { spaceId }),
