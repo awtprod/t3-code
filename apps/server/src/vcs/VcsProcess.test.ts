@@ -3,7 +3,7 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, expect, it } from "@effect/vitest";
-import { HostProcessWorkingDirectory } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -15,7 +15,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import {
   VcsProcessExitError,
@@ -34,10 +34,10 @@ const run = (input: VcsProcess.VcsProcessInput) =>
     return yield* process.run(input);
   });
 
-const liveLayer = VcsProcess.layer.pipe(Layer.provide(NodeServices.layer));
+const layerLive = VcsProcess.layer.pipe(Layer.provide(NodeServices.layer));
 
 const provideLive = <A, E, R>(effect: Effect.Effect<A, E, R | VcsProcess.VcsProcess>) =>
-  effect.pipe(Effect.provide(liveLayer));
+  effect.pipe(Effect.provide(layerLive));
 
 const baseInput = {
   operation: "test.process-boundary",
@@ -610,7 +610,7 @@ describe("VcsProcess.run", () => {
         operation: "test.output-limit",
         command: "node",
         args: ["-e", "process.stdout.write('x'.repeat(2048))"],
-        cwd: yield* HostProcessWorkingDirectory,
+        cwd: yield* HostProcess.WorkingDirectory,
         maxOutputBytes: 128,
         outputMode: "error",
       }).pipe(Effect.flip);

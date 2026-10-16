@@ -37,6 +37,9 @@ const REVIEWED_PUBLIC_UPSTREAM_COMMITS = [
   "eed974c122e192de45b54b7dac7ca1a51448c08f",
   // pingdotgg/t3code tag v0.0.45 merged in the 2026-10 sync, reviewed as public on 2026-10-09.
   "6c8fed35dded9ff71c5b46807125457acbb76be6",
+  // pingdotgg/t3code tag v0.1.0 (orchestration v2) merged in the 2026-10 re-platform,
+  // verified through the GitHub API on 2026-10-16.
+  "81493efb71e8e8244f95d3e9f71d8369654ab151",
 ] as const;
 
 const args = new Set(process.argv.slice(2));
@@ -55,18 +58,28 @@ const findings: PublicLeakFinding[] = [];
 for (const relativePath of paths) {
   const isVendoredPublicReference = relativePath.startsWith(VENDORED_PUBLIC_REFERENCE_PREFIX);
   const pathFindings = scanPublicPath(relativePath, denylist);
+  const candidate = readCandidate(relativePath);
+  const upstreamVerbatim =
+    !isVendoredPublicReference &&
+    candidate._tag === "Bytes" &&
+    isUpstreamVerbatim(relativePath, candidate.bytes);
+  // A file byte-identical to a reviewed public upstream commit is already public, so the
+  // sensitive-file path rule (runtime/transcript-shaped names such as upstream's `.ndjson`
+  // provider replay fixtures) says nothing about Command Center's private boundary. Every other
+  // path finding, including the operator denylist, still applies.
   findings.push(
     ...(isVendoredPublicReference
       ? pathFindings.filter((finding) => finding.rule === "private-denylist")
-      : pathFindings),
+      : upstreamVerbatim
+        ? pathFindings.filter((finding) => finding.rule !== "sensitive-file")
+        : pathFindings),
   );
-  const candidate = readCandidate(relativePath);
   if (candidate._tag === "Missing") continue;
-  // Unmodified upstream content: the path scan above still applied in full, so
-  // only the generic content heuristics are skipped here. The denylist keeps
-  // running, so an operator identifier can never ride in on an upstream file.
+  // Unmodified upstream content: only the generic content heuristics are skipped
+  // here. The denylist keeps running, so an operator identifier can never ride in
+  // on an upstream file.
   if (!isVendoredPublicReference && candidate._tag !== "Oversized") {
-    if (isUpstreamVerbatim(relativePath, candidate.bytes)) {
+    if (upstreamVerbatim) {
       const text = candidate.bytes.includes(0)
         ? extractPublicBinaryMetadata(candidate.bytes)
         : candidate.bytes.toString("utf8");
@@ -288,6 +301,10 @@ type Candidate =
 
 function readCandidate(relativePath: string): Candidate {
   if (stagedOnly) {
+    // A gitlink (mode 160000, e.g. a vendored submodule pointer) has no blob in this
+    // repository's object store, so `cat-file` on it fails. Its path was already scanned.
+    const indexEntry = git(["ls-files", "--stage", "--", relativePath]).trim();
+    if (indexEntry.length === 0 || indexEntry.startsWith("160000 ")) return { _tag: "Missing" };
     const object = `:${relativePath}`;
     if (git(["cat-file", "-t", object]).trim() !== "blob") return { _tag: "Missing" };
     const size = Number(git(["cat-file", "-s", object]).trim());

@@ -1,58 +1,36 @@
-// @effect-diagnostics nodeBuiltinImport:off - Regression coverage compares shipped CSS with the sidebar width contract.
-import * as NodeFS from "node:fs";
-
 import { describe, expect, it } from "vite-plus/test";
-
 import {
-  resolveInitialThreadSidebarWidth,
-  THREAD_MAIN_CONTENT_MIN_WIDTH,
+  clampThreadSidebarWidth,
+  resolveThreadSidebarMaximumWidth,
+  resolveThreadSidebarMinimumWidth,
   THREAD_SIDEBAR_MIN_WIDTH,
 } from "./threadSidebarWidth";
 
-// Upstream stopped exporting the default width; assert the value the module
-// actually falls back to rather than dropping the case.
-const THREAD_SIDEBAR_DEFAULT_WIDTH = 16 * 16;
-
-describe("thread sidebar width", () => {
-  it("uses the default width when no preference is stored", () => {
-    expect(resolveInitialThreadSidebarWidth(null, 1200)).toBe(THREAD_SIDEBAR_DEFAULT_WIDTH);
+describe("resolveThreadSidebarMinimumWidth", () => {
+  it("keeps the default minimum when the brand fits", () => {
+    expect(resolveThreadSidebarMinimumWidth(0)).toBe(THREAD_SIDEBAR_MIN_WIDTH);
+    expect(resolveThreadSidebarMinimumWidth(194)).toBe(THREAD_SIDEBAR_MIN_WIDTH);
   });
 
-  it("uses a stored width in the initial render", () => {
-    expect(resolveInitialThreadSidebarWidth(360, 1200)).toBe(360);
+  it("grows to a brand wider than the default, rounding up", () => {
+    expect(resolveThreadSidebarMinimumWidth(237.2)).toBe(238);
+  });
+});
+
+describe("resolveThreadSidebarMaximumWidth", () => {
+  it("never drops below a raised minimum on a narrow viewport", () => {
+    expect(resolveThreadSidebarMaximumWidth(800, 238)).toBe(238);
+    expect(resolveThreadSidebarMaximumWidth(1200, 238)).toBe(560);
+  });
+});
+
+describe("clampThreadSidebarWidth", () => {
+  it("widens a stored width below a raised minimum", () => {
+    expect(clampThreadSidebarWidth(208, 238, 560)).toBe(238);
   });
 
-  it("clamps a stored width to the sidebar minimum", () => {
-    expect(resolveInitialThreadSidebarWidth(120, 1200)).toBe(THREAD_SIDEBAR_MIN_WIDTH);
-  });
-
-  it("leaves enough room for the main content on a smaller window", () => {
-    const viewportWidth = 1000;
-
-    expect(resolveInitialThreadSidebarWidth(900, viewportWidth)).toBe(
-      viewportWidth - THREAD_MAIN_CONTENT_MIN_WIDTH,
-    );
-  });
-
-  it("keeps the sidebar minimum when the whole layout is narrower than its minimums", () => {
-    expect(resolveInitialThreadSidebarWidth(900, 700)).toBe(THREAD_SIDEBAR_MIN_WIDTH);
-  });
-
-  it("shows the desktop wordmark across the sidebar's full legal width range", () => {
-    const sidebarStyles = NodeFS.readFileSync(new URL("../index.css", import.meta.url), "utf8");
-    const desktopHeaderStyles = sidebarStyles.slice(
-      sidebarStyles.indexOf("@media (min-width: 48rem)"),
-      sidebarStyles.indexOf("/* Stage-channel sidebar art"),
-    );
-    const stageLabelThreshold = desktopHeaderStyles.match(
-      /@container sidebar-header \(min-width: ([\d.]+)rem\) \{\s*\.sidebar-brand-stage \{\s*display: inline-flex;/,
-    )?.[1];
-
-    expect(sidebarStyles).toMatch(/\.sidebar-brand \{\s*display: none;/);
-    expect(desktopHeaderStyles).toMatch(
-      /@media \(min-width: 48rem\) \{\s*\.sidebar-brand \{\s*display: flex;/,
-    );
-    expect(THREAD_SIDEBAR_MIN_WIDTH).toBe(13 * 16);
-    expect(Number(stageLabelThreshold) * 16).toBeGreaterThan(THREAD_SIDEBAR_MIN_WIDTH);
+  it("keeps widths inside the range and caps wide ones", () => {
+    expect(clampThreadSidebarWidth(300, 238, 560)).toBe(300);
+    expect(clampThreadSidebarWidth(900, 238, 560)).toBe(560);
   });
 });

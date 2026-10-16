@@ -97,11 +97,13 @@ For a production-like local build where the server also serves the compiled web 
 pnpm serve --home-dir /absolute/path/to/command-center-data
 ```
 
-`pnpm serve` rebuilds the web client before starting. Use `pnpm serve:fast` on later starts when the
-web source has not changed. An explicit home directory keeps both modes on the same isolated runtime
-database; without it, development and serve mode intentionally use different data directories.
+#### Windows (`scoop`)
 
-To run the Electron desktop app during development:
+```bash
+scoop install extras/t3code
+```
+
+#### macOS (Homebrew)
 
 ```bash
 pnpm dev:desktop
@@ -183,10 +185,17 @@ pnpm dist:desktop:artifact -- --platform linux --target AppImage --arch arm64
 Install Visual Studio 2022 Build Tools with **Desktop development with C++**, Python 3, and Rust's
 MSVC toolchain. In PowerShell, add the desired Rust target and build the installer:
 
-```powershell
-rustup target add x86_64-pc-windows-msvc
-pnpm dist:desktop:win:x64
-```
+- [Install and first run](./docs/user/install.md)
+- [Permission modes](./docs/user/permission-modes.md)
+- [Keyboard shortcuts](./docs/user/keybindings.md)
+- [Project settings](./docs/user/project-settings.md)
+- [Appearance preferences](./docs/user/appearance.md)
+- [Remote access from a phone or another machine](./docs/user/remote-access.md)
+- [Connect Claude Code, Codex, ChatGPT and other agents over MCP](./docs/user/outside-agents.md)
+- [Keeping app and server in sync](./docs/user/updating.md)
+- [Source control integrations](./docs/user/source-control.md)
+- Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
+- [Run T3 Code as a background service](./docs/user/background-service.md)
 
 Windows ARM64 is also supported when the ARM64 MSVC toolchain is installed:
 

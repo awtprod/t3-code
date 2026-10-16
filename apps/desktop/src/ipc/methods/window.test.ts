@@ -1,6 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
@@ -19,12 +19,12 @@ vi.mock("electron", () => ({
   BrowserWindow: { fromWebContents: ownerWindow },
 }));
 
+import * as DesktopBackendConfiguration from "../../backend/DesktopBackendConfiguration.ts";
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
 import * as ElectronDialog from "../../electron/ElectronDialog.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
-import type { DesktopSettings } from "../../settings/DesktopAppSettings.ts";
 import {
   getLocalEnvironmentBootstraps,
   getWindowFullscreenState,
@@ -72,12 +72,18 @@ const defaultWslInstance: DesktopBackendManager.DesktopBackendInstance = {
   waitForReady: () => Effect.succeed(true),
 };
 
-const desktopSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
-  get: Effect.succeed(DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS),
-} as unknown as DesktopAppSettings.DesktopAppSettings["Service"]);
+const backendConfigurationLayer = Layer.succeed(
+  DesktopBackendConfiguration.DesktopBackendConfiguration,
+  {
+    resolvePrimary: Effect.die("unexpected resolvePrimary"),
+    resolvePrimaryLabel: Effect.succeed("Windows"),
+    resolveWsl: () => Effect.die("unexpected resolveWsl"),
+    currentBootstrapToken: Effect.succeed("current-window-token"),
+  } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"],
+);
 
-const withDesktopSettings = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(Effect.provide(desktopSettingsLayer));
+const bootstrapsLayer = (instances: ReadonlyArray<DesktopBackendManager.DesktopBackendInstance>) =>
+  Layer.merge(DesktopBackendPool.layerTest([...instances]), backendConfigurationLayer);
 
 describe("getLocalEnvironmentBootstraps", () => {
   it.effect("synthesizes the remote primary bootstrap from settings with an empty pool", () => {
@@ -115,9 +121,38 @@ describe("getLocalEnvironmentBootstraps", () => {
           bootstrapToken: "bootstrap-token",
         },
       ]);
+    }).pipe(Effect.provide(bootstrapsLayer([defaultWslInstance]))),
+  );
+
+  it.effect("hands out the current window's token to a backend launched with the secret", () =>
+    Effect.gen(function* () {
+      const result = yield* getLocalEnvironmentBootstraps.handler();
+
+      assert.deepEqual(result, [
+        {
+          id: "wsl:default",
+          label: "WSL (Ubuntu)",
+          runningDistro: "Ubuntu",
+          httpBaseUrl: "http://127.0.0.1:3774/",
+          wsBaseUrl: "ws://127.0.0.1:3774/",
+          bootstrapToken: "current-window-token",
+        },
+      ]);
     }).pipe(
-      Effect.provide(DesktopBackendPool.layerTest([defaultWslInstance])),
-      withDesktopSettings,
+      Effect.provide(
+        bootstrapsLayer([
+          {
+            ...defaultWslInstance,
+            currentConfig: Effect.succeedSome({
+              ...readyWslConfig,
+              bootstrap: {
+                ...readyWslConfig.bootstrap,
+                desktopBootstrapSecret: "desktop-secret",
+              },
+            }),
+          },
+        ]),
+      ),
     ),
   );
 
@@ -153,7 +188,7 @@ describe("getLocalEnvironmentBootstraps", () => {
           wsBaseUrl: null,
         },
       ]);
-    }).pipe(Effect.provide(DesktopBackendPool.layerTest([retryingInstance])), withDesktopSettings);
+    }).pipe(Effect.provide(bootstrapsLayer([retryingInstance])));
   });
 
   it.effect("omits a bounded transient bootstrap after retries stop", () => {
@@ -179,7 +214,7 @@ describe("getLocalEnvironmentBootstraps", () => {
     return Effect.gen(function* () {
       const result = yield* getLocalEnvironmentBootstraps.handler();
       assert.deepEqual(result, []);
-    }).pipe(Effect.provide(DesktopBackendPool.layerTest([stoppedInstance])), withDesktopSettings);
+    }).pipe(Effect.provide(bootstrapsLayer([stoppedInstance])));
   });
 });
 
@@ -244,7 +279,10 @@ describe("pasteAsText", () => {
 });
 
 describe("pickProjectFavicon", () => {
-  const pickerLayer = (pickFiles: () => Effect.Effect<Array<string>>, settings?: DesktopSettings) =>
+  const pickerLayer = (
+    pickFiles: () => Effect.Effect<Array<string>>,
+    settings?: DesktopAppSettings.DesktopSettings,
+  ) =>
     Layer.mergeAll(
       Layer.mock(ElectronDialog.ElectronDialog)({ pickFiles }),
       Layer.mock(ElectronWindow.ElectronWindow)({
@@ -270,7 +308,7 @@ describe("pickProjectFavicon", () => {
             filters: [
               {
                 name: "Images",
-                extensions: ["avif", "gif", "ico", "jpeg", "jpg", "png", "svg", "webp"],
+                extensions: ["avif", "gif", "ico", "jpeg", "jpg", "png", "svg", "webp", "icns"],
               },
             ],
           },
@@ -297,7 +335,7 @@ describe("pickProjectFavicon", () => {
   );
 });
 
-it.effect.skipIf(HostProcessPlatform.defaultValue() === "win32")(
+it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "finds remote editors installed without PATH launchers",
   () =>
     Effect.gen(function* () {
@@ -316,14 +354,14 @@ it.effect.skipIf(HostProcessPlatform.defaultValue() === "win32")(
         yield* fs.chmod(executable, 0o755);
       }
       const editors = yield* probeRemoteEditors.handler(undefined).pipe(
-        Effect.provideService(HostProcessEnvironment, {
+        Effect.provideService(HostProcess.Environment, {
           HOME: home,
           PATH: path.join(home, "empty"),
         }),
-        Effect.provideService(HostProcessPlatform, "darwin"),
+        Effect.provideService(HostProcess.Platform, "darwin"),
       );
       assert.include(editors, "cursor");
       assert.include(editors, "vscode");
-      assert.notInclude(editors, "webstorm");
+      assert.include(editors, "webstorm");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

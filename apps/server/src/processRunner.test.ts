@@ -9,8 +9,8 @@ import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
-import { ChildProcessSpawner } from "effect/unstable/process";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { ChildProcessSpawner } from "effect/process";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 
 import * as ProcessRunner from "./processRunner.ts";
@@ -170,16 +170,17 @@ describe("runProcess", () => {
   it.effect("resolves and escapes Windows command shims before spawning", () => {
     const spawner = makeSpawner((command) =>
       Effect.sync(() => {
-        // The executable is meta-char escaped but never quoted; cmd.exe would
-        // read escaped quotes as part of the program name and fail to find it.
-        expect(command.command).toBe("C:\\Users\\tester\\AppData\\Roaming\\npm\\az.cmd");
-        expect(command.args).toEqual([
-          '^"repos^"',
-          '^"pr^"',
-          '^"list^"',
-          '^"--source-branch^"',
-          '^"feature^ ^&^ release^"',
-        ]);
+        expect(command.command).toBe(
+          [
+            '^"C:\\Users\\tester\\AppData\\Roaming\\npm\\az.cmd^"',
+            '^"repos^"',
+            '^"pr^"',
+            '^"list^"',
+            '^"--source-branch^"',
+            '^"feature^ ^&^ release^"',
+          ].join(" "),
+        );
+        expect(command.args).toEqual([]);
         expect(command.options.shell).toBe(true);
         return makeHandle({ stdout: "[]" });
       }),
@@ -190,8 +191,8 @@ describe("runProcess", () => {
       args: ["repos", "pr", "list", "--source-branch", "feature & release"],
       env: { AZURE_CONFIG_DIR: "C:\\Users\\tester\\.azure" },
     }).pipe(
-      Effect.provideService(HostProcessPlatform, "win32"),
-      Effect.provideService(HostProcessEnvironment, {
+      Effect.provideService(HostProcess.Platform, "win32"),
+      Effect.provideService(HostProcess.Environment, {
         PATH: "C:\\Users\\tester\\AppData\\Roaming\\npm",
         PATHEXT: ".COM;.EXE;.BAT;.CMD",
       }),
@@ -452,7 +453,7 @@ describe("isWindowsCommandNotFound", () => {
       const isCommandNotFound = yield* ProcessRunner.isWindowsCommandNotFound(
         1,
         "wird nicht als interner oder externer Befehl, betriebsfahiges Programm oder Batch-Datei erkannt",
-      ).pipe(Effect.provideService(HostProcessPlatform, "win32"));
+      ).pipe(Effect.provideService(HostProcess.Platform, "win32"));
       expect(isCommandNotFound).toBe(true);
     }),
   );

@@ -65,3 +65,37 @@ apps/server/src/httpResponseErrorGuard.test.ts:generic-api-key:61
 .repos/alchemy-effect/website/src/content/docs/cli/profile.mdx:generic-api-key:190
 .repos/effect-smol/packages/platform/deno/test/fixtures/tls/key.pem:private-key:1
 .repos/effect-smol/packages/platform/node/test/fixtures/tls/key.pem:private-key:1
+
+# Exact staged false-positive fingerprints from pingdotgg/t3code tag v0.1.0 (81493efb71), each
+# checked byte-identical to the tag on 2026-10-16: the vendored Alchemy/Effect reference corpora
+# under `.repos/` and upstream's own test fixtures (sample hex keys, a generated TLS test key,
+# a keybinding string). Never add a Command Center finding here.
+.repos/alchemy-effect/packages/alchemy/src/GCP/AccessContextManager/GcpUserAccessBinding.ts:generic-api-key:115
+.repos/alchemy-effect/packages/alchemy/src/GCP/AccessContextManager/GcpUserAccessBinding.ts:generic-api-key:127
+.repos/alchemy-effect/packages/alchemy/src/GCP/FirebaseAppCheck/AppsDebugToken.ts:generic-api-key:106
+.repos/alchemy-effect/packages/alchemy/test/AWS/EC2/fixtures/client-vpn-certificate.ts:private-key:27
+.repos/alchemy-effect/packages/alchemy/test/GCP/AccessContextManager/GcpUserAccessBinding.test.ts:generic-api-key:11
+.repos/alchemy-effect/packages/alchemy/test/GCP/AppEngine/fixtures/cert.ts:private-key:29
+.repos/alchemy-effect/packages/alchemy/test/GCP/AppEngine/fixtures/cert.ts:private-key:77
+.repos/alchemy-effect/packages/alchemy/test/GCP/CertificateManager/Certificate.test.ts:private-key:38
+.repos/alchemy-effect/packages/alchemy/test/GCP/CertificateManager/Certificate.test.ts:private-key:88
+.repos/alchemy-effect/packages/alchemy/test/GCP/CertificateManager/CertificateMapEntry.test.ts:private-key:38
+.repos/alchemy-effect/packages/alchemy/test/GCP/Compute/fixtures/https-proxy-cert.ts:private-key:130
+.repos/alchemy-effect/packages/alchemy/test/GCP/Compute/fixtures/https-proxy-cert.ts:private-key:59
+.repos/alchemy-effect/packages/alchemy/test/GCP/DataMigration/ConnectionProfile.test.ts:generic-api-key:51
+.repos/alchemy-effect/packages/alchemy/test/GCP/DataMigration/MigrationJob.test.ts:generic-api-key:57
+.repos/alchemy-effect/packages/alchemy/test/GCP/DataMigration/MigrationJob.test.ts:generic-api-key:69
+.repos/alchemy-effect/packages/alchemy/test/GCP/Datastream/Stream.test.ts:generic-api-key:54
+.repos/alchemy-effect/packages/alchemy/test/GCP/SQL/User.test.ts:generic-api-key:121
+.repos/alchemy-effect/packages/alchemy/test/GCP/SQL/User.test.ts:generic-api-key:149
+.repos/alchemy-effect/packages/alchemy/test/GCP/SasPortal/common.ts:jwt:26
+.repos/alchemy-effect/website/src/content/docs/fly/tutorial/part-4.mdx:curl-auth-header:102
+.repos/effect-smol/packages/platform/bun/test/BunHttpServer.test.ts:generic-api-key:40
+.repos/effect-smol/packages/platform/node/test/NodeHttpServer.test.ts:generic-api-key:1078
+apps/server/src/htmlRender/HtmlRender.test.ts:generic-api-key:132
+apps/server/src/outboundHttp.test.ts:private-key:17
+apps/web/src/components/settings/KeybindingsSettings.logic.test.ts:generic-api-key:49
+infra/relay/src/hooks/HeldHooks.test.ts:generic-api-key:19
+infra/relay/src/hooks/HeldHooks.test.ts:generic-api-key:20
+infra/relay/src/hooks/HookForwarder.test.ts:generic-api-key:62
+infra/relay/src/http/Api.test.ts:generic-api-key:925

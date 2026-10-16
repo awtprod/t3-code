@@ -27,7 +27,8 @@ import {
 import {
   ConnectionCatalogDocument,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
-  pruneSupersededBearerConnections,
+  catalogRoutes,
+  setRoutesInCatalog,
   putRemoteDpopTokenInCatalog,
   registerConnectionInCatalog,
   removeConnectionFromCatalog,
@@ -124,7 +125,7 @@ describe("ConnectionCatalogDocument", () => {
       expect(yield* afterRemoval.get(entry)).toBe("off");
 
       yield* permissions.set(entry, "read");
-      document = removeConnectionFromCatalog(document, BEARER_TARGET);
+      document = removeConnectionFromCatalog(document, ENVIRONMENT_ID);
       const afterCatalogRemoval = yield* makeGitHubRoutingPermissions(storage);
       expect(yield* afterCatalogRemoval.get(entry)).toBe("off");
     }),
@@ -274,7 +275,7 @@ describe("ConnectionCatalogDocument", () => {
       }),
     );
 
-    expect(removeConnectionFromCatalog(registered, BEARER_TARGET)).toEqual(
+    expect(removeConnectionFromCatalog(registered, ENVIRONMENT_ID)).toEqual(
       EMPTY_CONNECTION_CATALOG_DOCUMENT,
     );
   });
@@ -296,7 +297,7 @@ describe("ConnectionCatalogDocument", () => {
       EMPTY_CONNECTION_CATALOG_DOCUMENT,
       new RelayConnectionRegistration({ target: RELAY_TARGET }),
     );
-    const removed = removeConnectionFromCatalog(registered, RELAY_TARGET);
+    const removed = removeConnectionFromCatalog(registered, ENVIRONMENT_ID);
 
     expect(putRemoteDpopTokenInCatalog(removed, REMOTE_TOKEN)).toEqual(
       EMPTY_CONNECTION_CATALOG_DOCUMENT,
@@ -310,7 +311,7 @@ describe("ConnectionCatalogDocument", () => {
     );
     const refreshed = putRemoteDpopTokenInCatalog(registered, REMOTE_TOKEN);
 
-    expect(removeConnectionFromCatalog(refreshed, RELAY_TARGET)).toEqual(
+    expect(removeConnectionFromCatalog(refreshed, ENVIRONMENT_ID)).toEqual(
       EMPTY_CONNECTION_CATALOG_DOCUMENT,
     );
   });
@@ -383,7 +384,9 @@ describe("ConnectionCatalogDocument", () => {
         }),
       ).disabledEnvironmentIds,
     ).toEqual([ENVIRONMENT_ID]);
-    expect(removeConnectionFromCatalog(disabled, BEARER_TARGET).disabledEnvironmentIds).toEqual([]);
+    expect(removeConnectionFromCatalog(disabled, ENVIRONMENT_ID).disabledEnvironmentIds).toEqual(
+      [],
+    );
   });
 
   it("persists the normalized SSH profile beside its target", () => {
@@ -412,197 +415,48 @@ describe("ConnectionCatalogDocument", () => {
     expect(document.profiles).toEqual([profile]);
     expect(document.credentials).toEqual([]);
   });
-  describe("superseded bearer connections", () => {
-    const SERVER = "https://remote.example.test";
-    const orphanProfile = (
-      connectionId: string,
-      httpBaseUrl = SERVER,
-      environmentId = ENVIRONMENT_ID,
-    ) =>
-      new BearerConnectionProfile({
-        connectionId,
-        environmentId,
-        label: "Remote (old pairing)",
-        httpBaseUrl,
-        wsBaseUrl: httpBaseUrl.replace(/^http/, "ws"),
-      });
-    const storedCredential = (connectionId: string, token: string) => ({
-      connectionId,
-      credential: new BearerConnectionCredential({ token }),
+
+  it("keeps every route of an environment and drops only a removed route's records", () => {
+    const withBearer = registerConnectionInCatalog(
+      { ...EMPTY_CONNECTION_CATALOG_DOCUMENT, remoteDpopTokens: [REMOTE_TOKEN] },
+      new BearerConnectionRegistration({
+        target: BEARER_TARGET,
+        profile: BEARER_PROFILE,
+        credential: BEARER_CREDENTIAL,
+      }),
+    );
+    const withRelay = registerConnectionInCatalog(
+      withBearer,
+      new RelayConnectionRegistration({ target: RELAY_TARGET }),
+      [BEARER_TARGET, RELAY_TARGET],
+    );
+    expect(catalogRoutes(withRelay, ENVIRONMENT_ID)).toEqual([BEARER_TARGET, RELAY_TARGET]);
+    expect(withRelay.credentials).toHaveLength(1);
+
+    // Dropping the bearer route forgets its credential; T3 Connect keeps its token.
+    const relayOnly = setRoutesInCatalog(withRelay, ENVIRONMENT_ID, [RELAY_TARGET]);
+    expect(relayOnly.targets).toEqual([RELAY_TARGET]);
+    expect(relayOnly.profiles).toEqual([]);
+    expect(relayOnly.credentials).toEqual([]);
+    expect(relayOnly.remoteDpopTokens).toEqual([REMOTE_TOKEN]);
+
+    // Dropping T3 Connect forgets its token; the bearer route keeps its records.
+    const bearerOnly = setRoutesInCatalog(withRelay, ENVIRONMENT_ID, [BEARER_TARGET]);
+    expect(bearerOnly.credentials).toHaveLength(1);
+    expect(bearerOnly.remoteDpopTokens).toEqual([]);
+  });
+
+  it("keeps an environment's position in the catalog when its routes change", () => {
+    const other = new RelayConnectionTarget({
+      environmentId: EnvironmentId.make("environment-2"),
+      label: "Other",
     });
-    const pairing = (connectionId: string, httpBaseUrl = `${SERVER}/`) => {
-      const target = new BearerConnectionTarget({
-        environmentId: ENVIRONMENT_ID,
-        label: "Remote",
-        connectionId,
-      });
-      return new BearerConnectionRegistration({
-        target,
-        profile: new BearerConnectionProfile({
-          connectionId,
-          environmentId: ENVIRONMENT_ID,
-          label: target.label,
-          httpBaseUrl,
-          wsBaseUrl: httpBaseUrl.replace(/^http/, "ws"),
-        }),
-        credential: new BearerConnectionCredential({ token: "fresh-token" }),
-      });
-    };
-    // An orphan an older build left behind: no target references it, it is
-    // listed first, and it holds an expired token for the same server.
-    const withOrphan = (orphan = orphanProfile("legacy-orphan")) => ({
+    const document = {
       ...EMPTY_CONNECTION_CATALOG_DOCUMENT,
-      profiles: [orphan],
-      credentials: [storedCredential(orphan.connectionId, "expired-token")],
-    });
-
-    it("drops an unreferenced bearer for the same environment and URL when re-pairing", () => {
-      const registration = pairing("bearer:environment-1");
-      const document = registerConnectionInCatalog(withOrphan(), registration);
-
-      expect(document.targets).toEqual([registration.target]);
-      expect(document.profiles).toEqual([registration.profile]);
-      expect(document.credentials).toEqual([
-        { connectionId: "bearer:environment-1", credential: registration.credential },
-      ]);
-    });
-
-    it("matches URLs the way the desktop main process does", () => {
-      for (const orphanUrl of [
-        SERVER,
-        `${SERVER}/`,
-        `${SERVER}//`,
-        " https://REMOTE.example.test/ ",
-      ]) {
-        const document = registerConnectionInCatalog(
-          withOrphan(orphanProfile("legacy-orphan", orphanUrl)),
-          pairing("bearer:environment-1"),
-        );
-        expect(document.profiles.map((profile) => profile.connectionId)).toEqual([
-          "bearer:environment-1",
-        ]);
-      }
-    });
-
-    it("keeps a bearer for the same environment at a different URL", () => {
-      const otherRoute = orphanProfile("other-route", "https://lan.remote.example.test/");
-      const document = registerConnectionInCatalog(
-        withOrphan(otherRoute),
-        pairing("bearer:environment-1"),
-      );
-
-      expect(document.profiles.map((profile) => profile.connectionId)).toEqual([
-        "other-route",
-        "bearer:environment-1",
-      ]);
-      expect(document.credentials.map((entry) => entry.connectionId)).toEqual([
-        "other-route",
-        "bearer:environment-1",
-      ]);
-    });
-
-    it("leaves other environments, SSH profiles, and credential-only entries alone", () => {
-      const otherEnvironment = orphanProfile(
-        "bearer:environment-2",
-        SERVER,
-        EnvironmentId.make("environment-2"),
-      );
-      const ssh = new SshConnectionProfile({
-        connectionId: "ssh:environment-1",
-        environmentId: ENVIRONMENT_ID,
-        label: "SSH",
-        target: { alias: "devbox", hostname: "devbox.example.test", username: "dev", port: 22 },
-      });
-      // Desktop-local secondaries keep only a credential under a `local:` id.
-      const localCredential = storedCredential("local:wsl:default", "local-token");
-      const document = registerConnectionInCatalog(
-        {
-          ...EMPTY_CONNECTION_CATALOG_DOCUMENT,
-          profiles: [otherEnvironment, ssh],
-          credentials: [localCredential],
-        },
-        pairing("bearer:environment-1"),
-      );
-
-      expect(document.profiles.map((profile) => profile.connectionId)).toEqual([
-        "bearer:environment-2",
-        "ssh:environment-1",
-        "bearer:environment-1",
-      ]);
-      expect(document.credentials.map((entry) => entry.connectionId)).toEqual([
-        "local:wsl:default",
-        "bearer:environment-1",
-      ]);
-    });
-
-    it("never drops a connection that another saved target references", () => {
-      const shared = orphanProfile("shared");
-      const sharedTarget = new BearerConnectionTarget({
-        environmentId: EnvironmentId.make("environment-2"),
-        label: "Other",
-        connectionId: "shared",
-      });
-      const document = registerConnectionInCatalog(
-        { ...withOrphan(shared), targets: [sharedTarget] },
-        pairing("bearer:environment-1"),
-      );
-
-      expect(document.profiles.map((profile) => profile.connectionId)).toEqual([
-        "shared",
-        "bearer:environment-1",
-      ]);
-    });
-
-    it("prunes orphans of saved bearer targets and keeps everything else", () => {
-      const registered = registerConnectionInCatalog(
-        EMPTY_CONNECTION_CATALOG_DOCUMENT,
-        pairing("bearer:environment-1"),
-      );
-      const orphan = orphanProfile("legacy-orphan", `${SERVER}/`);
-      const otherRoute = orphanProfile("other-route", "https://lan.remote.example.test/");
-      const untargeted = orphanProfile(
-        "untargeted",
-        "https://other.example.test/",
-        EnvironmentId.make("environment-3"),
-      );
-      const document = {
-        ...registered,
-        profiles: [orphan, otherRoute, untargeted, ...registered.profiles],
-        credentials: [
-          storedCredential(orphan.connectionId, "expired-token"),
-          storedCredential(otherRoute.connectionId, "route-token"),
-          storedCredential(untargeted.connectionId, "untargeted-token"),
-          storedCredential("local:wsl:default", "local-token"),
-          ...registered.credentials,
-        ],
-      };
-
-      const pruned = pruneSupersededBearerConnections(document);
-
-      expect(pruned.dropped).toEqual(["legacy-orphan"]);
-      expect(pruned.document.targets).toEqual(registered.targets);
-      expect(pruned.document.profiles.map((profile) => profile.connectionId)).toEqual([
-        "other-route",
-        "untargeted",
-        "bearer:environment-1",
-      ]);
-      expect(pruned.document.credentials.map((entry) => entry.connectionId)).toEqual([
-        "other-route",
-        "untargeted",
-        "local:wsl:default",
-        "bearer:environment-1",
-      ]);
-    });
-
-    it("returns the same document when there is nothing to prune", () => {
-      const registered = registerConnectionInCatalog(
-        EMPTY_CONNECTION_CATALOG_DOCUMENT,
-        pairing("bearer:environment-1"),
-      );
-      const pruned = pruneSupersededBearerConnections(registered);
-
-      expect(pruned.dropped).toEqual([]);
-      expect(pruned.document).toBe(registered);
-    });
+      targets: [RELAY_TARGET, other],
+    };
+    expect(
+      setRoutesInCatalog(document, ENVIRONMENT_ID, [BEARER_TARGET, RELAY_TARGET]).targets,
+    ).toEqual([BEARER_TARGET, RELAY_TARGET, other]);
   });
 });
