@@ -390,3 +390,38 @@ it.effect("asks for usage without the local transcript scan", () =>
     assert.deepEqual(usageOptions, { skipBehaviors: true });
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it.effect("reads a malformed account payload as no evidence", () =>
+  Effect.gen(function* () {
+    const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+      () =>
+        ({
+          initializationResult: async () => ({
+            account: {
+              email: ["x"],
+              subscriptionType: 7,
+              tokenSource: { kind: "none" },
+              apiKeySource: null,
+              apiProvider: { name: "bedrock" },
+            },
+            commands: [],
+          }),
+          usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({
+            rate_limits_available: false,
+            rate_limits: null,
+          }),
+        }) as unknown as ReturnType<typeof ClaudeSdk.query>,
+    );
+    yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+    const capabilities = yield* probeClaudeCapabilities(
+      decodeClaudeSettings({ binaryPath: "claude" }),
+    );
+    assert.isDefined(capabilities);
+    assert.strictEqual(capabilities?.email, undefined);
+    assert.strictEqual(capabilities?.subscriptionType, undefined);
+    assert.strictEqual(capabilities?.tokenSource, undefined);
+    assert.strictEqual(capabilities?.apiKeySource, undefined);
+    // A non-string apiProvider must not read as a third-party backend.
+    assert.strictEqual(capabilities?.apiProvider, undefined);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

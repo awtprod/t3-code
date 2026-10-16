@@ -199,6 +199,31 @@ function claudeAuthStatus(
     : "unauthenticated";
 }
 
+/**
+ * The auth-relevant account fields from the SDK's init payload. These decide
+ * the auth status, so only strings count: a missing or malformed payload reads
+ * as no evidence, never as a value.
+ */
+function claudeAccountEvidence(
+  account: unknown,
+): Pick<
+  ClaudeCapabilitiesProbe,
+  "email" | "subscriptionType" | "tokenSource" | "apiKeySource" | "apiProvider"
+> {
+  const accountField = (key: string): string | undefined => {
+    if (account === null || typeof account !== "object") return undefined;
+    const value: unknown = (account as Record<string, unknown>)[key];
+    return typeof value === "string" ? value : undefined;
+  };
+  return {
+    email: accountField("email"),
+    subscriptionType: accountField("subscriptionType"),
+    tokenSource: accountField("tokenSource"),
+    apiKeySource: accountField("apiKeySource"),
+    apiProvider: accountField("apiProvider"),
+  };
+}
+
 // ── SDK capability probe ────────────────────────────────────────────
 
 // Amazon Bedrock initializes far slower than first-party auth: the SDK boots the
@@ -426,21 +451,8 @@ const probeClaudeCapabilities = (
                 rate_limits: usageResult.success.rate_limits,
               }
             : undefined;
-        const account = init.account as
-          | {
-              readonly email?: string;
-              readonly subscriptionType?: string;
-              readonly tokenSource?: string;
-              readonly apiKeySource?: string;
-              readonly apiProvider?: string;
-            }
-          | undefined;
         return {
-          email: account?.email,
-          subscriptionType: account?.subscriptionType,
-          tokenSource: account?.tokenSource,
-          apiKeySource: account?.apiKeySource,
-          apiProvider: account?.apiProvider,
+          ...claudeAccountEvidence(init.account),
           slashCommands: parseClaudeInitializationCommands(init.commands),
           ...(usage ? { usage } : {}),
         } satisfies ClaudeCapabilitiesProbe;
