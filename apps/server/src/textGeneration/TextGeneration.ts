@@ -1,7 +1,15 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import type { ProviderInstanceId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as Random from "effect/Random";
+import type {
+  InternalGenerationUsage,
+  ModelSelection,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import { TextGenerationError } from "@t3tools/contracts";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -12,6 +20,8 @@ import * as SourceControlProviderRegistry from "../sourceControl/SourceControlPr
 import * as ThreadTitleLinks from "./ThreadTitleLinks.ts";
 
 export type {
+  AutomationScheduleGenerationInput,
+  AutomationScheduleGenerationResult,
   BranchNameGenerationInput,
   BranchNameGenerationResult,
   CommitMessageGenerationInput,
@@ -23,29 +33,6 @@ export type {
   ThreadTitleGenerationInput,
   ThreadTitleGenerationResult,
 } from "@t3tools/provider-core/server/textGeneration";
-
-export interface AutomationScheduleGenerationInput {
-  cwd: string;
-  text: string;
-  timezone: string;
-  modelSelection: ModelSelection;
-}
-
-export type AutomationScheduleGenerationResult =
-  | { readonly status: "interpreted"; readonly expression: string }
-  | { readonly status: "needs_clarification"; readonly message: string };
-
-export interface TextGenerationService {
-  generateCommitMessage(
-    input: CommitMessageGenerationInput,
-  ): Promise<CommitMessageGenerationResult>;
-  generatePrContent(input: PrContentGenerationInput): Promise<PrContentGenerationResult>;
-  generateBranchName(input: BranchNameGenerationInput): Promise<BranchNameGenerationResult>;
-  generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
-  generateAutomationSchedule(
-    input: AutomationScheduleGenerationInput,
-  ): Promise<AutomationScheduleGenerationResult>;
-}
 
 /**
  * TextGeneration - Service tag for commit and change request text generation.
@@ -59,7 +46,65 @@ type TextGenerationOp =
   | "generatePrContent"
   | "generateBranchName"
   | "generateThreadTitle"
-  | "generateReviewGuide";
+  | "generateReviewGuide"
+  | "generateAutomationSchedule";
+
+// Command Center records each internal generation (commit, PR, branch, title,
+// schedule) so internal model usage shows up in usage analytics.
+const telemetryOperation = {
+  generateCommitMessage: "commit",
+  generatePrContent: "pull-request",
+  generateBranchName: "branch",
+  generateThreadTitle: "title",
+  generateAutomationSchedule: "schedule",
+} as const;
+
+function instrumentInternalGeneration<A>(
+  operation: keyof typeof telemetryOperation,
+  input: { readonly modelSelection: ModelSelection },
+  effect: Effect.Effect<A, TextGenerationError>,
+  record: (usage: InternalGenerationUsage) => Effect.Effect<void>,
+): Effect.Effect<A, TextGenerationError> {
+  return Effect.gen(function* () {
+    const operationId = `internal-${Math.floor((yield* Random.next) * Number.MAX_SAFE_INTEGER).toString(36)}`;
+    const startedAt = yield* DateTime.now;
+    return yield* effect.pipe(
+      Effect.onExit((exit) =>
+        DateTime.now.pipe(
+          Effect.flatMap((completedAt) =>
+            Effect.succeed({
+              operationId,
+              operation: telemetryOperation[operation],
+              providerInstanceId: input.modelSelection.instanceId,
+              model: input.modelSelection.model,
+              ...(input.modelSelection.options === undefined
+                ? {}
+                : { options: input.modelSelection.options }),
+              durationMs: Math.max(0, completedAt.epochMilliseconds - startedAt.epochMilliseconds),
+              // Ephemeral CLIs do not consistently report these values. Keep them
+              // explicitly unavailable instead of fabricating zero-token usage.
+              inputTokens: null,
+              outputTokens: null,
+              costMicroUsd: null,
+              status: Exit.isSuccess(exit) ? "success" : "error",
+              completedAt: DateTime.formatIso(completedAt),
+            } satisfies InternalGenerationUsage),
+          ),
+          Effect.tap((usage) => Effect.logInfo("internal text generation completed", usage)),
+          Effect.flatMap(record),
+        ),
+      ),
+      Effect.withSpan("internal.text-generation", {
+        attributes: {
+          "text_generation.operation_id": operationId,
+          "text_generation.operation": telemetryOperation[operation],
+          "gen_ai.provider.instance_id": input.modelSelection.instanceId,
+          "gen_ai.request.model": input.modelSelection.model,
+        },
+      }),
+    );
+  });
+}
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],

@@ -115,6 +115,20 @@ export type ReviewGuideGenerationResult = Omit<
   "headSha" | "generatedAt" | "modelSelection"
 >;
 
+/** A natural-language recurring schedule to translate into the supported cron grammar. */
+export interface AutomationScheduleGenerationInput {
+  cwd: string;
+  text: string;
+  /** IANA timezone the schedule is interpreted in. */
+  timezone: string;
+  /** What model and provider to use for generation. */
+  modelSelection: ModelSelection;
+}
+
+export type AutomationScheduleGenerationResult =
+  | { readonly status: "interpreted"; readonly expression: string }
+  | { readonly status: "needs_clarification"; readonly message: string };
+
 /** Commit, change request, branch, and title generation backed by one provider instance. */
 export interface ProviderTextGeneration {
   /**
@@ -147,4 +161,12 @@ export interface ProviderTextGeneration {
   readonly generateReviewGuide: (
     input: ReviewGuideGenerationInput,
   ) => Effect.Effect<ReviewGuideGenerationResult, TextGenerationError>;
+
+  /**
+   * Translate a natural-language recurring schedule into the supported cron grammar
+   * (Command Center automations).
+   */
+  readonly generateAutomationSchedule: (
+    input: AutomationScheduleGenerationInput,
+  ) => Effect.Effect<AutomationScheduleGenerationResult, TextGenerationError>;
 }

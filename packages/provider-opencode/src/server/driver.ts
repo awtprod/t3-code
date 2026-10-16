@@ -175,6 +175,11 @@ function selectOpenCodeRuntimeTextGeneration(
         v1: v1.generateReviewGuide(input),
         v2: v2.generateReviewGuide(input),
       }),
+    generateAutomationSchedule: (input) =>
+      byOpenCodeRuntime(probe.get, {
+        v1: v1.generateAutomationSchedule(input),
+        v2: v2.generateAutomationSchedule(input),
+      }),
   };
 }
 

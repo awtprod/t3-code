@@ -22,6 +22,7 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildAutomationSchedulePrompt,
   buildThreadTitlePrompt,
 } from "@t3tools/provider-core/server/textGenerationPrompts";
 import {
@@ -345,11 +346,20 @@ export const makeMuseTextGeneration = Effect.fn("makeMuseTextGeneration")(functi
   // Muse runs in an empty read-only directory and cannot be pointed at a checkout to read.
   const generateReviewGuide: ProviderTextGeneration["generateReviewGuide"] = () =>
     Effect.fail(investigationUnsupported("generateReviewGuide", "Muse Code"));
+  const generateAutomationSchedule: ProviderTextGeneration["generateAutomationSchedule"] =
+    Effect.fn("MuseTextGeneration.generateAutomationSchedule")(function* (input) {
+      return yield* runMuseJson({
+        operation: "generateAutomationSchedule",
+        ...buildAutomationSchedulePrompt({ text: input.text, timezone: input.timezone }),
+        modelSelection: input.modelSelection,
+      });
+    });
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
     generateReviewGuide,
+    generateAutomationSchedule,
   } satisfies ProviderTextGeneration;
 });

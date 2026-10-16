@@ -15,6 +15,7 @@ import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
 import type { ProviderTextGeneration } from "./textGeneration.ts";
 import {
+  buildAutomationSchedulePrompt,
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
@@ -189,11 +190,22 @@ export function fromRunner(name: string, run: Runner): ProviderTextGeneration {
     });
   });
 
+  const generateAutomationSchedule: ProviderTextGeneration["generateAutomationSchedule"] =
+    Effect.fn(`${name}.generateAutomationSchedule`)(function* (input) {
+      return yield* run({
+        operation: "generateAutomationSchedule",
+        cwd: input.cwd,
+        modelSelection: input.modelSelection,
+        ...buildAutomationSchedulePrompt({ text: input.text, timezone: input.timezone }),
+      });
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
     generateReviewGuide,
+    generateAutomationSchedule,
   } satisfies ProviderTextGeneration;
 }

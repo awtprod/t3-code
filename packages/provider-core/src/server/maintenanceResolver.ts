@@ -465,7 +465,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
     // over a placeholder stub) is left broken while the update reports success.
     // A per-package `--allow-scripts=<name>` allowlist cannot fix this: it covers
     // only the named package, never the transitive dependencies that also build
-    // native bindings (kimi-code's node-pty), and npm accepts no wildcard. Allow
+    // native bindings (a CLI's node-pty), and npm accepts no wildcard. Allow
     // every script for this one install instead - the user explicitly asked to
     // install this CLI, which then runs as them anyway. Older npm ignores the
     // unknown flag and continues.
@@ -642,7 +642,7 @@ export const resolveProviderMaintenanceCapabilitiesEffect = Effect.fn(
     readonly platform?: NodeJS.Platform | undefined;
   },
 ) {
-  const platform = options?.platform ?? (yield* HostProcessPlatform);
+  const platform = options?.platform ?? (yield* HostProcess.Platform);
   const binaryPath = nonEmptyString(options?.binaryPath);
   if (!binaryPath) {
     return yield* resolver.resolve(null);
@@ -669,7 +669,7 @@ export const resolveProviderMaintenanceCapabilitiesEffect = Effect.fn(
     resolvedCommandPath,
     realCommandPath,
     env,
-    platform: yield* HostProcess.Platform,
+    platform,
   });
 });
 

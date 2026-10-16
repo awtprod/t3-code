@@ -281,7 +281,7 @@ describe("parseSkillsCliOutput", () => {
 
   it("keeps valid skills when another record is malformed", () => {
     NodeAssert.deepEqual(
-      parseSkillsCliOutput(
+      OpenCodeRuntime.parseSkillsCliOutput(
         JSON.stringify([
           { name: "review-pr", description: "Review a pull request." },
           { name: 42, description: "invalid" },

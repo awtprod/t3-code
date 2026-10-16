@@ -107,7 +107,7 @@ it.effect("releases a borrower when its callback throws synchronously", () =>
         yield* Deferred.await(testRuntime.closed);
         expect(yield* Ref.get(testRuntime.closes)).toBe(1);
       }),
-    ).pipe(Effect.provideService(OpenCodeRuntime, testRuntime.runtime));
+    ).pipe(Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, testRuntime.runtime));
   }).pipe(Effect.provide(TestClock.layer())),
 );
 
