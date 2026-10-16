@@ -33,6 +33,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { Artifact, RouteDecision } from "@command-center/core";
 
 import { commandCenterAuditHashDocument, type CommandCenterAuditHashVersion } from "./AuditLog.ts";
+import { ASSISTANT_TEXT_READ_CHARS } from "./V2Transcript.ts";
 
 const DEFAULT_REPLAY_LIMIT = 200;
 const MAX_REPLAY_LIMIT = 500;
@@ -557,8 +558,8 @@ const make = Effect.gen(function* () {
     limit: number,
   ): Effect.Effect<ReadonlyArray<TimelineRow>, CommandCenterEventStreamError> => {
     const query =
-      // V2PORT: the assistant excerpt below reads the frozen V1 messages table; after the
-      // cutover Runs on V2 threads get no excerpt until S2 reads V2 messages.
+      // The excerpt is the Run thread's newest finished assistant message from the
+      // V2 message projection (see V2Transcript.latestAssistantText).
       input.afterSequence === undefined
         ? sql<TimelineRow>`
             SELECT e.sequence, r.id AS "runId", r.command_id AS "commandId",
@@ -566,20 +567,20 @@ const make = Effect.gen(function* () {
               r.thread_id AS "threadId", r.state AS status, r.route_json AS "routeJson",
               r.input_json AS "inputJson", r.error,
               (
-                SELECT message.text
-                FROM projection_thread_messages message
+                SELECT substr(json_extract(message.payload_json, '$.text'), 1, ${ASSISTANT_TEXT_READ_CHARS})
+                FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = r.thread_id
                   AND message.role = 'assistant'
-                  AND message.is_streaming = 0
+                  AND message.streaming = 0
                 ORDER BY message.created_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS "responseText",
               (
                 SELECT message.created_at
-                FROM projection_thread_messages message
+                FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = r.thread_id
                   AND message.role = 'assistant'
-                  AND message.is_streaming = 0
+                  AND message.streaming = 0
                 ORDER BY message.created_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS "responseCreatedAt",
@@ -600,20 +601,20 @@ const make = Effect.gen(function* () {
               r.thread_id AS "threadId", r.state AS status, r.route_json AS "routeJson",
               r.input_json AS "inputJson", r.error,
               (
-                SELECT message.text
-                FROM projection_thread_messages message
+                SELECT substr(json_extract(message.payload_json, '$.text'), 1, ${ASSISTANT_TEXT_READ_CHARS})
+                FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = r.thread_id
                   AND message.role = 'assistant'
-                  AND message.is_streaming = 0
+                  AND message.streaming = 0
                 ORDER BY message.created_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS "responseText",
               (
                 SELECT message.created_at
-                FROM projection_thread_messages message
+                FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = r.thread_id
                   AND message.role = 'assistant'
-                  AND message.is_streaming = 0
+                  AND message.streaming = 0
                 ORDER BY message.created_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS "responseCreatedAt",

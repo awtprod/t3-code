@@ -55,7 +55,7 @@ import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts
 import * as ConnectionHealth from "./ConnectionHealth.ts";
 import * as GoogleReadConnector from "./GoogleReadConnector.ts";
 import * as MemorySearchIndex from "./MemorySearchIndex.ts";
-import type { LegacyOrchestrationCommand as ClientOrchestrationCommand } from "./OrchestrationBridge.ts";
+import type { CommandCenterOrchestrationCommand as ClientOrchestrationCommand } from "./OrchestrationBridge.ts";
 import * as ReadinessGate from "./ReadinessGate.ts";
 import {
   type DispatcherDependencies,
@@ -464,6 +464,7 @@ const makeDispatcherHarness = (
         Effect.as(true),
       ),
     unregisterScope: (threadId) => registry.unregisterThreadScope(threadId),
+    admitThread: () => Effect.void,
   };
 
   return {

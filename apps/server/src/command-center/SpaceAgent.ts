@@ -208,8 +208,6 @@ const make = Effect.gen(function* () {
       projection,
       modelSelection,
       now,
-      // V2PORT: Space agent thread start emits V1 commands; the bridge fails them
-      // with V2PortPending until S2 maps the Space agent onto OrchestratorV2.
       dispatchCommand: projection.dispatchCommand,
     }).pipe(
       Effect.mapError((cause) =>
@@ -250,8 +248,7 @@ const make = Effect.gen(function* () {
       attachments: [],
     };
     const commandId = CommandId.make(`space-agent:${space.id}:turn:${nonce}`);
-    // V2PORT: both turn starts below are V1 commands; the bridge fails them with
-    // V2PortPending until S2 maps the Space agent onto OrchestratorV2.
+    // A follow-up turn on the agent's thread, or its first turn creating it.
     if (existing !== undefined) {
       const dispatched = yield* projection
         .dispatchCommand({

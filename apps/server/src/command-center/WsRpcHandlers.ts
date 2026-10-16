@@ -394,9 +394,6 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
       const dispatchCommandCenterRun = (runId: CommandCenterRunId) =>
         RunDispatcher.dispatchActiveRun({
           runId,
-          // V2PORT: Command Center run dispatch still emits V1 orchestration
-          // commands; the bridge fails them with V2PortPending until S2 maps
-          // runs onto OrchestratorV2.
           dispatchCommand: orchestrationBridge.dispatchCommand,
         }).pipe(
           Effect.mapError(

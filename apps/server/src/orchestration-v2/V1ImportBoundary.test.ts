@@ -19,10 +19,8 @@ const legacyReaders = ["orchestration-v2/legacy/", "persistence/Migrations/"] as
 const legacyReaderFiles: Record<string, string> = {
   // Provider history for settings migration reads V1 thread sessions once at load.
   "serverSettings.ts": "one-time provider history for settings migration",
-  // V2PORT: Command Center code that still reads the frozen V1 read model; after the
-  // cutover these see only pre-cutover rows. Each entry leaves with its slice.
-  "command-center/EventStream.ts": "V2PORT S2: Run transcript excerpts from V1 messages",
-  "command-center/RunDispatcher.ts": "V2PORT S2: Run outcome text from V1 messages",
+  // V2PORT: code that still reads the frozen V1 read model; after the cutover these
+  // see only pre-cutover rows. Each entry leaves with its slice.
   "persistence/Layers/ProjectionTurnUsage.ts": "V2PORT S3: usage rows joined to V1 turns",
   "persistence/Layers/ProviderRestartRecovery.ts": "V2PORT S1: v1 restart recovery, no v2 caller",
   "persistence/Layers/ProviderTurnSendClaims.ts": "V2PORT S1: v1 send claims, no v2 caller",
