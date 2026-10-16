@@ -276,6 +276,8 @@ const rootIsVisible = (sql: SqlClient.SqlClient) => sql`
  * A source from before the V2 thread tables has no visibility to filter on, so it is copied
  * whole. One transaction reads the source, so the copy is consistent while the real server writes.
  */
+const FTS5_SHADOW_SUFFIXES: ReadonlyArray<string> = ["data", "idx", "content", "docsize", "config"];
+
 const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath: string) {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`ATTACH DATABASE ${`${NodeURL.pathToFileURL(sourcePath).href}?mode=ro`} AS src`;
@@ -286,12 +288,27 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
     SELECT m.name, c."notnull" FROM src.sqlite_master m, pragma_table_info(m.name, 'src') c
     WHERE m.type = 'table' AND c.name = 'thread_id'`;
   const threadIdNullable = new Map(threadColumns.map((row) => [row.name, row.notnull === 0]));
+  // Command Center keeps FTS5 virtual tables (Memory search). Creating a virtual table
+  // creates its shadow tables too, so shadow tables are not created again; their rows
+  // are copied as-is (replacing the fresh index's initial rows) and the virtual table
+  // itself is not inserted into, which would index every row a second time.
+  const virtualTables = schema
+    .filter((entry) => entry.type === "table" && /^CREATE VIRTUAL TABLE/i.test(entry.sql))
+    .map((entry) => entry.name);
+  const isShadowTable = (name: string) =>
+    virtualTables.some(
+      (virtualTable) =>
+        name.startsWith(`${virtualTable}_`) &&
+        FTS5_SHADOW_SUFFIXES.includes(name.slice(virtualTable.length + 1)),
+    );
   const tables = schema.filter((entry) => entry.type === "table");
   const filtered = tables.some((table) => table.name === "orchestration_v2_projection_threads");
 
   yield* sql.withTransaction(
     Effect.gen(function* () {
-      for (const table of tables) yield* sql.unsafe(table.sql).unprepared;
+      for (const table of tables) {
+        if (!isShadowTable(table.name)) yield* sql.unsafe(table.sql).unprepared;
+      }
       if (filtered) {
         yield* sql`CREATE TEMP TABLE copied_threads (thread_id TEXT PRIMARY KEY)`;
         yield* sql`INSERT OR IGNORE INTO copied_threads
@@ -301,7 +318,12 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
           WHERE ${rootIsVisible(sql)}`;
       }
       for (const { name } of tables) {
-        if (CLEARED_TABLES.includes(name)) continue;
+        if (CLEARED_TABLES.includes(name) || virtualTables.includes(name)) continue;
+        if (isShadowTable(name)) {
+          yield* sql.unsafe(`DELETE FROM main."${name}"`).unprepared;
+          yield* sql.unsafe(`INSERT INTO main."${name}" SELECT * FROM src."${name}"`).unprepared;
+          continue;
+        }
         const nullable = threadIdNullable.get(name);
         const filter = !filtered
           ? ""
