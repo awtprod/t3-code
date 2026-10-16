@@ -13,6 +13,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import { ChildProcessSpawner } from "effect/process";
@@ -57,6 +58,139 @@ const captureProcessResult = (
     Effect.flatMap((service) => service.run(baseInput)),
     Effect.flip,
   );
+
+const recordingService = (calls: ProcessRunner.ProcessRunInput[]) =>
+  VcsProcess.make.pipe(
+    Effect.provideService(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({
+        run: (input) => {
+          calls.push(input);
+          return Effect.succeed({
+            stdout: "",
+            stderr: "",
+            code: 0 as ProcessRunner.ProcessRunOutput["code"],
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          });
+        },
+      }),
+    ),
+  );
+
+const ACME_REMOTE = "https://github.com/acme/web.git";
+const remoteWithUserInfo = (() => {
+  const url = new URL(ACME_REMOTE);
+  url.username = "acme";
+  url.password = "placeholder";
+  return url.href;
+})();
+const accessTokenHeader = (token: string) =>
+  `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")}`;
+const trustedHeader = (overrides: Partial<VcsProcess.VcsProcessInput["trustedConfig"]> = {}) => ({
+  remoteUrl: ACME_REMOTE,
+  key: `http.${ACME_REMOTE}.extraheader`,
+  value: Redacted.make(accessTokenHeader("acme-token")),
+  ...overrides,
+});
+
+describe("VcsProcess.run trusted Git config", () => {
+  it.effect("passes a validated remote authorization header to git as GIT_CONFIG_* only", () =>
+    Effect.gen(function* () {
+      const calls: ProcessRunner.ProcessRunInput[] = [];
+      const service = yield* recordingService(calls);
+      yield* service.run({
+        ...baseInput,
+        args: ["fetch", "origin"],
+        // Raw caller GIT_CONFIG_* never survives, even next to a trusted entry.
+        env: {
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "http.sslVerify",
+          GIT_CONFIG_VALUE_0: "false",
+        },
+        trustedConfig: trustedHeader(),
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.extendEnv).toBe(false);
+      expect(calls[0]?.env).toMatchObject({
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: `http.${ACME_REMOTE}.extraheader`,
+        GIT_CONFIG_VALUE_0: accessTokenHeader("acme-token"),
+        GIT_TERMINAL_PROMPT: "0",
+      });
+      // The hardening -c flags still come first and win over env config.
+      expect(calls[0]?.args.slice(0, HOST_GIT_HARDENED_CONFIG_ARGS.length)).toEqual([
+        ...HOST_GIT_HARDENED_CONFIG_ARGS,
+      ]);
+    }),
+  );
+
+  it.effect.each([
+    ["url insteadOf", { key: "url.https://evil.example/.insteadOf" }],
+    ["http proxy", { key: "http.proxy" }],
+    ["sslVerify", { key: `http.${ACME_REMOTE}.sslVerify` }],
+    ["credential helper", { key: "credential.helper" }],
+    ["mismatched remote URL", { key: "http.https://evil.example/acme/web.git.extraheader" }],
+    [
+      "non-https remote",
+      {
+        remoteUrl: "http://github.com/acme/web.git",
+        key: "http.http://github.com/acme/web.git.extraheader",
+      },
+    ],
+    [
+      "credentials in the remote URL",
+      { remoteUrl: remoteWithUserInfo, key: `http.${remoteWithUserInfo}.extraheader` },
+    ],
+    [
+      "header that is not an access token",
+      { value: Redacted.make("AUTHORIZATION: bearer acme-token") },
+    ],
+    [
+      "header with a smuggled newline",
+      { value: Redacted.make(`${accessTokenHeader("acme")}\nX-Evil: 1`) },
+    ],
+    ["access token with a space", { value: Redacted.make(accessTokenHeader("acme token")) }],
+  ] as const)("refuses trusted config with a %s", ([, overrides]) =>
+    Effect.gen(function* () {
+      const calls: ProcessRunner.ProcessRunInput[] = [];
+      const service = yield* recordingService(calls);
+      const error = yield* Effect.flip(
+        service.run({
+          ...baseInput,
+          args: ["fetch", "origin"],
+          trustedConfig: trustedHeader(overrides),
+        }),
+      );
+      expect(error._tag).toBe("VcsProcessSpawnError");
+      expect((error as { readonly cause?: { readonly _tag?: string } }).cause?._tag).toBe(
+        "HostGitTrustedConfigError",
+      );
+      expect(calls).toHaveLength(0);
+    }),
+  );
+
+  it.effect("refuses trusted config on a connector CLI", () =>
+    Effect.gen(function* () {
+      const calls: ProcessRunner.ProcessRunInput[] = [];
+      const service = yield* recordingService(calls);
+      const error = yield* Effect.flip(
+        service.run({
+          operation: "GitHubCli.execute",
+          command: "gh",
+          args: ["pr", "list"],
+          cwd: "/workspace",
+          trustedConfig: trustedHeader(),
+        }),
+      );
+      expect(error._tag).toBe("VcsProcessSpawnError");
+      expect(calls).toHaveLength(0);
+    }),
+  );
+});
 
 describe("VcsProcess.run", () => {
   it.effect("applies the host Git boundary at the generic process sink", () =>

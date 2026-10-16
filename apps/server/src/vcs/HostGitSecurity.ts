@@ -1,7 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeBuffer from "node:buffer";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeProcess from "node:process";
+
+import * as Redacted from "effect/Redacted";
 
 const NULL_DEVICE = NodeProcess.platform === "win32" ? "NUL" : "/dev/null";
 const NO_EXECUTABLE_PATH =
@@ -561,4 +564,85 @@ export function unsafeHostGitConfigKey(contents: string): string | undefined {
   }
 
   return continuingValue ? "<malformed>" : undefined;
+}
+
+/**
+ * One trusted Git config entry a caller may add to a single `git` command: the
+ * HTTP authorization header for the exact https remote that command talks to.
+ * Nothing else is accepted, because an open `GIT_CONFIG_*` passthrough would
+ * let a caller set `url.*.insteadOf`, `http.proxy`, `http.sslVerify` or
+ * `credential.helper` and route around every other hardening rule here.
+ */
+export interface TrustedGitConfig {
+  /** Exact https URL of the remote in use: no credentials, query or fragment. */
+  readonly remoteUrl: string;
+  /** `http.<remoteUrl>.extraheader`, nothing else. */
+  readonly key: string;
+  /** `AUTHORIZATION: basic <base64 of x-access-token:<token>>`, built by the caller. */
+  readonly value: Redacted.Redacted<string>;
+}
+
+export type TrustedGitConfigRejection =
+  | "remote-url-not-https"
+  | "remote-url-not-exact"
+  | "key-not-remote-extraheader"
+  | "value-not-access-token-header";
+
+const ACCESS_TOKEN_HEADER = /^AUTHORIZATION: basic ([A-Za-z0-9+/]+={0,2})$/u;
+
+function exactHttpsRemoteUrl(remoteUrl: string): TrustedGitConfigRejection | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(remoteUrl);
+  } catch {
+    return "remote-url-not-https";
+  }
+  if (parsed.protocol !== "https:") return "remote-url-not-https";
+  if (
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    parsed.href !== remoteUrl
+  ) {
+    return "remote-url-not-exact";
+  }
+  return undefined;
+}
+
+function isAccessTokenHeader(value: string): boolean {
+  const match = ACCESS_TOKEN_HEADER.exec(value);
+  if (match?.[1] === undefined) return false;
+  const decoded = NodeBuffer.Buffer.from(match[1], "base64").toString("utf8");
+  // Round-trip so lenient base64 decoding cannot smuggle extra bytes.
+  if (NodeBuffer.Buffer.from(decoded, "utf8").toString("base64") !== match[1]) return false;
+  const prefix = "x-access-token:";
+  const token = decoded.startsWith(prefix) ? decoded.slice(prefix.length) : "";
+  return token.length > 0 && !/[\u0000- \u007f]/u.test(token);
+}
+
+/**
+ * Validates a trusted config entry and serialises it as the command's only
+ * `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`. Command-scope
+ * `-c` hardening still wins over these entries.
+ */
+export function trustedGitConfigEnvironment(
+  config: TrustedGitConfig,
+):
+  | { readonly environment: Readonly<Record<string, string>> }
+  | { readonly rejected: TrustedGitConfigRejection } {
+  const remoteIssue = exactHttpsRemoteUrl(config.remoteUrl);
+  if (remoteIssue !== undefined) return { rejected: remoteIssue };
+  if (config.key !== `http.${config.remoteUrl}.extraheader`) {
+    return { rejected: "key-not-remote-extraheader" };
+  }
+  const value = Redacted.value(config.value);
+  if (!isAccessTokenHeader(value)) return { rejected: "value-not-access-token-header" };
+  return {
+    environment: {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: config.key,
+      GIT_CONFIG_VALUE_0: value,
+    },
+  };
 }

@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Match from "effect/Match";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -25,6 +26,8 @@ import {
   hardenedHostGitArguments,
   hardenedHostGitEnvironment,
   resolveTrustedHostExecutable,
+  type TrustedGitConfig,
+  trustedGitConfigEnvironment,
 } from "./HostGitSecurity.ts";
 
 export interface VcsProcessInput {
@@ -38,6 +41,12 @@ export interface VcsProcessInput {
   readonly env?: NodeJS.ProcessEnv;
   /** Use `false` only with a complete allowlisted environment. */
   readonly extendEnv?: boolean;
+  /**
+   * The only way to add Git config to a hardened `git` command: an
+   * authorization header for the exact https remote in use, validated and
+   * serialised by HostGitSecurity. Raw `GIT_CONFIG_*` in `env` never survives.
+   */
+  readonly trustedConfig?: TrustedGitConfig;
   readonly allowNonZeroExit?: boolean;
   readonly timeoutMs?: number;
   readonly maxOutputBytes?: number;
@@ -54,6 +63,16 @@ export interface VcsProcessOutput {
   /** Present on real process output; optional so narrow test doubles remain lightweight. */
   readonly stdoutInvalidUtf8?: boolean;
   readonly stderrInvalidUtf8?: boolean;
+}
+
+/** A caller asked for Git config HostGitSecurity does not allow. */
+export class HostGitTrustedConfigError extends Schema.TaggedError<HostGitTrustedConfigError>()(
+  "HostGitTrustedConfigError",
+  { reason: Schema.String },
+) {
+  override get message(): string {
+    return `Refused untrusted Git config (${this.reason}).`;
+  }
 }
 
 export class VcsProcess extends Context.Service<
@@ -184,6 +203,21 @@ export const make = Effect.gen(function* () {
       });
     }
 
+    let trustedConfigEnvironment: Readonly<Record<string, string>> | undefined;
+    if (input.trustedConfig !== undefined) {
+      const trusted =
+        protectedExecutable?.name === "git" && !("connector" in protectedExecutable)
+          ? trustedGitConfigEnvironment(input.trustedConfig)
+          : ({ rejected: "trusted-config-git-only" } as const);
+      if ("rejected" in trusted) {
+        return yield* new VcsProcessSpawnError({
+          ...baseError,
+          cause: new HostGitTrustedConfigError({ reason: trusted.rejected }),
+        });
+      }
+      trustedConfigEnvironment = trusted.environment;
+    }
+
     const protectedEnvironment =
       protectedExecutable === null
         ? undefined
@@ -193,10 +227,13 @@ export const make = Effect.gen(function* () {
               [globalThis.process.env, input.env],
               { writableRoots },
             )
-          : hardenedHostGitEnvironment([input.env], {
-              allowIndexFile: input.operation.startsWith("GitVcsDriver.checkpoints."),
-              writableRoots,
-            });
+          : {
+              ...hardenedHostGitEnvironment([input.env], {
+                allowIndexFile: input.operation.startsWith("GitVcsDriver.checkpoints."),
+                writableRoots,
+              }),
+              ...trustedConfigEnvironment,
+            };
 
     const result = yield* processRunner
       .run({
