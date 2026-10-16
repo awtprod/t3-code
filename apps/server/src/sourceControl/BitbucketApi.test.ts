@@ -417,10 +417,10 @@ it.effect("prefers an explicit repository and uses context when the repository i
     assert.deepStrictEqual(
       execute.mock.calls.map(([request]) => request.url).toSorted(),
       [
-        "https://api.test.local/2.0/repositories/pingdotgg/t3code",
-        "https://api.test.local/2.0/repositories/pingdotgg/t3code",
-        "https://api.test.local/2.0/repositories/another/context",
-        "https://api.test.local/2.0/repositories/another/context/branching-model",
+        "https://api.example.test/2.0/repositories/pingdotgg/t3code",
+        "https://api.example.test/2.0/repositories/pingdotgg/t3code",
+        "https://api.example.test/2.0/repositories/another/context",
+        "https://api.example.test/2.0/repositories/another/context/branching-model",
       ].toSorted(),
     );
     assert.strictEqual(resolve.mock.calls.length, 0);
@@ -443,7 +443,7 @@ it.effect("discovers the repository from cwd remotes when the repository is omit
     assert.deepStrictEqual(listRemotes.mock.calls, [["/repo"]]);
     assert.isTrue(
       execute.mock.calls.every(([request]) =>
-        request.url.startsWith("https://api.test.local/2.0/repositories/pingdotgg/t3code"),
+        request.url.startsWith("https://api.example.test/2.0/repositories/pingdotgg/t3code"),
       ),
     );
   }).pipe(Effect.provide(layer));

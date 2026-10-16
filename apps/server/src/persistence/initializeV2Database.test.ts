@@ -87,7 +87,8 @@ it.effect(
       try {
         assert.equal(
           v1.prepare("SELECT MAX(migration_id) AS id FROM effect_sql_migrations").get()?.id,
-          52,
+          // The V1 database stays at the fork's last pre-V2 migration (94).
+          94,
         );
         assert.equal(
           v1

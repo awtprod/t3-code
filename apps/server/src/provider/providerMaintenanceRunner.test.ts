@@ -949,7 +949,7 @@ describe("providerMaintenanceRunner", () => {
       assert.ok(call, "expected the spawner to be invoked once");
       assert.strictEqual(
         call.command,
-        '^"C:\\fake\\npm\\npm.cmd^" ^"install^" ^"-g^" ^"@openai/codex@latest^"',
+        'C:\\fake\\npm\\npm.cmd ^"install^" ^"-g^" ^"@openai/codex@latest^"',
       );
       assert.deepEqual(call.args, []);
       assert.strictEqual(call.shell, true);

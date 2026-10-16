@@ -695,10 +695,7 @@ describe("CodexAdapterV2 process spawning", () => {
       if (!ChildProcess.isStandardCommand(command)) {
         return;
       }
-      assert.equal(
-        command.command,
-        '^"C:\\npm\\codex.cmd^" ^"app-server^" ^"argument^ with^ spaces^"',
-      );
+      assert.equal(command.command, 'C:\\npm\\codex.cmd ^"app-server^" ^"argument^ with^ spaces^"');
       assert.deepEqual(command.args, []);
       assert.equal(command.options.shell, true);
       assert.equal(command.options.cwd, "C:\\workspace");
@@ -777,9 +774,18 @@ describe("CodexAdapterV2 process spawning", () => {
       yield* open({});
       yield* open({ T3CODE_CODEX_LAUNCH_ARGS: " --enable env-feature " });
 
+      // Command Center appends the default-mode request_user_input feature flag
+      // unless launch args already mention it (provider/codexLaunchArgs.ts).
+      const requestUserInput = ["-c", "features.default_mode_request_user_input=true"];
       assert.deepEqual(spawnedArgs, [
-        ["app-server", "--strict-config", "-c", "model_reasoning_summary=detailed"],
-        ["app-server", "--enable", "env-feature"],
+        [
+          "app-server",
+          "--strict-config",
+          "-c",
+          "model_reasoning_summary=detailed",
+          ...requestUserInput,
+        ],
+        ["app-server", "--enable", "env-feature", ...requestUserInput],
       ]);
     }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );

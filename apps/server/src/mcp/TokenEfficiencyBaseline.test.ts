@@ -39,7 +39,9 @@ it("records the committed static-context baseline", () => {
     // remains for the tool-unavailable case).
     // 2026-10: -2 bytes from upstream v0.0.45 joining the tool blocks with
     // "\n\n" (tools now ride turn additionalContext; baseline measures both).
-    collaborationInstructions: { defaultBytes: 2_163, planBytes: 10_300 },
+    // 2026-10: +887 bytes from upstream v0.1.0's developer instructions (re-platform
+    // onto orchestration v2); Command Center's own additions are unchanged.
+    collaborationInstructions: { defaultBytes: 3_050, planBytes: 11_187 },
     // 2026-09: +1,938 bytes for the optional `database` selector on the nine
     // Supabase tools (multi-database projects).
     // 2026-09: +76 bytes for the `prospect.evaluate`/`prospect.notify`
@@ -55,7 +57,9 @@ it("records the committed static-context baseline", () => {
     // 2026-10: +560 bytes for `cc_items_update` (status/title/description only).
     // 2026-10: +3 bytes net from the upstream v0.0.45 sync (preview_snapshot
     // `save` text, effect rc.115 and shared contract schema changes).
-    mcp: { toolCount: 39, schemaBytes: 26_816, toolkitCounts: [14, 16, 9] },
+    // 2026-10: upstream v0.1.0 adds five preview tools (14 -> 19); the Command Center
+    // (16) and Supabase (9) toolkits are unchanged.
+    mcp: { toolCount: 44, schemaBytes: 34_471, toolkitCounts: [19, 16, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,
