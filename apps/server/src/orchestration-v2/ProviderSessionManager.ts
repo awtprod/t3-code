@@ -10,6 +10,7 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ThreadId,
+  type ProjectId,
   type ProviderThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -44,6 +45,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import { databaseAccessForScope } from "../database/SupabaseMcpConnector.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
@@ -400,6 +402,41 @@ export const layerWithOptions = (
           );
         },
       );
+      /**
+       * The Supabase grant an MCP credential carries: the thread's project and
+       * directory (worktree, else the project's workspace root) scope which
+       * database connections it reaches. Any read failure withholds database
+       * tools entirely (fail closed); a credential never widens on error.
+       */
+      const databaseScopeFor = Effect.fn("ProviderSessionManagerV2.databaseScopeFor")(function* (
+        threadId: ThreadId,
+      ) {
+        if (Option.isNone(serverSettings)) return {} as McpDatabaseScope;
+        return yield* Effect.gen(function* () {
+          const settings = yield* serverSettings.value.getSettings;
+          const thread = yield* projectionStore.getThread(threadId);
+          const project =
+            thread.worktreePath === null && Option.isSome(projectService)
+              ? yield* projectService.value.getById(thread.projectId)
+              : Option.none();
+          const cwd =
+            thread.worktreePath ??
+            (Option.isSome(project) ? project.value.workspaceRoot : undefined);
+          const scope = { projectId: thread.projectId, ...(cwd === undefined ? {} : { cwd }) };
+          const databaseAccess = databaseAccessForScope(settings.databaseConnections, scope);
+          return {
+            ...scope,
+            ...(databaseAccess === undefined ? {} : { databaseAccess }),
+          } satisfies McpDatabaseScope;
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning(
+              "Could not resolve database access; withholding database tools for this session.",
+              { threadId, cause },
+            ).pipe(Effect.as({} as McpDatabaseScope)),
+          ),
+        );
+      });
       const layerScope = yield* Effect.scope;
       // Ctrl+C, or a stop that signals the whole process group, reaches the
       // provider CLIs with the server. They report their own background work
@@ -434,6 +471,11 @@ export const layerWithOptions = (
       }) => `${input.providerSessionId}\u0000${input.threadId}`;
       const idleTimeoutMs = Math.max(1, options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS);
       const maxIdlePinMs = Math.max(0, options.maxIdlePinMs ?? DEFAULT_MAX_IDLE_PIN_MS);
+      interface McpDatabaseScope {
+        readonly projectId?: ProjectId;
+        readonly cwd?: string;
+        readonly databaseAccess?: "read" | "write";
+      }
       interface PreparedMcpCredential {
         readonly mcpCredentialId: string | undefined;
         /** True when this call minted the credential (vs reusing a live one). */
@@ -497,6 +539,7 @@ export const layerWithOptions = (
                 >(["orchestration", "worktree", "pull-requests"]);
                 if (browserToolsAvailable) capabilities.add("preview");
                 if (deviceToolsAvailable) capabilities.add("device");
+                const databaseScope = yield* databaseScopeFor(threadId);
                 const existing = yield* mcpSessions.read(threadId);
                 if (existing !== undefined) {
                   // Reserve before the async resolve so a release cannot
@@ -521,7 +564,14 @@ export const layerWithOptions = (
                     // A flipped browser-access setting must not survive through
                     // credential reuse: rotate so the new scope reflects it.
                     resolved.capabilities.has("preview") === browserToolsAvailable &&
-                    resolved.capabilities.has("device") === deviceToolsAvailable
+                    resolved.capabilities.has("device") === deviceToolsAvailable &&
+                    // Likewise a changed database connection or project scope.
+                    resolved.capabilities.has("database.read") ===
+                      (databaseScope.databaseAccess !== undefined) &&
+                    resolved.capabilities.has("database.write") ===
+                      (databaseScope.databaseAccess === "write") &&
+                    resolved.projectId === databaseScope.projectId &&
+                    resolved.cwd === databaseScope.cwd
                   ) {
                     return { mcpCredentialId: existing.providerSessionId, issued: false };
                   }
@@ -533,6 +583,7 @@ export const layerWithOptions = (
                   providerInstanceId,
                   browserToolsAvailable,
                   capabilities,
+                  ...databaseScope,
                 });
                 yield* mcpSessions.set(credential.config);
                 reserveMcpCredential(threadId, credential.config.providerSessionId);

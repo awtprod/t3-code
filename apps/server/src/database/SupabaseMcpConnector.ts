@@ -90,6 +90,21 @@ export function resolveSupabaseConnectionsForScope(
   );
 }
 
+/**
+ * The database grant an MCP credential carries for a thread scope: `write`
+ * when any reachable connection is writable, `read` when every reachable
+ * connection is read-only, none when nothing is reachable. The connector
+ * still enforces each connection's read-only flag at call time.
+ */
+export function databaseAccessForScope(
+  connections: ServerSettings["databaseConnections"],
+  input: { readonly projectId?: ProjectId; readonly cwd?: string },
+): "read" | "write" | undefined {
+  const reachable = resolveSupabaseConnectionsForScope(connections, input);
+  if (reachable.length === 0) return undefined;
+  return reachable.some((entry) => !entry.connection.readOnly) ? "write" : "read";
+}
+
 export type SupabaseConnectionSelection =
   | { readonly _tag: "resolved"; readonly resolved: ResolvedSupabaseConnection }
   | { readonly _tag: "none" }
