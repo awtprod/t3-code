@@ -40,6 +40,23 @@
     "apps/server/src/persistence/Layers/ProviderRestartRecovery.ts": ["files"],
     "apps/server/src/persistence/Services/ProviderRestartRecovery.ts": ["files"],
     "apps/web/src/browser/WebPreviewFrame.tsx": ["files"],
+    // V2PORT: fork exports whose v1 consumers (or tests) were removed with v1
+    // orchestration; each slice re-wires its own. S1: Codex permission kind,
+    // worktree base ref, auth draft scope, raw-route auth. S2: bridge make, worker
+    // start/Google verification (startup tests). S3: GitHub provisioning identity,
+    // web push services, Windows attachment path limit, environment HTTP auth
+    // helpers. S4: efficiency Judge layers.
+    "apps/server/src/provider/security/CodexPermissionEscalation.ts": ["exports"],
+    "apps/server/src/git/GitWorkflowService.ts": ["exports"],
+    "apps/server/src/auth/EnvironmentAuth.ts": ["exports"],
+    "apps/server/src/http.ts": ["exports"],
+    "apps/server/src/command-center/OrchestrationBridge.ts": ["exports"],
+    "apps/server/src/serverRuntimeStartup.ts": ["exports"],
+    "apps/server/src/provider/githubProvisioningIdentity.ts": ["exports"],
+    "apps/server/src/server.ts": ["exports"],
+    "packages/contracts/src/chatAttachment.ts": ["exports"],
+    "packages/client-runtime/src/state/environmentHttpAuth.ts": ["exports"],
+    "apps/server/src/efficiency/Judge.ts": ["exports"],
   },
   "workspaces": {
     ".": {

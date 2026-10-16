@@ -30,6 +30,8 @@ import type { ProviderRequestKind } from "@t3tools/contracts";
  * writes — and both web and mobile already render it, so the prompt stays
  * answerable without widening `ProviderRequestKind` across every client fold.
  */
+// V2PORT: the v1 Codex adapter and runtime ingestion mapped permission requests
+// through this kind; the v2 Codex adapter does not use it yet (S1).
 export const CODEX_PERMISSION_REQUEST_KIND: ProviderRequestKind = "file-change";
 
 type PermissionParams = EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams;

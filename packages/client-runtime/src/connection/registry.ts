@@ -315,6 +315,9 @@ export const make = Effect.gen(function* () {
     ReadonlyMap<EnvironmentId, EnvironmentServiceScope>
   >(new Map());
   const platformEnvironmentIds = yield* Ref.make<ReadonlySet<EnvironmentId>>(new Set());
+  // Command Center: desktop remote-primary keeps a saved recovery bearer for the
+  // environment its platform primary connects to; it survives every launch.
+  const preservedPrimaryBearerIds = yield* Ref.make<ReadonlySet<EnvironmentId>>(new Set());
   const persistedEnvironmentIds = yield* Ref.make<ReadonlySet<EnvironmentId>>(
     new Set(persistedRoutesByEnvironment.keys()),
   );
@@ -602,7 +605,29 @@ export const make = Effect.gen(function* () {
     return yield* withLeaseLock(
       environmentId,
       Effect.gen(function* () {
-        if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) {
+        const platformManaged = (yield* Ref.get(platformEnvironmentIds)).has(environmentId);
+        const activeTarget = (yield* SubscriptionRef.get(entries)).get(environmentId)?.target;
+        // Command Center: pairing may save (or repair) the recovery bearer of the
+        // environment a platform primary is connected to. The bearer is persisted,
+        // but the primary's runtime and GitHub routing trust stay in place until
+        // the next launch.
+        const savePrimaryBearer =
+          platformManaged &&
+          registration._tag === "BearerConnectionRegistration" &&
+          activeTarget?._tag === "PrimaryConnectionTarget";
+        if (platformManaged && !savePrimaryBearer) {
+          return false;
+        }
+        if (savePrimaryBearer) {
+          yield* registrations.register(registration, persistedRoutes(registered));
+          yield* Ref.update(persistedEnvironmentIds, (current) =>
+            new Set(current).add(environmentId),
+          );
+          yield* Ref.update(preservedPrimaryBearerIds, (current) =>
+            new Set(current).add(environmentId),
+          );
+          // The platform entry itself is untouched, so callers treat it as such
+          // (pairing must not re-enable or otherwise edit the active primary).
           return false;
         }
         // A new route joins the environment's saved routes. Registering one it
@@ -672,9 +697,26 @@ export const make = Effect.gen(function* () {
               ? { ...registered, enabled: false, ...unsupportedState(previous) }
               : registered;
           const persisted = (yield* Ref.get(persistedEnvironmentIds)).has(target.environmentId);
+          // Command Center: desktop remote-primary startup needs the saved bearer on
+          // every launch, so a primary keeps the persisted bearer registration of
+          // its environment instead of removing it as a shadowed user connection.
+          const previousIsSavedBearer =
+            previous !== undefined &&
+            connectionRoutes(previous).some(
+              (route) => route.target._tag === "BearerConnectionTarget",
+            );
+          const preservePrimaryBearer =
+            registration._tag === "PrimaryConnectionRegistration" &&
+            persisted &&
+            (previousIsSavedBearer ||
+              (yield* Ref.get(preservedPrimaryBearerIds)).has(target.environmentId));
+          // The preserved recovery bearer is not a shadowed user connection, so it
+          // must not reset GitHub routing trust on every launch.
+          const previousIsPreservedBearer = preservePrimaryBearer && previousIsSavedBearer;
           if (
-            persisted ||
+            (persisted && !preservePrimaryBearer) ||
             (previous !== undefined &&
+              !previousIsPreservedBearer &&
               gitHubRoutingConnectionKey(previous) !== gitHubRoutingConnectionKey(entry))
           ) {
             const revoked = yield* githubRoutingPermissions.forget(target.environmentId).pipe(
@@ -696,6 +738,11 @@ export const make = Effect.gen(function* () {
             next.add(target.environmentId);
             return next;
           });
+          if (preservePrimaryBearer) {
+            yield* Ref.update(preservedPrimaryBearerIds, (current) =>
+              new Set(current).add(target.environmentId),
+            );
+          }
 
           // Secondary desktop-local backends (e.g. a parallel WSL backend) live
           // on their own loopback origin, so they authenticate with a bearer
@@ -723,7 +770,7 @@ export const make = Effect.gen(function* () {
               );
           }
 
-          if (persisted) {
+          if (persisted && !preservePrimaryBearer) {
             yield* registrations.remove(target.environmentId).pipe(
               Effect.tap(() =>
                 Ref.update(persistedEnvironmentIds, (current) => {
