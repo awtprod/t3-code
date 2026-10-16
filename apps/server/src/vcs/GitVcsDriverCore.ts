@@ -4,7 +4,11 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import { resolveTrustedHostExecutable } from "./HostGitSecurity.ts";
+import {
+  hardenedHostGitArguments,
+  hardenedHostGitEnvironment,
+  resolveTrustedHostExecutable,
+} from "./HostGitSecurity.ts";
 import * as Hex from "effect/encoding/Hex";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -33,7 +37,6 @@ import { dedupeRemoteBranchesWithLocalMatches, normalizeGitRemoteUrl } from "@t3
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { compactTraceAttributes } from "@t3tools/shared/observability";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
 import { resolveProjectFileBackedSetting } from "@t3tools/shared/projectSettings";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
@@ -579,7 +582,13 @@ function operationUsesPrivateIndex(operation: string): boolean {
     operation.startsWith("GitVcsDriver.checkpoints.") ||
     operation.startsWith("GitVcsDriver.readUnifiedWorkingTreeReviewDiff.") ||
     operation.startsWith("GitVcsDriver.review.") ||
-    operation.startsWith("GitVcsDriver.getReviewDiffPreview.")
+    operation.startsWith("GitVcsDriver.getReviewDiffPreview.") ||
+    // Upstream v2: commit preparation stages into a scoped temporary index, and
+    // branch change totals count untracked files through the review index.
+    operation.startsWith("GitVcsDriver.prepareCommitContext.") ||
+    operation === "GitVcsDriver.commit.addSelected" ||
+    operation === "GitVcsDriver.commit.addAll" ||
+    operation === "GitVcsDriver.readBranchChangeTotals"
   );
 }
 
@@ -1038,25 +1047,25 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               }),
           ),
         );
-        const env = {
-          ...process.env,
-          // Status polling runs beside the user's own git commands; without this,
-          // `git status` takes index.lock to save its refreshed index.
-          GIT_OPTIONAL_LOCKS: "0",
-          ...input.env,
-          ...trace2Monitor.env,
-        };
-        const spawnEnv = { ...env, ...windowsLongPathConfigEnv(hostPlatform, env) };
-        const resolved = yield* resolveSpawnCommand("git", [], { env: spawnEnv });
-        // A git.cmd wrapper would need cmd.exe, which cuts multi-line commit
-        // messages at the first newline; leave that case to Node's lookup.
-        const executable = resolved.shell ? "git" : resolved.command;
+        // Exact environment: inherited Git execution/location controls never
+        // survive (HostGitSecurity). The hardened environment already sets
+        // GIT_OPTIONAL_LOCKS=0; Windows long-path support is appended through
+        // GIT_CONFIG_* on top of it.
+        const hardenedEnv = hardenedHostGitEnvironment([input.env, trace2Monitor.env], {
+          allowIndexFile: operationUsesPrivateIndex(input.operation),
+          writableRoots,
+        });
         const child = yield* commandSpawner
           .spawn(
-            ChildProcess.make(executable, commandInput.args, {
-              cwd: commandInput.cwd,
-              env: spawnEnv,
-            }),
+            ChildProcess.make(
+              gitExecutable,
+              hardenedHostGitArguments(commandInput.args, { safeDirectory: commandInput.cwd }),
+              {
+                cwd: commandInput.cwd,
+                env: { ...hardenedEnv, ...windowsLongPathConfigEnv(hostPlatform, hardenedEnv) },
+                extendEnv: false,
+              },
+            ),
           )
           .pipe(
             Effect.mapError(

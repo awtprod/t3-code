@@ -428,7 +428,7 @@ it.effect("uses stable diagnostics for every parsed non-repository command", () 
 const makeStubbedDriverLayer = (handle: () => ChildProcessSpawner.ChildProcessHandle) => {
   const spawner = ChildProcessSpawner.make(() => Effect.sync(handle));
   return GitVcsDriver.layer.pipe(
-    Layer.provide(ServerConfigLayer),
+    Layer.provide(layerServerConfig),
     Layer.provideMerge(
       Layer.merge(
         NodeServices.layer,
@@ -1008,7 +1008,7 @@ it.effect("prunes a recently deleted worktree registration immediately", () =>
       const registrations = yield* git(cwd, ["worktree", "list", "--porcelain"]);
       assert.notInclude(registrations, worktreePath);
     }),
-  ).pipe(Effect.provide(TestLayer)),
+  ).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("refreshes the current branch after an external checkout", () =>
@@ -1225,8 +1225,8 @@ it.effect.each([
       Effect.gen(function* () {
         if (!ChildProcess.isStandardCommand(command))
           return yield* Effect.die("expected Git command");
-        if (command.args[0] !== "fetch") return makeNonRepositoryHandle();
-        assert.deepEqual(command.args, ["fetch", "--quiet", "origin"]);
+        if (gitSubcommandArgs(command.args)[0] !== "fetch") return makeNonRepositoryHandle();
+        assert.deepEqual(gitSubcommandArgs(command.args), ["fetch", "--quiet", "origin"]);
         assert.equal(command.options.env?.LC_ALL, "C");
         assert.equal(command.options.env?.GIT_TERMINAL_PROMPT, "0");
         yield* Ref.update(attempts, (count) => count + 1);
@@ -1269,7 +1269,7 @@ it.effect("retries a fetch that lost a ref update to another Git process", () =>
       Effect.gen(function* () {
         if (!ChildProcess.isStandardCommand(command))
           return yield* Effect.die("expected Git command");
-        if (command.args[0] !== "fetch") return makeNonRepositoryHandle();
+        if (gitSubcommandArgs(command.args)[0] !== "fetch") return makeNonRepositoryHandle();
         const attempt = yield* Ref.updateAndGet(attempts, (count) => count + 1);
         if (attempt > 1) return makeSuccessfulHandle("");
         return ChildProcessSpawner.makeHandle({
@@ -1492,36 +1492,71 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       "names $label rather than an unreachable remote",
       ({ sshMessage, expectedReason, expectedText }) =>
         Effect.gen(function* () {
-          const parent = yield* makeTmpDir();
-          const pathService = yield* Path.Path;
-          const cwd = pathService.join(parent, "repo");
-          const fileSystem = yield* FileSystem.FileSystem;
-          const driver = yield* GitVcsDriver.GitVcsDriver;
-          yield* fileSystem.makeDirectory(cwd);
-          yield* initRepoWithCommit(cwd);
-          yield* git(cwd, ["remote", "add", "origin", "git@example.invalid:owner/repo.git"]);
-          // Stands in for ssh, which prints its refusal unprefixed and leaves
-          // git to add only a generic "could not read" line after it.
-          const fakeSsh = pathService.join(parent, "fake-ssh");
-          yield* writeTextFile(
-            parent,
-            "fake-ssh",
-            `#!/bin/sh\necho "${sshMessage}" >&2\nexit 255\n`,
+          // Command Center: host Git runs with an exact environment that pins
+          // GIT_SSH_COMMAND, so a fake ssh cannot be injected through the caller
+          // env (see the guarantee below). Replay the stderr Git produces instead:
+          // ssh prints its refusal unprefixed and Git adds only generic lines.
+          const stderr = `${sshMessage}\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n`;
+          const spawner = ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              if (!ChildProcess.isStandardCommand(command))
+                return yield* Effect.die("expected Git command");
+              if (gitSubcommandArgs(command.args)[0] !== "fetch") return makeNonRepositoryHandle();
+              return makeFailingHandle(stderr);
+            }),
           );
-          yield* fileSystem.chmod(fakeSsh, 0o755);
+          const driver = yield* makeGitVcsDriverCore().pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          );
+          const cwd = yield* makeTmpDir();
 
           const error = yield* driver
             .execute({
               operation: "GitVcsDriver.test.sshRefusal",
               cwd,
               args: ["fetch", "origin"],
-              env: { LC_ALL: "C", GIT_SSH_COMMAND: fakeSsh },
+              env: { LC_ALL: "C" },
             })
             .pipe(Effect.flip);
 
           assert.deepInclude(error, { reason: expectedReason });
           assert.include(error.message, expectedText);
-        }),
+        }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
+    );
+
+    it.effect("never runs an ssh command supplied through the caller environment", () =>
+      Effect.gen(function* () {
+        const parent = yield* makeTmpDir();
+        const pathService = yield* Path.Path;
+        const cwd = pathService.join(parent, "repo");
+        const fileSystem = yield* FileSystem.FileSystem;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* fileSystem.makeDirectory(cwd);
+        yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["remote", "add", "origin", "git@example.invalid:owner/repo.git"]);
+        const marker = pathService.join(parent, "fake-ssh-ran");
+        const fakeSsh = pathService.join(parent, "fake-ssh");
+        yield* writeTextFile(
+          parent,
+          "fake-ssh",
+          `#!/bin/sh\necho ran > "${marker}"\necho "Permission denied (publickey)." >&2\nexit 255\n`,
+        );
+        yield* fileSystem.chmod(fakeSsh, 0o755);
+
+        // Command Center guarantee: the hardened environment forces
+        // GIT_SSH_COMMAND to the host ssh, so a caller-supplied callback never runs.
+        const result = yield* driver.execute({
+          operation: "GitVcsDriver.test.sshCommandOverride",
+          cwd,
+          args: ["fetch", "origin"],
+          env: { LC_ALL: "C", GIT_SSH_COMMAND: fakeSsh },
+          allowNonZeroExit: true,
+          timeoutMs: 30_000,
+        });
+
+        assert.notEqual(result.exitCode, 0);
+        assert.isFalse(yield* fileSystem.exists(marker));
+      }),
     );
 
     it.effect("does not read a filesystem permission error as an ssh refusal", () =>
@@ -1591,12 +1626,13 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("does not read hook output as a git failure reason", () =>
+    it.effect("never runs repository hooks, so their output cannot reach the classifier", () =>
       Effect.gen(function* () {
         const parent = yield* makeTmpDir();
         const pathService = yield* Path.Path;
         const remote = pathService.join(parent, "origin.git");
         const cwd = pathService.join(parent, "work");
+        const marker = pathService.join(parent, "pre-push-ran");
         const fileSystem = yield* FileSystem.FileSystem;
         const driver = yield* GitVcsDriver.GitVcsDriver;
         yield* fileSystem.makeDirectory(cwd);
@@ -1606,9 +1642,45 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         yield* writeTextFile(
           cwd,
           ".git/hooks/pre-push",
-          '#!/bin/sh\necho "authentication failed" >&2\nexit 1\n',
+          `#!/bin/sh\necho ran > "${marker}"\necho "authentication failed" >&2\nexit 1\n`,
         );
         yield* fileSystem.chmod(pathService.join(cwd, ".git/hooks/pre-push"), 0o755);
+
+        // Command Center: host Git runs with core.hooksPath pinned to the null
+        // device, so the failing pre-push hook never runs and the push succeeds.
+        yield* driver.execute({
+          operation: "GitVcsDriver.test.hookOutput",
+          cwd,
+          args: ["push", "origin", "HEAD"],
+          env: { LC_ALL: "C" },
+        });
+
+        assert.isFalse(yield* fileSystem.exists(marker));
+      }),
+    );
+
+    it.effect("does not read hook output as a git failure reason", () =>
+      Effect.gen(function* () {
+        // Hook text is unprefixed; only git's own `error:` line may be classified,
+        // and it names no reason. Classifying every line would read the hook's
+        // "authentication failed" as a credential failure.
+        const stderr =
+          "authentication failed\nerror: failed to push some refs to '/srv/example/origin.git'\n";
+        const spawner = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            if (!ChildProcess.isStandardCommand(command))
+              return yield* Effect.die("expected Git command");
+            if (gitSubcommandArgs(command.args)[0] !== "push") return makeNonRepositoryHandle();
+            return ChildProcessSpawner.makeHandle({
+              ...makeFailingHandle(stderr),
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+            });
+          }),
+        );
+        const driver = yield* makeGitVcsDriverCore().pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        const cwd = yield* makeTmpDir();
 
         const error = yield* driver
           .execute({
@@ -1619,9 +1691,10 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           })
           .pipe(Effect.flip);
 
+        assert.equal(error.exitCode, 1);
         assert.notProperty(error, "reason");
         assert.notInclude(error.message, "(authentication_failed)");
-      }),
+      }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
     );
 
     it.effect("leaves a tag collision unclassified rather than calling it a path", () =>
@@ -2229,6 +2302,14 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         if ((yield* HostProcess.Platform) !== "win32") {
           yield* writeTextFile(cwd, "tab\tand\nnewline.txt", "unusual path\n");
         }
+        // Command Center: host Git drops the suite's GIT_CONFIG_* pins
+        // (core.filemode=false), so on POSIX the mode is read from the working
+        // tree, which the Changes view compares against. Make the file itself
+        // executable; update-index keeps the mode where filemode is off (Windows).
+        yield* (yield* FileSystem.FileSystem).chmod(
+          (yield* Path.Path).join(cwd, "mode-only.sh"),
+          0o755,
+        );
         yield* git(cwd, ["add", "."]);
         yield* git(cwd, ["update-index", "--chmod=+x", "mode-only.sh"]);
         yield* git(cwd, ["commit", "-m", "rename and add files"]);
@@ -3547,7 +3628,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         );
         const driver = yield* makeGitVcsDriverCore().pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, recordingSpawner),
-          Effect.provide(ServerConfigLayer),
+          Effect.provide(layerServerConfig),
         );
 
         // inner -> nested, so a recursive init would populate nested/NESTED.md
@@ -4512,33 +4593,47 @@ describe("Windows long path configuration", () => {
         operation: "GitVcsDriverTest.readGitConfig",
         cwd,
         args: ["config", "--get", key],
-        // Replaces the suite's own core.longpaths=true so it cannot mask a
-        // missing injection. Entry 2 sits past the count and must stay unread.
+        // Command Center: host Git runs with an exact environment, so caller
+        // GIT_CONFIG_* entries (and the suite's own core.longpaths=true pin)
+        // never reach Git; only the driver's own long-path entry can.
         env: {
           GIT_CONFIG_COUNT: "2",
           GIT_CONFIG_KEY_0: "user.name",
           GIT_CONFIG_VALUE_0: "inherited-name",
           GIT_CONFIG_KEY_1: "core.longpaths",
           GIT_CONFIG_VALUE_1: "false",
-          GIT_CONFIG_KEY_2: "user.name",
-          GIT_CONFIG_VALUE_2: "outside-count",
         },
+        allowNonZeroExit: true,
       });
-      return result.stdout.trim();
+      return { exitCode: result.exitCode, value: result.stdout.trim() };
     }).pipe(Effect.provide(layer), Effect.scoped);
   });
 
   it.effect("enables long paths for every Git command on Windows", () =>
     Effect.gen(function* () {
-      assert.equal(yield* readGitConfig("win32", "core.longpaths"), "true");
-      assert.equal(yield* readGitConfig("win32", "user.name"), "inherited-name");
+      assert.deepStrictEqual(yield* readGitConfig("win32", "core.longpaths"), {
+        exitCode: 0,
+        value: "true",
+      });
+      // The caller's GIT_CONFIG_* entries are dropped, not merely appended to.
+      assert.deepStrictEqual(yield* readGitConfig("win32", "user.name"), {
+        exitCode: 1,
+        value: "",
+      });
     }),
   );
 
   it.effect("leaves Git config untouched on other platforms", () =>
     Effect.gen(function* () {
-      assert.equal(yield* readGitConfig("linux", "core.longpaths"), "false");
-      assert.equal(yield* readGitConfig("linux", "user.name"), "inherited-name");
+      // `git config --get` exits 1 for an unset key: nothing was injected.
+      assert.deepStrictEqual(yield* readGitConfig("linux", "core.longpaths"), {
+        exitCode: 1,
+        value: "",
+      });
+      assert.deepStrictEqual(yield* readGitConfig("linux", "user.name"), {
+        exitCode: 1,
+        value: "",
+      });
     }),
   );
 
