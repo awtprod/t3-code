@@ -89,7 +89,15 @@ it.effect("collects planner statistics for an existing database on open", () => 
       const rows = yield* sql<{ readonly stat: string }>`
         SELECT stat FROM sqlite_stat1 WHERE idx = 'stats_probe_thread_idx'
       `;
-      assert.deepEqual([...rows], [{ stat: "1000 100" }]);
+      // PRAGMA optimize = 0x10012 runs ANALYZE under a temporary analysis_limit
+      // that tightens as the schema grows. Command Center's larger schema (fork
+      // migrations 1-94 plus the V2 tables) makes it sample this index, so the
+      // per-key estimate is approximate (exact: 100) while the row count is exact.
+      assert.lengthOf(rows, 1);
+      const [rowCount, rowsPerKey] = rows[0]!.stat.split(" ").map(Number);
+      assert.equal(rowCount, 1000);
+      assert.isAtLeast(rowsPerKey!, 50);
+      assert.isAtMost(rowsPerKey!, 150);
     }).pipe(Effect.provide(persistence()));
   }).pipe(
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),

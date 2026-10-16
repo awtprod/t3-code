@@ -23,9 +23,11 @@ import {
 } from "./providerCompatibility.ts";
 
 const driver = ProviderDriverKind.make("codex");
+// Unpinned lookups use T3_CODE_COMPATIBILITY_VERSION (0.1.0 in Command Center), so the
+// fixture range must cover it; 0.2.0 is the first release outside it.
 const policy: ProviderCompatibilityPolicy = {
   driver,
-  t3CodeRange: ">=0.0.42 <0.1.0",
+  t3CodeRange: ">=0.0.42 <0.2.0",
   recommendedVersion: "2.0.0",
   recommendedRange: ">=2.0.0 <3.0.0",
   ranges: [
@@ -222,7 +224,7 @@ describe("provider compatibility", () => {
     ] as const) {
       assert.strictEqual(resolveProviderCompatibility([policy], driver, version)?.status, expected);
     }
-    assert.isUndefined(resolveProviderCompatibility([policy], driver, "0.9.0", "0.1.0"));
+    assert.isUndefined(resolveProviderCompatibility([policy], driver, "0.9.0", "0.2.0"));
   });
 
   it("supports every driver without inventing policies for uncovered adapters", () => {
@@ -275,7 +277,7 @@ describe("provider compatibility", () => {
     assert.doesNotThrow(() => decode(policy));
     const prefixed = decode({
       ...policy,
-      t3CodeRange: ">=v0.0.42 <v0.1",
+      t3CodeRange: ">=v0.0.42 <v0.2",
       recommendedRange: "^v2",
       ranges: [{ range: ">=v2.0 <v3", status: "supported" }],
     });

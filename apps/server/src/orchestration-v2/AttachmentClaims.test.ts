@@ -15,6 +15,7 @@ import * as Layer from "effect/Layer";
 import {
   createPendingAttachmentId,
   parseThreadSegmentFromAttachmentId,
+  PENDING_ATTACHMENT_THREAD_SEGMENT,
 } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import {
@@ -114,7 +115,7 @@ describe("AttachmentClaims", () => {
       expect(NodeFS.existsSync(claimed.claimedPaths[0]!)).toBe(true);
       // The pending copy stays behind as the retry source.
       const pendingFiles = NodeFS.readdirSync(config.attachmentsDir).filter((entry) =>
-        entry.startsWith("pending-"),
+        entry.startsWith(`${PENDING_ATTACHMENT_THREAD_SEGMENT}-`),
       );
       expect(pendingFiles).toHaveLength(1);
     }).pipe(Effect.provide(layerTest)),
@@ -216,7 +217,9 @@ describe("AttachmentClaims", () => {
       ).toHaveLength(0);
       // The pending source survives for a corrected retry.
       expect(
-        NodeFS.readdirSync(config.attachmentsDir).filter((entry) => entry.startsWith("pending-")),
+        NodeFS.readdirSync(config.attachmentsDir).filter((entry) =>
+          entry.startsWith(`${PENDING_ATTACHMENT_THREAD_SEGMENT}-`),
+        ),
       ).toHaveLength(1);
     }).pipe(Effect.provide(layerTest)),
   );
@@ -270,7 +273,9 @@ describe("AttachmentClaims", () => {
       // ...and the pending source survived for a retry.
       expect(NodeFS.existsSync(sourcePath)).toBe(true);
       expect(
-        NodeFS.readdirSync(config.attachmentsDir).filter((entry) => entry.startsWith("pending-")),
+        NodeFS.readdirSync(config.attachmentsDir).filter((entry) =>
+          entry.startsWith(`${PENDING_ATTACHMENT_THREAD_SEGMENT}-`),
+        ),
       ).toHaveLength(1);
     }).pipe(Effect.provide(layerTest)),
   );
