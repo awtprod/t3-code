@@ -440,6 +440,29 @@ export function startNewThreadForProject(
   return true;
 }
 
+/**
+ * An explicit model pick in the composer is a manual routing choice. In auto
+ * routing the server replaces the turn's model with the tier policy model and
+ * only falls back to the picked one, so leaving a thread in auto after the user
+ * picks a different model would silently run some other model while the picker
+ * still shows the user's choice. Returns true when the pick should flip the
+ * thread to manual routing: the thread is in auto and the picked provider
+ * instance or model differs from the composer's current selection.
+ */
+export function shouldSwitchToManualRoutingOnModelPick(input: {
+  readonly routingMode: "manual" | "auto";
+  readonly currentModelSelection: Pick<ModelSelection, "instanceId" | "model"> | null | undefined;
+  readonly nextModelSelection: Pick<ModelSelection, "instanceId" | "model">;
+}): boolean {
+  if (input.routingMode !== "auto") return false;
+  const current = input.currentModelSelection;
+  if (!current) return true;
+  return (
+    current.instanceId !== input.nextModelSelection.instanceId ||
+    current.model !== input.nextModelSelection.model
+  );
+}
+
 export function resolveThreadMetadataUpdateForNextTurn(input: {
   currentModelSelection: ModelSelection;
   nextModelSelection?: ModelSelection;

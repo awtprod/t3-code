@@ -476,6 +476,7 @@ import {
   observeProactivePanelUserChoice,
   resolveProactiveTurnDiffAction,
   resolveThreadMetadataUpdateForNextTurn,
+  shouldSwitchToManualRoutingOnModelPick,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
@@ -9430,16 +9431,34 @@ export default function ChatView(props: ChatViewProps) {
         if (options?.focusComposer !== false) scheduleComposerFocus();
         return;
       }
+      // Read the composer's selection before the draft write below replaces it.
+      const switchToManualRouting = shouldSwitchToManualRoutingOnModelPick({
+        routingMode: composerEfficiencyRoutingMode,
+        currentModelSelection:
+          composerRef.current?.getSendContext().selectedModelSelection ??
+          activeThread.modelSelection,
+        nextModelSelection,
+      });
       setComposerDraftModelSelection(
         scopeThreadRef(activeThread.environmentId, activeThread.id),
         nextModelSelection,
         { explicit: true },
       );
       setStickyComposerModelSelection(nextModelSelection);
+      // An explicit pick means "run this model": auto routing would otherwise
+      // replace it with the tier policy model while the picker still shows the
+      // pick. The routing toggle can switch the thread back to auto.
+      if (switchToManualRouting) {
+        handleEfficiencyRoutingChange("manual", composerEfficiencyTier);
+      }
       if (options?.focusComposer !== false) scheduleComposerFocus();
     },
     [
       activeThread,
+      composerEfficiencyRoutingMode,
+      composerEfficiencyTier,
+      composerRef,
+      handleEfficiencyRoutingChange,
       lockedProvider,
       scheduleComposerFocus,
       setComposerDraftModelSelection,
