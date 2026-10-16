@@ -384,4 +384,13 @@ function safeOrigin(endpoint: string): string {
   }
 }
 
-export const layer = Layer.effect(LocalWebPushNotifier, make);
+/**
+ * The server's notifier: building the layer starts it (event follower, Space
+ * agent question follower and startup seed, all parked until server
+ * activation). On v1 the orchestration reactor called start(); v2 has no such
+ * reactor, so the layer owns its own lifecycle and stops with its scope.
+ */
+export const layer = Layer.effect(
+  LocalWebPushNotifier,
+  make.pipe(Effect.tap((notifier) => notifier.start())),
+);

@@ -2,6 +2,7 @@ import {
   type CommandCenterEventEnvelope,
   type EnvironmentId,
   type OrchestrationProjectShell,
+  type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
   ProjectId,
   ProviderInstanceId,
@@ -14,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -24,7 +26,7 @@ import { CommandCenterEventStream } from "../command-center/EventStream.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as OrchestrationBridge from "../command-center/OrchestrationBridge.ts";
 import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
-import { make as makeNotifier } from "./LocalWebPushNotifier.ts";
+import { layer as notifierLayer, make as makeNotifier } from "./LocalWebPushNotifier.ts";
 import { WebPushConfig } from "./WebPushConfig.ts";
 import type { WebPushDeliveryResult, WebPushSendInput } from "./WebPushSender.ts";
 import { WebPushSender } from "./WebPushSender.ts";
@@ -121,7 +123,10 @@ const okResult: WebPushDeliveryResult = { ok: true, status: 201, permanentFailur
 // when omitted the seed reflects the current threadRef (used by the transition
 // tests). Passing an explicit list lets a test seed a baseline that differs
 // from the live thread state, modelling boot-time transitions.
-const makeHarness = Effect.fn(function* (seedThreads?: readonly OrchestrationV2ThreadShell[]) {
+const makeHarness = Effect.fn(function* (
+  seedThreads?: readonly OrchestrationV2ThreadShell[],
+  threadEvents: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty,
+) {
   const threadRef = yield* Ref.make(Option.some(threadForPhase("running")));
   const sends = yield* Ref.make<ReadonlyArray<WebPushSendInput>>([]);
   const resultRef = yield* Ref.make<WebPushDeliveryResult>(okResult);
@@ -161,7 +166,7 @@ const makeHarness = Effect.fn(function* (seedThreads?: readonly OrchestrationV2T
             threads,
           })),
         ),
-      streamThreadEvents: Stream.empty,
+      streamThreadEvents: threadEvents,
     }),
     Layer.mock(CommandCenterEventStream)({ changes: () => Stream.empty }),
   ).pipe(
@@ -404,6 +409,39 @@ it.effect("stays quiet for the agent's non-decision Items, user Items, and updat
         yield* notifier.processItemEvent(itemCreated("agent-decision", "agent", "updated"));
         yield* notifier.processItemEvent(itemCreated("missing"));
         assert.equal((yield* Ref.get(harness.sends)).length, 0);
+      }).pipe(Effect.provide(depsLayer));
+    }),
+  ),
+);
+
+it.effect("the server layer starts the notifier and pushes on a v2 thread event", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+      const { harness, depsLayer } = yield* makeHarness(undefined, Stream.fromQueue(events));
+      yield* Effect.gen(function* () {
+        const store = yield* WebPushSubscriptions;
+        yield* store.upsert(SUBSCRIPTION);
+        // Building the production layer must start the event follower and
+        // the startup seed; nothing else calls start() on v2.
+        yield* Layer.build(notifierLayer);
+        // Let the forked seed record the running baseline.
+        yield* Effect.forEach(Array.from({ length: 50 }), () => Effect.yieldNow, {
+          discard: true,
+        });
+        yield* Ref.set(harness.threadRef, Option.some(threadForPhase("approval")));
+        yield* Queue.offer(events, {
+          type: "thread.created",
+          threadId: THREAD_ID,
+          payload: {},
+        } as unknown as OrchestrationV2DomainEvent);
+        let sends: ReadonlyArray<WebPushSendInput> = [];
+        for (let attempt = 0; attempt < 200 && sends.length === 0; attempt++) {
+          yield* Effect.yieldNow;
+          sends = yield* Ref.get(harness.sends);
+        }
+        assert.equal(sends.length, 1);
+        assert.equal(sends[0]?.payload.deepLink, "/threads/env-1/thread-1");
       }).pipe(Effect.provide(depsLayer));
     }),
   ),
