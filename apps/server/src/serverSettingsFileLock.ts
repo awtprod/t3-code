@@ -156,9 +156,9 @@ export const withServerSettingsFileLock = <A, E, R>(
         ),
       ),
     ).pipe(
-      Effect.catchTag(
-        "SqlError",
-        (cause) => new ServerSettingsFileLockError({ settingsPath, operation: "open", cause }),
-      ),
+      Effect.catchTags({
+        SqlError: (cause) =>
+          new ServerSettingsFileLockError({ settingsPath, operation: "open", cause }),
+      }),
     );
   });

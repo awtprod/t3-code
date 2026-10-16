@@ -577,7 +577,7 @@ function SprintPlanRouteView() {
   };
 
   return (
-    <SidebarInset className="h-full min-h-0 overflow-auto">
+    <SidebarInset className="scrollbar-gutter-both h-full min-h-0 overflow-auto">
       <main className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 pt-14 pb-12 sm:px-6 sm:pt-5">
         <header className="flex flex-wrap items-start justify-between gap-3">
           <div>

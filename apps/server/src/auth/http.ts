@@ -428,9 +428,10 @@ export const layer = HttpApiBuilder.group(
               deriveAuthClientMetadata({ request }),
             );
           },
-          Effect.catchTag("ServerAuthBearerSessionRequiredError", () =>
-            failEnvironmentOperationForbidden("bearer_session_required"),
-          ),
+          Effect.catchTags({
+            ServerAuthBearerSessionRequiredError: () =>
+              failEnvironmentOperationForbidden("bearer_session_required"),
+          }),
           Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
             failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
           ),

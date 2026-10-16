@@ -261,7 +261,7 @@ function InboxSpaceList({
         <button
           aria-current={selectedItemId === summary.item.id ? "true" : undefined}
           className={cn(
-            "group w-full rounded-xl border bg-card/35 p-4 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
+            "group w-full rounded-xl border bg-card/35 p-4 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
             selectedItemId === summary.item.id
               ? "border-primary/55 bg-primary/6"
               : "border-border/65 hover:border-border hover:bg-accent/35",
@@ -1177,7 +1177,10 @@ export function InboxDetailPane({
     );
 
   return (
-    <article className="h-full overflow-y-auto" aria-labelledby="inbox-detail-title">
+    <article
+      className="scrollbar-gutter-both h-full overflow-y-auto"
+      aria-labelledby="inbox-detail-title"
+    >
       <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-border/60 bg-background/92 px-4 py-3 backdrop-blur lg:hidden">
         <Button onClick={onBack} size="sm" variant="ghost">
           <ArrowLeftIcon /> Inbox
@@ -1257,7 +1260,7 @@ export function InboxDetailPane({
               Reply intent
             </label>
             <select
-              className="h-9 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="h-9 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
               disabled={disabled}
               id="inbox-reply-intent"
               onChange={(event) =>
@@ -2025,7 +2028,7 @@ export function InboxScreen({
                 <button
                   aria-selected={tab === option.value}
                   className={cn(
-                    "rounded-lg px-3 py-2 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    "rounded-lg px-3 py-2 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                     tab === option.value
                       ? "bg-accent text-foreground"
                       : "text-muted-foreground hover:text-foreground",

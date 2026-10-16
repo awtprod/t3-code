@@ -409,9 +409,10 @@ const proxyWebSocket = Effect.fnUntraced(function* (port: number) {
 
   yield* Effect.raceFirst(pump(upstream, downstreamWriter), pump(downstream, upstreamWriter)).pipe(
     // A socket closing is how this ends, not a failure to report.
-    Effect.catchTag("SocketError", (error) =>
-      Effect.logDebug("Preview gateway websocket closed", { port, reason: error.reason._tag }),
-    ),
+    Effect.catchTags({
+      SocketError: (error) =>
+        Effect.logDebug("Preview gateway websocket closed", { port, reason: error.reason._tag }),
+    }),
   );
 
   return HttpServerResponse.empty();

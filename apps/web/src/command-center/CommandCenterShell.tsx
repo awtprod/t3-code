@@ -741,7 +741,7 @@ function Composer({
           </div>
           <button
             aria-label={isSubmitting ? "Sending command" : "Send command"}
-            className="flex size-10 shrink-0 items-center justify-center rounded-full bg-message-action text-message-action-foreground shadow-xs outline-none transition-all duration-150 hover:bg-message-action-hover focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background enabled:cursor-pointer enabled:shadow-message-action/24 enabled:hover:scale-105 disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none sm:size-9"
+            className="flex size-10 shrink-0 items-center justify-center rounded-full bg-message-action text-message-action-foreground shadow-xs outline-none transition-all duration-150 hover:bg-message-action-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring enabled:cursor-pointer enabled:shadow-message-action/24 enabled:hover:scale-105 disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none sm:size-9"
             disabled={!draft.trim() || isSubmitting || commandUnavailable}
             type="submit"
           >
@@ -1348,7 +1348,7 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
           <button
             aria-expanded={contextOpen}
             aria-label={contextOpen ? "Close live context" : "Open live context"}
-            className="pointer-events-auto relative inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full border border-transparent bg-background/70 text-muted-foreground outline-none backdrop-blur-md transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background sm:size-7"
+            className="pointer-events-auto relative inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full border border-transparent bg-background/70 text-muted-foreground outline-none backdrop-blur-md transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:size-7"
             onClick={() => setContextOpen((open) => !open)}
             type="button"
           >

@@ -514,14 +514,15 @@ export const make = Effect.gen(function* () {
 
   const get = environment.remoteOnlyBuild
     ? getCurrent.pipe(
-        Effect.catchTag("DesktopConnectionCatalogStoreProtectionError", (error) =>
-          error.operation === "decrypt-catalog"
-            ? Effect.logWarning(
-                "Ignoring an unreadable remote-only connection catalog; reconnecting will replace it.",
-                { catalogPath },
-              ).pipe(Effect.as(Option.none<string>()))
-            : Effect.fail(error),
-        ),
+        Effect.catchTags({
+          DesktopConnectionCatalogStoreProtectionError: (error) =>
+            error.operation === "decrypt-catalog"
+              ? Effect.logWarning(
+                  "Ignoring an unreadable remote-only connection catalog; reconnecting will replace it.",
+                  { catalogPath },
+                ).pipe(Effect.as(Option.none<string>()))
+              : Effect.fail(error),
+        }),
       )
     : getCurrent;
 

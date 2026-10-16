@@ -408,7 +408,7 @@ const disconnectCloud = Effect.fn("cloud.cli.disconnect")(function* (options: {
       Effect.tap((removed) =>
         removed ? Console.log("Removed the Command Center background service.") : Effect.void,
       ),
-      Effect.catchTag("BootServiceUnsupportedError", () => Effect.succeed(false)),
+      Effect.catchTags({ BootServiceUnsupportedError: () => Effect.succeed(false) }),
       Effect.catch((error) =>
         Console.warn(`Could not remove the background service: ${error.message}`).pipe(
           Effect.as(false),

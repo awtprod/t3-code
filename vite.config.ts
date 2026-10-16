@@ -270,6 +270,12 @@ export default defineConfig({
         rules: { "shadcn/no-unknown-classes": "error" },
       },
       {
+        // Command Center: React Flow reads its drag/pan opt-out from these class names on
+        // node content; they are third-party hooks with no CSS of their own.
+        files: ["apps/web/src/command-center/automation/AutomationEditor.tsx"],
+        rules: { "shadcn/no-unknown-classes": ["error", { allow: ["nodrag", "nopan"] }] },
+      },
+      {
         // State indicators paint inward; decorative rings keep their own geometry.
         files: ["apps/web/src/**"],
         rules: { "t3code/no-outset-state-indicators": "error" },
