@@ -14,9 +14,9 @@ import type {
   HostUsageProcess,
   HostUsageSnapshot,
   OrchestrationProjectShell,
-  OrchestrationThreadShell,
+  OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cache from "effect/Cache";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -32,7 +32,7 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ServerConfig from "../config.ts";
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { OrchestrationBridge as ProjectionSnapshotQuery } from "../command-center/OrchestrationBridge.ts";
 import { ProcessRunner } from "../processRunner.ts";
 import { forkParked } from "../serverActivation.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -108,7 +108,7 @@ const EMPTY_SCAN: HostDiskScan = {
 
 interface ShellState {
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
-  readonly threads: ReadonlyArray<OrchestrationThreadShell>;
+  readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
 }
 
 interface FilesystemReading {
@@ -175,7 +175,7 @@ function reclaimBlocker(
 const make = Effect.fn("makeHostUsage")(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const platform = yield* HostProcessPlatform;
+  const platform = yield* HostProcess.Platform;
   const config = yield* ServerConfig.ServerConfig;
   const hostResources = yield* HostResources;
   const projections = yield* ProjectionSnapshotQuery;

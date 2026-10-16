@@ -53,7 +53,7 @@ export const runDefaultServerCommand = (flags: CliServerFlags) =>
   });
 
 export const startCommand = Command.make("start", { ...sharedServerCommandFlags }).pipe(
-  Command.withDescription("Run the T3 Code server."),
+  Command.withDescription("Run the Command Center server."),
   Command.withHandler((flags) => runServerCommand(flags, { rejectRunningServer: true })),
 );
 

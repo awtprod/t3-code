@@ -30,7 +30,6 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { ServerConfig } from "../config.ts";
-import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { hasValidClaudeManifestAdapters } from "./ClaudeModelManifest.ts";
 import bundledManifestJson from "./model-manifest.json" with { type: "json" };

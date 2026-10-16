@@ -582,7 +582,7 @@ export interface ProjectionStoreV2Shape {
 }
 
 export class ProjectionStoreV2 extends Context.Service<ProjectionStoreV2, ProjectionStoreV2Shape>()(
-  "t3/orchestration-v2/ProjectionStore/ProjectionStoreV2",
+  "@awtprod/command-center/orchestration-v2/ProjectionStore/ProjectionStoreV2",
 ) {}
 
 export const ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION = 2;

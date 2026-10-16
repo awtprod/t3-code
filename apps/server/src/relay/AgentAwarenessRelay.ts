@@ -62,7 +62,7 @@ export class AgentAwarenessRelay extends Context.Service<
   }
 >()("@awtprod/command-center/relay/AgentAwarenessRelay") {}
 
-function eventThreadId(event: OrchestrationV2DomainEvent): ThreadId {
+export function eventThreadId(event: OrchestrationV2DomainEvent): ThreadId {
   return event.threadId;
 }
 
@@ -160,7 +160,7 @@ export const makeAgentAwarenessPublishWorker = Effect.fnUntraced(function* <R>(
   return { enqueue, drain: worker.drain };
 });
 
-function agentAwarenessPublishIdentity(state: RelayAgentActivityState | null): string {
+export function agentAwarenessPublishIdentity(state: RelayAgentActivityState | null): string {
   if (state === null) {
     return "null";
   }
@@ -182,7 +182,7 @@ const RELAY_AGENT_ACTIVITY_DETAIL_MAX_LENGTH = 160;
 const REDACTED_RELAY_AGENT_FAILURE_DETAIL = "The agent run failed.";
 const RELAY_AGENT_ACTIVITY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
 
-function sanitizeRelayAgentActivityState(
+export function sanitizeRelayAgentActivityState(
   state: RelayAgentActivityState | null,
 ): RelayAgentActivityState | null {
   if (state === null) {

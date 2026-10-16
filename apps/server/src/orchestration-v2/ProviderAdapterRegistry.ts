@@ -64,7 +64,7 @@ export interface ProviderAdapterRegistryV2Shape {
 export class ProviderAdapterRegistryV2 extends Context.Service<
   ProviderAdapterRegistryV2,
   ProviderAdapterRegistryV2Shape
->()("t3/orchestration-v2/ProviderAdapterRegistry/ProviderAdapterRegistryV2") {}
+>()("@awtprod/command-center/orchestration-v2/ProviderAdapterRegistry/ProviderAdapterRegistryV2") {}
 
 /**
  * Production facade over the canonical provider-instance registry. Adapter

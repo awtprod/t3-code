@@ -239,7 +239,7 @@ export class McpOAuth extends Context.Service<
       readonly token: AuthMcpTokenRequest;
     }) => Effect.Effect<AuthMcpTokenResult, AuthMcpTokenError>;
   }
->()("t3/auth/McpOAuth") {}
+>()("@awtprod/command-center/auth/McpOAuth") {}
 
 /** Appends OAuth response parameters, keeping any the client put in its redirect URI. */
 const redirectWith = (redirectUri: string, params: Record<string, string | undefined>) => {

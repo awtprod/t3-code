@@ -61,7 +61,7 @@ export interface RuntimeRequestServiceV2Shape {
 export class RuntimeRequestServiceV2 extends Context.Service<
   RuntimeRequestServiceV2,
   RuntimeRequestServiceV2Shape
->()("t3/orchestration-v2/RuntimeRequestService/RuntimeRequestServiceV2") {}
+>()("@awtprod/command-center/orchestration-v2/RuntimeRequestService/RuntimeRequestServiceV2") {}
 
 export const layer: Layer.Layer<
   RuntimeRequestServiceV2,

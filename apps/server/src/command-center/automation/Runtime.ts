@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Command Center module that predates the Effect platform port.
 import {
   Automation,
   type Automation as AutomationType,
@@ -2143,6 +2144,6 @@ export const makeDefaultDependencies = (executeNode: AutomationNodeExecutor) =>
     return {
       executeNode,
       now,
-      randomUUID: crypto.randomUUIDv4.pipe(Effect.orDie),
+      randomUUID: crypto.randomUUIDv4().pipe(Effect.orDie),
     };
   });

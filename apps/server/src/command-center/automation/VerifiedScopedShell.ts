@@ -4,7 +4,7 @@ import * as NodeFS from "node:fs";
 import type * as NodeFSP from "node:fs/promises";
 import * as NodeProcess from "node:process";
 
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -662,7 +662,7 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
   function* (testing: VerifiedLinuxScopedShellTestingOptions | undefined) {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const platform = yield* HostProcessPlatform;
+    const platform = yield* HostProcess.Platform;
     const effectiveUid = NodeProcess.geteuid?.();
     const startupAccountTasks =
       platform === "linux" && effectiveUid !== undefined

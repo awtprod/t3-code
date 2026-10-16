@@ -1,13 +1,17 @@
 import {
   type AuthMcpClientAccess,
+  CommandCenterMcpCapabilityUnavailableError,
+  DatabaseToolError,
   type EnvironmentId,
   McpCapabilityUnavailableError,
   OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
+  type ProjectId,
   type ProviderInstanceId,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
+import type { CapabilityName, RepositoryId, SpaceId } from "@command-center/core";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
@@ -18,7 +22,19 @@ const ALL_MCP_CAPABILITIES = [
   "device",
   "pull-requests",
 ] as const;
-export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
+/**
+ * Upstream's capabilities plus Command Center's: the Supabase connector's
+ * database read/write grants and the Command Center core capability names a
+ * Run or Space agent credential carries.
+ */
+export type McpCapability =
+  | (typeof ALL_MCP_CAPABILITIES)[number]
+  | "database.read"
+  | "database.write"
+  | CapabilityName;
+export type McpMemoryWriteMode = "propose" | "remember";
+/** Server-issued role of the thread holding the credential. */
+export type McpThreadRole = "space-agent";
 
 /** A provider session T3 Code launched for one thread. */
 export interface McpThreadCaller {
@@ -58,12 +74,22 @@ export interface McpInvocationScope {
   readonly requestNamespace: string;
   readonly thread: McpThreadCaller | undefined;
   readonly client: McpClientCaller | undefined;
+  /** Local project owning the thread, when issued through project orchestration. */
+  readonly projectId?: ProjectId;
+  /** Effective provider working directory used to resolve project-scoped tools. */
+  readonly cwd?: string;
+  readonly spaceId?: SpaceId;
+  readonly repositoryId?: RepositoryId;
+  /** Server-issued policy. Tool input cannot promote proposal-only credentials. */
+  readonly memoryWriteMode?: McpMemoryWriteMode;
+  /** Present only for credentials minted for a Space agent thread. */
+  readonly role?: McpThreadRole;
 }
 
 export class McpInvocationContext extends Context.Service<
   McpInvocationContext,
   McpInvocationScope
->()("t3/mcp/McpInvocationContext") {}
+>()("@awtprod/command-center/mcp/McpInvocationContext") {}
 
 /** The error a missing capability surfaces as; preview keeps its own so the broker can route it. */
 export type McpCapabilityError<C extends McpCapability> = C extends "preview"
@@ -131,3 +157,34 @@ export const requireThreadScope = (scope: McpInvocationScope, operation: string)
   scope.thread === undefined
     ? Effect.fail(threadCallerRequired(operation))
     : Effect.succeed(scope as McpThreadInvocationScope);
+
+/** Command Center core capabilities fail with their own error so the toolkit can explain the grant. */
+export const requireCommandCenterCapability = Effect.fn("mcp.requireCommandCenterCapability")(
+  function* (capability: CapabilityName) {
+    const invocation = yield* McpInvocationContext;
+    if (!invocation.capabilities.has(capability)) {
+      // Command Center grants are minted only for thread credentials; an
+      // outside MCP client never holds one and is named by its session.
+      return yield* new CommandCenterMcpCapabilityUnavailableError({
+        capability,
+        threadId: invocation.thread?.threadId ?? "mcp-client",
+        providerSessionId: invocation.thread?.providerSessionId ?? invocation.requestNamespace,
+      });
+    }
+    return invocation;
+  },
+);
+
+/** The Supabase connector's grants surface as a database tool error the agent can act on. */
+export const requireDatabaseCapability = Effect.fn("mcp.requireDatabaseCapability")(function* (
+  capability: "database.read" | "database.write",
+) {
+  const invocation = yield* McpInvocationContext;
+  if (!invocation.capabilities.has(capability)) {
+    return yield* new DatabaseToolError({
+      reason: "not-configured",
+      message: `This MCP credential does not allow ${capability}.`,
+    });
+  }
+  return invocation;
+});

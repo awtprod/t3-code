@@ -1,4 +1,4 @@
-// @effect-diagnostics globalDate:off
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off
 import * as NodeCrypto from "node:crypto";
 
 import {

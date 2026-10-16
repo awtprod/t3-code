@@ -736,78 +736,78 @@ export const make = Effect.gen(function* () {
     );
 
   const encodeClaims = Schema.encodeEffect(Schema.fromJsonString(SessionClaims));
-  const issue: SessionStore["Service"]["issue"] = Effect.fn("SessionStore.issue")(
-    function* (input) {
-      const sessionId = AuthSessionId.make(
-        yield* crypto
-          .randomUUIDv4()
-          .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ cause }))),
-      );
-      const issuedAt = yield* DateTime.now;
-      const expiresAt = DateTime.add(issuedAt, {
-        milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
-      });
-      const claims: SessionClaims = {
-        v: 1,
-        kind: "session",
-        sid: sessionId,
-        sub: input?.subject ?? "browser",
-        scopes: input?.scopes ?? AuthStandardClientScopes,
-        method: input?.method ?? "browser-session-cookie",
-        ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
-        ...(input?.runtimeModeCeiling ? { rtc: input.runtimeModeCeiling } : {}),
-        iat: issuedAt.epochMilliseconds,
-        exp: expiresAt.epochMilliseconds,
-      };
+  type IssueInput = Parameters<SessionStore["Service"]["issue"]>[0];
+  /** Builds the signed token and its storage record without persisting either. */
+  const prepareSession = Effect.fn("SessionStore.prepareSession")(function* (input: IssueInput) {
+    const sessionId = AuthSessionId.make(
+      yield* crypto
+        .randomUUIDv4()
+        .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ cause }))),
+    );
+    const issuedAt = yield* DateTime.now;
+    const expiresAt = DateTime.add(issuedAt, {
+      milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
+    });
+    const claims: SessionClaims = {
+      v: 1,
+      kind: "session",
+      sid: sessionId,
+      sub: input?.subject ?? "browser",
+      scopes: input?.scopes ?? AuthStandardClientScopes,
+      method: input?.method ?? "browser-session-cookie",
+      ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
+      ...(input?.runtimeModeCeiling ? { rtc: input.runtimeModeCeiling } : {}),
+      iat: issuedAt.epochMilliseconds,
+      exp: expiresAt.epochMilliseconds,
+    };
 
-      const encodedPayload = yield* encodeClaims(claims).pipe(
-        Effect.map(base64UrlEncode),
-        Effect.mapError(
-          (cause) =>
-            new SessionCredentialIssueError({
+    const encodedPayload = yield* encodeClaims(claims).pipe(
+      Effect.map(base64UrlEncode),
+      Effect.mapError(
+        (cause) =>
+          new SessionCredentialIssueError({
+            sessionId,
+            cause: new SessionClaimsEncodingError({
               sessionId,
-              cause: new SessionClaimsEncodingError({
-                sessionId,
-                operation: "encode_session_claims",
-                cause,
-              }),
+              operation: "encode_session_claims",
+              cause,
             }),
-        ),
-      );
-      const signature = signPayload(encodedPayload, signingSecret);
-      const client = input?.client ?? createDefaultClientMetadata();
-      const sessionRecord = {
+          }),
+      ),
+    );
+    const signature = signPayload(encodedPayload, signingSecret);
+    const client = input?.client ?? createDefaultClientMetadata();
+    const sessionRecord = {
+      sessionId,
+      subject: claims.sub,
+      scopes: claims.scopes,
+      method: claims.method,
+      client: {
+        label: client.label ?? null,
+        ipAddress: client.ipAddress ?? null,
+        userAgent: client.userAgent ?? null,
+        deviceType: client.deviceType,
+        os: client.os ?? null,
+        browser: client.browser ?? null,
+      },
+      issuedAt,
+      expiresAt,
+    } satisfies AuthSessions.CreateAuthSessionInput;
+    return {
+      sessionRecord,
+      claims,
+      client,
+      issued: {
         sessionId,
-        subject: claims.sub,
-        scopes: claims.scopes,
+        token: `${encodedPayload}.${signature}`,
         method: claims.method,
-        client: {
-          label: client.label ?? null,
-          ipAddress: client.ipAddress ?? null,
-          userAgent: client.userAgent ?? null,
-          deviceType: client.deviceType,
-          os: client.os ?? null,
-          browser: client.browser ?? null,
-        },
-        issuedAt,
-        expiresAt,
-      } satisfies AuthSessions.CreateAuthSessionInput;
-      return {
-        sessionRecord,
-        claims,
         client,
-        issued: {
-          sessionId,
-          token: `${encodedPayload}.${signature}`,
-          method: claims.method,
-          client,
-          expiresAt,
-          scopes: claims.scopes,
-          ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
-        } satisfies IssuedSession,
-      };
-    },
-  );
+        expiresAt,
+        scopes: claims.scopes,
+        ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
+      } satisfies IssuedSession,
+    };
+  });
 
   const issue: SessionStore["Service"]["issue"] = Effect.fn("SessionStore.issue")(
     function* (input) {

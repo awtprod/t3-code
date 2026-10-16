@@ -1,4 +1,4 @@
-// @effect-diagnostics globalFetch:off preferSchemaOverJson:off
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off preferSchemaOverJson:off
 /**
  * Dependency-free Google OAuth for the YouTube publishing connection.
  *

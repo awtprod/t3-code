@@ -4,6 +4,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import { resolveTrustedHostExecutable } from "./HostGitSecurity.ts";
 import * as Hex from "effect/encoding/Hex";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";

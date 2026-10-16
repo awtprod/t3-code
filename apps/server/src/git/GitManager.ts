@@ -1,5 +1,6 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
+import * as ByteSize from "effect/ByteSize";
 import * as Cache from "effect/Cache";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -847,8 +848,7 @@ export const make = Effect.gen(function* () {
           );
         case "repo_conventions": {
           const subjects = yield* readRecentCommitSubjects(cwd);
-          const root = yield* fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => null));
-          const agentInstructions = readRepositoryInstructions(root, "AGENTS.md");
+          const agentInstructions = yield* readRepositoryInstructions(cwd, "AGENTS.md");
           const isClaudeWriter =
             settings.modelSelection.instanceId === "claudeAgent" ||
             (yield* providerRegistry.getProviders).some(
@@ -857,7 +857,7 @@ export const make = Effect.gen(function* () {
                 provider.driver === "claudeAgent",
             );
           const claudeInstructions = isClaudeWriter
-            ? readRepositoryInstructions(root, "CLAUDE.md")
+            ? yield* readRepositoryInstructions(cwd, "CLAUDE.md")
             : "";
           const examples = [
             ...(subjects.length > 0

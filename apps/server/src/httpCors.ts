@@ -11,4 +11,19 @@ export const browserApiCorsAllowedHeaders = [
 ] as const;
 
 /** Origins of the Electron renderer, packaged and dev. */
-export const DESKTOP_RENDERER_ORIGINS = ["t3code://app", "t3code-dev://app"] as const;
+/**
+ * Origins the Electron renderer loads from.
+ *
+ * The renderer is served from a custom scheme rather than over HTTP, so its
+ * origin matches no `Host` header the server could ever see and has to be named
+ * explicitly. Shared by the CORS layer (`./http.ts`) and the WebSocket origin
+ * check (`./ws.ts`) so the two cannot drift into disagreeing about which
+ * clients are legitimate.
+ */
+export const DESKTOP_RENDERER_ORIGINS = [
+  "commandcenter://app",
+  "commandcenter-dev://app",
+  // Retained for the existing T3 mobile clients and upstream-compatible builds.
+  "t3code://app",
+  "t3code-dev://app",
+] as const;

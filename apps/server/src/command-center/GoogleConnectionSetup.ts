@@ -308,11 +308,13 @@ export const layer = Layer.effect(
       const prepared = prepareGoogleAuthorizationUrl(result.auth_url, input.email);
       if (prepared === undefined)
         return yield* connectorError("Google setup returned an invalid authorization URL.");
-      const sessionId = yield* crypto.randomUUIDv4.pipe(
-        Effect.mapError((cause) =>
-          connectorError("Could not create a Google setup session.", cause),
-        ),
-      );
+      const sessionId = yield* crypto
+        .randomUUIDv4()
+        .pipe(
+          Effect.mapError((cause) =>
+            connectorError("Could not create a Google setup session.", cause),
+          ),
+        );
       const now = yield* DateTime.now;
       const expiresAt = DateTime.add(now, { minutes: GOOGLE_OAUTH_SESSION_TTL_MINUTES });
       yield* Ref.update(sessions, (current) => {

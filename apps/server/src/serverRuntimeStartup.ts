@@ -45,6 +45,21 @@ import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import { forkParked, forkParkedFiber } from "./serverActivation.ts";
+import * as Schedule from "effect/Schedule";
+import * as Scope from "effect/Scope";
+import * as WorktreeCleanup from "./worktreeCleanup.ts";
+import * as HostUsage from "./resourceTelemetry/HostUsage.ts";
+import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
+import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
+import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
+import {
+  type CommandCenterAuditChainVerification,
+  makeCommandCenterAuditLog,
+} from "./command-center/AuditLog.ts";
+import * as RunRecoveryCoordinator from "./command-center/RunRecoveryCoordinator.ts";
+import * as CommandCenterService from "./command-center/Service.ts";
+import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
@@ -359,6 +374,66 @@ interface StartupOptions {
   readonly abort?: (error: ServerRuntimeStartupError) => Effect.Effect<void>;
 }
 
+export class CommandCenterAuditIntegrityError extends Schema.TaggedError<CommandCenterAuditIntegrityError>()(
+  "CommandCenterAuditIntegrityError",
+  {
+    eventCount: Schema.Number,
+    headSequence: Schema.NullOr(Schema.Number),
+    invalidSequence: Schema.NullOr(Schema.Number),
+    reason: Schema.Literals(["previous-hash", "event-hash", "chain-head"]),
+  },
+) {
+  override get message(): string {
+    return "Command Center audit history failed integrity verification.";
+  }
+}
+
+/** Fail closed before starting any worker that can recover or dispatch work. */
+export const startCommandCenterWorkersAfterAuditVerification = <EV, RV, EW, RW>(
+  verification: Effect.Effect<CommandCenterAuditChainVerification, EV, RV>,
+  startWorkers: Effect.Effect<void, EW, RW>,
+) =>
+  Effect.gen(function* () {
+    const result = yield* runStartupPhase("command-center.audit.verify", verification);
+    if (!result.valid) {
+      return yield* new CommandCenterAuditIntegrityError({
+        eventCount: result.eventCount,
+        headSequence: result.headSequence,
+        invalidSequence: result.invalidSequence ?? null,
+        reason: result.reason ?? "chain-head",
+      });
+    }
+    yield* startWorkers;
+  });
+
+export const verifyConfiguredGoogleConnections = (
+  commandCenter: Pick<CommandCenterService.CommandCenterService["Service"], "queryConnections">,
+  googleReadConnector: Pick<GoogleReadConnector.GoogleReadConnector["Service"], "verify">,
+): Effect.Effect<void> =>
+  commandCenter.queryConnections({}).pipe(
+    Effect.flatMap(({ connections }) =>
+      Effect.forEach(
+        connections.filter((connection) => connection.kind === "google"),
+        (connection) =>
+          googleReadConnector
+            .verify({ spaceId: connection.spaceId, connectionId: connection.id })
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Google read connection is unavailable.", {
+                  spaceId: connection.spaceId,
+                  connectionId: connection.id,
+                  reason: cause.reason,
+                }),
+              ),
+            ),
+        { concurrency: 4, discard: true },
+      ),
+    ),
+    Effect.catch((cause) =>
+      Effect.logWarning("Could not initialize Google read connection health.", { cause }),
+    ),
+  );
+
 export const startEffectWorkerWithRelay = Effect.fn(
   "ServerRuntimeStartup.startEffectWorkerWithRelay",
 )(function* <WorkerContext, RelayContext>(input: {
@@ -431,6 +506,19 @@ const make = (options?: StartupOptions) =>
     const crypto = yield* Crypto.Crypto;
     const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
     const commandCenterAuditLog = yield* makeCommandCenterAuditLog;
+    const worktreeCleanup = yield* WorktreeCleanup.WorktreeCleanup;
+    const hostUsage = yield* HostUsage.HostUsage;
+    const automationScheduleRunner = yield* AutomationScheduleRunner.AutomationScheduleRunner;
+    const spaceAgentWaker = yield* SpaceAgentWaker.SpaceAgentWaker;
+    const automationRecoveryCoordinator =
+      yield* AutomationRecoveryCoordinator.AutomationRecoveryCoordinator;
+    const runRecoveryCoordinator = yield* RunRecoveryCoordinator.RunRecoveryCoordinator;
+    const commandCenter = yield* CommandCenterService.CommandCenterService;
+    const googleReadConnector = yield* GoogleReadConnector.GoogleReadConnector;
+    const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
+    // Command Center workers live until the runtime shuts down.
+    const commandCenterWorkerScope = yield* Scope.make("sequential");
+    yield* Effect.addFinalizer(() => Scope.close(commandCenterWorkerScope, Exit.void));
 
     const commandGate = yield* makeCommandGate;
     const httpListening = yield* Deferred.make<void>();
@@ -493,6 +581,43 @@ const make = (options?: StartupOptions) =>
             }),
           ),
         ),
+      );
+
+      yield* Effect.logDebug("startup phase: verifying audit history before workers");
+      yield* startCommandCenterWorkersAfterAuditVerification(
+        commandCenterAuditLog.verify,
+        Effect.gen(function* () {
+          yield* runStartupPhase(
+            "command-center.workers.start",
+            Effect.gen(function* () {
+              yield* forkParked(
+                worktreeCleanup.start().pipe(Scope.provide(commandCenterWorkerScope)),
+              );
+              yield* forkParked(hostUsage.start().pipe(Scope.provide(commandCenterWorkerScope)));
+              yield* forkParked(
+                automationScheduleRunner.start().pipe(Scope.provide(commandCenterWorkerScope)),
+              );
+              yield* forkParked(
+                spaceAgentWaker.start().pipe(Scope.provide(commandCenterWorkerScope)),
+              );
+              yield* forkParked(
+                automationRecoveryCoordinator.start().pipe(Scope.provide(commandCenterWorkerScope)),
+              );
+            }),
+          );
+          yield* forkParked(
+            verifyConfiguredGoogleConnections(commandCenter, googleReadConnector).pipe(
+              Effect.andThen(
+                commandCenter.syncConfiguration({ force: true }).pipe(
+                  Effect.catch((cause) =>
+                    Effect.logWarning("Could not refresh Command Center configuration.", { cause }),
+                  ),
+                  Effect.repeat(Schedule.spaced(Duration.seconds(10))),
+                ),
+              ),
+            ),
+          ).pipe(Scope.provide(commandCenterWorkerScope));
+        }),
       );
 
       const welcomeBase = yield* resolveWelcomeBase;
@@ -642,6 +767,7 @@ const make = (options?: StartupOptions) =>
       yield* options?.activate ?? Effect.void;
       yield* Effect.logDebug("Accepting commands");
       yield* commandGate.signalCommandReady;
+      yield* runRecoveryCoordinator.start().pipe(Scope.provide(commandCenterWorkerScope));
       yield* Effect.logDebug("startup phase: publishing ready event");
       yield* runStartupPhase(
         "ready.publish",

@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Command Center module that predates the Effect platform port.
 import * as NodeCrypto from "node:crypto";
 import {
   AuthCommandCenterApproveScope,

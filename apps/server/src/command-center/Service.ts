@@ -2277,7 +2277,7 @@ export const layer = Layer.effect(
         const approvalExpiresAt = DateTime.formatIso(
           DateTime.add(nowDateTime, { hours: APPROVAL_TTL_HOURS }),
         );
-        const runId = yield* crypto.randomUUIDv4;
+        const runId = yield* crypto.randomUUIDv4();
         const state: RunType["status"] =
           route.status === "blocked"
             ? "failed"
@@ -2330,8 +2330,8 @@ export const layer = Layer.effect(
           `;
 
             if (route.approvalRequired) {
-              const approvalId = yield* crypto.randomUUIDv4;
-              const itemId = yield* crypto.randomUUIDv4;
+              const approvalId = yield* crypto.randomUUIDv4();
+              const itemId = yield* crypto.randomUUIDv4();
               const approvalPayload = makeCommandApprovalPayload({
                 command: input,
                 route,

@@ -91,7 +91,7 @@ export interface CommandReceiptStoreV2Shape {
 export class CommandReceiptStoreV2 extends Context.Service<
   CommandReceiptStoreV2,
   CommandReceiptStoreV2Shape
->()("t3/orchestration-v2/CommandReceiptStore/CommandReceiptStoreV2") {}
+>()("@awtprod/command-center/orchestration-v2/CommandReceiptStore/CommandReceiptStoreV2") {}
 
 /**
  * IMPLEMENTATIONS

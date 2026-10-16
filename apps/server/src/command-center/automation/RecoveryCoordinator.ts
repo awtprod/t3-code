@@ -37,7 +37,7 @@ export const make = Effect.gen(function* () {
   const runs = yield* AutomationRuns.AutomationRuns;
   const runtime = yield* AutomationRuntime.AutomationRuntime;
   const crypto = yield* Crypto.Crypto;
-  const workerId = `recovery:${yield* crypto.randomUUIDv4.pipe(Effect.orDie)}`;
+  const workerId = `recovery:${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`;
   const tickLock = yield* Semaphore.make(1);
   // The operator hold is enforced per execution by AutomationRuns: ticks keep
   // running for work created after start and leave held executions as they

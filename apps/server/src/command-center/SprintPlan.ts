@@ -966,7 +966,7 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
       if (spaces[0] === undefined)
         return yield* notFoundError(`Space '${input.spaceId}' was not found.`);
       const now = DateTime.formatIso(yield* DateTime.now);
-      const importId = yield* crypto.randomUUIDv4;
+      const importId = yield* crypto.randomUUIDv4();
       yield* sql`
         INSERT INTO command_center_sprint_plans (
           id, space_id, version, source_version, current_import_id, current_json,
@@ -1085,7 +1085,7 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
     );
     const now = DateTime.formatIso(yield* DateTime.now);
     const nextVersion = existing.version + 1;
-    const importId = yield* crypto.randomUUIDv4;
+    const importId = yield* crypto.randomUUIDv4();
     yield* sql`
       INSERT INTO command_center_sprint_plan_imports (
         id, plan_id, mutation_id, source_sha256, source_version, source_updated_at,

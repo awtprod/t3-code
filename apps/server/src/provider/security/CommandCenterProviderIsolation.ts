@@ -689,11 +689,13 @@ export const prepareCommandCenterCodexHome = Effect.fn(
   ) {
     const temporaryPath = path.join(
       path.dirname(targetPath),
-      `.cc-${yield* input.crypto.randomUUIDv4.pipe(
-        Effect.mapError((cause) =>
-          codexHomeError("Command Center could not stage its native sandbox helper.", cause),
-        ),
-      )}.tmp`,
+      `.cc-${yield* input.crypto
+        .randomUUIDv4()
+        .pipe(
+          Effect.mapError((cause) =>
+            codexHomeError("Command Center could not stage its native sandbox helper.", cause),
+          ),
+        )}.tmp`,
     );
     yield* fileSystem.writeFile(temporaryPath, contents, { flag: "wx", mode }).pipe(
       Effect.andThen(fileSystem.chmod(temporaryPath, mode)),
@@ -794,11 +796,13 @@ export const prepareCommandCenterCodexHome = Effect.fn(
       );
     const temporaryAuthPath = path.join(
       layout.homePath,
-      `.auth-${yield* input.crypto.randomUUIDv4.pipe(
-        Effect.mapError((cause) =>
-          codexHomeError("Command Center could not stage isolated Codex authentication.", cause),
-        ),
-      )}.tmp`,
+      `.auth-${yield* input.crypto
+        .randomUUIDv4()
+        .pipe(
+          Effect.mapError((cause) =>
+            codexHomeError("Command Center could not stage isolated Codex authentication.", cause),
+          ),
+        )}.tmp`,
     );
     yield* fileSystem.writeFile(temporaryAuthPath, auth, { flag: "wx", mode: 0o600 }).pipe(
       Effect.andThen(fileSystem.chmod(temporaryAuthPath, 0o600)),

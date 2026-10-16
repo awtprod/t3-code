@@ -12,7 +12,7 @@ import {
   CommandId,
   MessageId,
   type OrchestrationProjectShell,
-  type OrchestrationThreadShell,
+  type OrchestrationV2ThreadShell,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -28,8 +28,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
-import * as OrchestrationCommandDispatcher from "../orchestration/CommandDispatcher.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as OrchestrationBridge from "./OrchestrationBridge.ts";
 import { isManagedRepositoryWorkspacePath } from "./RepositoryProvisioningPolicy.ts";
 import {
   commandCenterModelSelection,
@@ -151,8 +150,7 @@ const selectSpaceAgentRepositoryProject = (input: {
 
 const make = Effect.gen(function* () {
   const service = yield* CommandCenterService.CommandCenterService;
-  const projection = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-  const commandDispatcher = yield* OrchestrationCommandDispatcher.OrchestrationCommandDispatcher;
+  const projection = yield* OrchestrationBridge.OrchestrationBridge;
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -210,7 +208,9 @@ const make = Effect.gen(function* () {
       projection,
       modelSelection,
       now,
-      dispatchCommand: commandDispatcher.dispatch,
+      // V2PORT: Space agent thread start emits V1 commands; the bridge fails them
+      // with V2PortPending until S2 maps the Space agent onto OrchestratorV2.
+      dispatchCommand: projection.dispatchCommand,
     }).pipe(
       Effect.mapError((cause) =>
         agentError("routing", "No project is available for the Space agent thread.", cause),
@@ -221,7 +221,7 @@ const make = Effect.gen(function* () {
 
   const startTurn = Effect.fn("SpaceAgent.startTurn")(function* (
     space: SpaceType,
-    existing: OrchestrationThreadShell | undefined,
+    existing: OrchestrationV2ThreadShell | undefined,
     input: { readonly text: string; readonly reason: SpaceAgentTurnReason | "bootstrap" },
   ) {
     const text = input.text.trim();
@@ -231,15 +231,18 @@ const make = Effect.gen(function* () {
         `A Space agent turn needs 1-${SPACE_AGENT_TURN_TEXT_MAX_CHARS} characters of text.`,
       );
     }
-    if (existing?.session?.activeTurnId != null) {
+    // A V2 shell reports work in flight as its active run.
+    if (existing?.activeRunId != null) {
       return yield* agentError("conflict", "The Space agent is already working on a turn.");
     }
     const threadId = ThreadId.make(spaceAgentThreadId(space.id));
     const { brief } = yield* service.spaceBrief({ spaceId: space.id });
     const now = DateTime.formatIso(yield* DateTime.now);
-    const nonce = yield* crypto.randomUUIDv4.pipe(
-      Effect.mapError((cause) => agentError("persistence", "Could not mint a turn id.", cause)),
-    );
+    const nonce = yield* crypto
+      .randomUUIDv4()
+      .pipe(
+        Effect.mapError((cause) => agentError("persistence", "Could not mint a turn id.", cause)),
+      );
     const message = {
       messageId: MessageId.make(`space-agent:${space.id}:message:${nonce}`),
       role: "user" as const,
@@ -247,9 +250,11 @@ const make = Effect.gen(function* () {
       attachments: [],
     };
     const commandId = CommandId.make(`space-agent:${space.id}:turn:${nonce}`);
+    // V2PORT: both turn starts below are V1 commands; the bridge fails them with
+    // V2PortPending until S2 maps the Space agent onto OrchestratorV2.
     if (existing !== undefined) {
-      const dispatched = yield* commandDispatcher
-        .dispatch({
+      const dispatched = yield* projection
+        .dispatchCommand({
           type: "thread.turn.start",
           commandId,
           threadId,
@@ -269,8 +274,8 @@ const make = Effect.gen(function* () {
     const modelSelection = commandCenterModelSelection(model);
     const projectId = yield* resolveProject(space, modelSelection, now);
     const title = `${space.displayName} agent`.slice(0, 80);
-    const dispatched = yield* commandDispatcher
-      .dispatch({
+    const dispatched = yield* projection
+      .dispatchCommand({
         type: "thread.turn.start",
         commandId,
         threadId,

@@ -32,6 +32,7 @@ import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
   AcpRegistryOperationError,
   CommandId,
+  UsageQueryError,
   authScopeResponse,
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
@@ -51,7 +52,7 @@ import {
   type OrchestrationV2Command,
   type GitActionProgressEvent,
   type GitManagerServiceError,
-  type MessageId,
+  MessageId,
   type AcpRegistryImportSessionInput,
   type AcpRegistryDeleteSessionInput,
   type AcpRegistryDisableProviderInput,
@@ -108,7 +109,6 @@ import {
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
   WS_METHODS,
-  WsCommandCenterRpcGroup,
   WsCoreRpcGroup,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -120,12 +120,6 @@ import {
   HttpServerResponse,
 } from "effect/http";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
-import {
-  HttpRouter,
-  HttpServerRequest,
-  HttpServerRespondable,
-  HttpServerResponse,
-} from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -242,6 +236,10 @@ import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
 import * as HostUsage from "./resourceTelemetry/HostUsage.ts";
+import * as WorktreeCleanup from "./worktreeCleanup.ts";
+import { resolveInteractiveEfficiency } from "./efficiency/EfficiencyRouting.ts";
+import { ProjectionTurnUsageRepository } from "./persistence/Services/ProjectionTurnUsage.ts";
+import { ProjectionTurnUsageRepositoryLive } from "./persistence/Layers/ProjectionTurnUsage.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
@@ -263,6 +261,7 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import { decideWebSocketOrigin } from "./auth/websocketOrigin.ts";
+import * as CommandCenterWsRpcHandlers from "./command-center/WsRpcHandlers.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "./httpCors.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import {
@@ -575,6 +574,10 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
+// Core handlers are implemented against the core group so the handler object
+// stays within the TypeScript instantiation budget; Command Center handlers
+// live in ./command-center/WsRpcHandlers.ts. RpcServer serves the merged group.
+const ServerWsCoreRpcGroup = WsCoreRpcGroup.middleware(RpcInstrumentation);
 // When a resuming client's cursor is more than this many events behind the
 // current head, skip the per-event catch-up replay and send a fresh shell
 // snapshot instead. Replaying each intervening event costs a shell refetch;
@@ -1230,7 +1233,7 @@ const layerWsRpc = (
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
 ) =>
-  ServerWsRpcGroup.toLayer(
+  ServerWsCoreRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
@@ -1876,7 +1879,7 @@ const layerWsRpc = (
         return result;
       });
 
-      const handlers = ServerWsRpcGroup.of({
+      const handlers = ServerWsCoreRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -2481,6 +2484,67 @@ const layerWsRpc = (
           }),
         [WS_METHODS.serverGetProcessDiagnostics]: (_input) => processDiagnostics.read,
         [WS_METHODS.serverGetHostResources]: (_input) => hostResources.read,
+        // Command Center: Resources pane disk usage and reclaim, usage analytics,
+        // and the efficiency settings preview.
+        [WS_METHODS.serverGetHostUsage]: (_input) => hostUsage.read,
+        [WS_METHODS.serverScanHostDiskUsage]: (_input) => hostUsage.scan,
+        [WS_METHODS.serverReclaimHostDiskArtifacts]: (input) => hostUsage.reclaim(input),
+        [WS_METHODS.usageQuery]: (input) =>
+          turnUsage.query(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new UsageQueryError({
+                  message: `Unable to read usage analytics: ${cause.message}`,
+                }),
+            ),
+          ),
+        [WS_METHODS.efficiencyPreviewDecision]: (input) =>
+          Effect.gen(function* () {
+            const threadId = ThreadId.make(input.threadId ?? "efficiency-preview-thread");
+            const shell = input.threadId
+              ? yield* threadManagement
+                  .getThreadShell(threadId)
+                  .pipe(Effect.orElseSucceed(() => null))
+              : null;
+            const [settings, providers] = yield* Effect.all([
+              serverSettings.getSettings,
+              providerRegistry.getProviders,
+            ]);
+            // Tier judgment is a per-message live signal; the settings preview
+            // shows only the deterministic rule/static routing. V2 shells carry
+            // no routing fields yet (S4), so the thread contributes only its
+            // project and model.
+            const resolution = resolveInteractiveEfficiency({
+              command: {
+                type: "thread.turn.start",
+                commandId: CommandId.make("efficiency-preview-command"),
+                threadId,
+                message: {
+                  messageId: MessageId.make("efficiency-preview-message"),
+                  role: "user",
+                  text: "",
+                  attachments: [],
+                },
+                modelSelection: input.modelSelection,
+                routingMode: "auto",
+                ...(input.tier === undefined ? {} : { efficiencyTier: input.tier }),
+                runtimeMode: "approval-required",
+                interactionMode: input.interactionMode,
+                createdAt: "1970-01-01T00:00:00.000Z",
+              },
+              ...(shell === null
+                ? {}
+                : { thread: { projectId: shell.projectId, modelSelection: shell.modelSelection } }),
+              settings: settings.efficiency,
+              providers,
+              ...(input.projectId === undefined ? {} : { projectIdOverride: input.projectId }),
+              attachmentCountOverride: input.attachmentCount,
+            });
+            return {
+              modelSelection: resolution.command.modelSelection ?? input.modelSelection,
+              decision: resolution.decision ?? null,
+            };
+          }),
         [WS_METHODS.serverGetProcessResourceHistory]: (input) =>
           processResourceMonitor.readHistory(input),
         [WS_METHODS.serverGetResourceTelemetryHistory]: (input) =>
@@ -3227,6 +3291,15 @@ export const layer = Layer.unwrap(
     const pullRequests = yield* PullRequestService.PullRequestService;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const sql = yield* SqlClient.SqlClient;
+    const config = yield* ServerConfig.ServerConfig;
+    // Origins no `Host` header can produce: the Vite dev server (the document
+    // is served there and proxied here, so the browser reports the dev origin)
+    // and the Electron renderer's custom scheme.
+    const allowedWebSocketOrigins = [
+      ...(config.devUrl ? [config.devUrl.origin] : []),
+      ...DESKTOP_RENDERER_ORIGINS,
+      ...config.devAllowedOrigins,
+    ];
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -3295,17 +3368,21 @@ export const layer = Layer.unwrap(
           return httpEffect;
         }).pipe(
           Effect.provide(
-            layerWsRpc(
-              session,
-              clientOrigin,
-              clientAnalyticsProps,
-              previewAutomationBroker,
-              serverBrowser,
+            Layer.mergeAll(
+              layerWsRpc(
+                session,
+                clientOrigin,
+                clientAnalyticsProps,
+                previewAutomationBroker,
+                serverBrowser,
+              ),
+              CommandCenterWsRpcHandlers.layerCommandCenterWsRpc(session),
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Request fibers run in the handlers' context, so this reporter sees
               // their defects, not the rest of the server's.
               Layer.provide(DefectReporter.layer),
+              Layer.provide(ProjectionTurnUsageRepositoryLive),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
               Layer.provide(AgentSessionScanner.layer),
               Layer.provide(ProviderMaintenanceRunner.layer),

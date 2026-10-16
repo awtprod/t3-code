@@ -227,7 +227,7 @@ export const make = Effect.gen(function* () {
         ...(itemId === undefined ? {} : { "relay.prospect.item_id": itemId }),
       });
       const now = yield* DateTime.now;
-      const jobId = yield* crypto.randomUUIDv4.pipe(
+      const jobId = yield* crypto.randomUUIDv4().pipe(
         Effect.mapError(
           (cause) =>
             new ApnsDeliveryQueueSendError({

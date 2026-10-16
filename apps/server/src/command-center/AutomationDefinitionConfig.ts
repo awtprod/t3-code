@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Command Center module that predates the Effect platform port.
 import { AutomationId } from "@command-center/core";
 import {
   CommandCenterAutomationSourceDefinition,

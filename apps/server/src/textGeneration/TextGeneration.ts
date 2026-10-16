@@ -38,7 +38,7 @@ export type {
  * TextGeneration - Service tag for commit and change request text generation.
  */
 export class TextGeneration extends Context.Service<TextGeneration, ProviderTextGeneration>()(
-  "t3/textGeneration/TextGeneration",
+  "@awtprod/command-center/textGeneration/TextGeneration",
 ) {}
 
 type TextGenerationOp =

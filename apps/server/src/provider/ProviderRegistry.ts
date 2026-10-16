@@ -148,7 +148,7 @@ export class ProviderRegistry extends Context.Service<
      */
     readonly streamChanges: Stream.Stream<ReadonlyArray<ServerProvider>>;
   }
->()("t3/provider/ProviderRegistry") {}
+>()("@awtprod/command-center/provider/ProviderRegistry") {}
 
 const loadProviders = (
   providerSources: ReadonlyArray<ProviderSnapshotSource>,

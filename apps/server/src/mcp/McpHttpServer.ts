@@ -40,6 +40,18 @@ import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import * as PreviewHandlers from "./toolkits/preview/handlers.ts";
+import { capabilitiesAllow, requiredCapabilityFromMeta } from "./ToolCapability.ts";
+import {
+  MODEL_RESULT_LIMITS,
+  capFirst,
+  capNewest,
+  capOpaqueResult,
+  capText,
+} from "./ToolResultBudget.ts";
+import { CommandCenterToolkitHandlersLive } from "./toolkits/command-center/handlers.ts";
+import { CommandCenterToolkit } from "./toolkits/command-center/tools.ts";
+import { SupabaseToolkitHandlersLive } from "./toolkits/supabase/handlers.ts";
+import { SupabaseToolkit } from "./toolkits/supabase/tools.ts";
 import {
   PreviewSnapshotTool,
   PreviewSnapshotToolkit,
@@ -114,7 +126,7 @@ export class McpClientAuthenticator extends Context.Service<
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<McpInvocationContext.McpInvocationScope | undefined>;
   }
->()("t3/mcp/McpHttpServer/McpClientAuthenticator") {}
+>()("@awtprod/command-center/mcp/McpHttpServer/McpClientAuthenticator") {}
 
 export const toolVisibleToCapabilities = (
   tool: McpSchema.Tool,
@@ -881,6 +893,18 @@ export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentHandlers.layer,
 );
 
+// Command Center: Space/Run scoped tools and the Supabase connector. Each tool
+// is hidden from and refused to credentials without its capability.
+export const layerCommandCenterToolkit = toolkitRegistration(
+  CommandCenterToolkit,
+  CommandCenterToolkitHandlersLive,
+);
+
+export const layerSupabaseToolkit = toolkitRegistration(
+  SupabaseToolkit,
+  SupabaseToolkitHandlersLive,
+);
+
 export const layerPullRequestsToolkit = toolkitRegistration(
   PullRequestsToolkit,
   PullRequestsHandlers.layer,
@@ -902,7 +926,7 @@ export const layerDeviceToolkit = Layer.mergeAll(
 );
 
 export const layerMcpTransport = McpServer.layerHttp({
-  name: "T3 Code",
+  name: "Command Center",
   version: packageJson.version,
   path: "/mcp",
   protocols: [McpProtocol.v2025_06_18],
@@ -919,6 +943,8 @@ export const layer = Layer.mergeAll(
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,
+  layerCommandCenterToolkit,
+  layerSupabaseToolkit,
   layerDeviceToolkit,
   layerHtmlToolkit,
 ).pipe(Layer.provideMerge(layerMcpTransport));

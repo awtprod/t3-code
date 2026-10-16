@@ -97,7 +97,7 @@ export class ProjectStoreV2 extends Context.Service<
       readonly projectIds?: ReadonlyArray<ProjectId>;
     }) => Effect.Effect<ReadonlyArray<OrchestrationProjectShell>, ProjectStoreV2Error>;
   }
->()("t3/orchestration-v2/ProjectStore/ProjectStoreV2") {}
+>()("@awtprod/command-center/orchestration-v2/ProjectStore/ProjectStoreV2") {}
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {

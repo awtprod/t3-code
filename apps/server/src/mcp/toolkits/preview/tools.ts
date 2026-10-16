@@ -32,7 +32,6 @@ import { Tool, Toolkit } from "effect/ai";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
-import { requireCapability } from "../../ToolCapability.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 
@@ -53,7 +52,7 @@ const PreviewActionResult = Schema.Struct(presentationFields).annotate({
 
 /** Drives the real browser and can destroy page state. */
 const browserTool = <T extends Tool.Any>(tool: T): T =>
-  previewTool(tool).annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, true) as T;
+  tool.annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, true) as T;
 
 /** Same open-world browser access, but the action does not destroy page state. */
 const safeBrowserTool = <T extends Tool.Any>(tool: T): T =>

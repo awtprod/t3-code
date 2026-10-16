@@ -1,4 +1,4 @@
-// @effect-diagnostics preferSchemaOverJson:off
+// @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off
 import * as NodeCrypto from "node:crypto";
 
 import { describe, expect, it } from "@effect/vitest";

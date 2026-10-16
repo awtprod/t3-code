@@ -1,11 +1,12 @@
 import {
   type CommandCenterEventEnvelope,
   type OrchestrationProjectShell,
+  type OrchestrationV2ThreadShell,
   ThreadId,
   type WebPushPreferences,
 } from "@t3tools/contracts";
 import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
-import { projectThreadAwareness } from "@t3tools/shared/agentAwareness";
+import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -25,12 +26,10 @@ import { CommandCenterEventStream } from "../command-center/EventStream.ts";
 import { spaceAgentThreadId } from "../command-center/SpaceAgentIds.ts";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as OrchestrationBridge from "../command-center/OrchestrationBridge.ts";
 import {
   agentAwarenessPublishIdentity,
   eventThreadId,
-  resolveAgentAwarenessRelayPublishSnapshot,
   sanitizeRelayAgentActivityState,
   shouldPublishAgentAwarenessEvent,
 } from "../relay/AgentAwarenessRelay.ts";
@@ -76,13 +75,24 @@ export class LocalWebPushNotifier extends Context.Service<
   }
 >()("@awtprod/command-center/webPush/LocalWebPushNotifier") {}
 
+/** The relay's activity state for a V2 thread shell, sanitized the same way. */
+const awarenessState = (
+  environmentId: Parameters<typeof projectThreadAwarenessV2>[0]["environmentId"],
+  thread: Option.Option<OrchestrationV2ThreadShell>,
+  project: Option.Option<OrchestrationProjectShell>,
+): RelayAgentActivityState | null =>
+  Option.isSome(thread) && Option.isSome(project)
+    ? sanitizeRelayAgentActivityState(
+        projectThreadAwarenessV2({ environmentId, project: project.value, thread: thread.value }),
+      )
+    : null;
+
 export const make = Effect.gen(function* () {
   const webPushConfig = yield* WebPushConfig;
   const subscriptions = yield* WebPushSubscriptions;
   const sender = yield* WebPushSender;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
-  const snapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-  const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+  const orchestration = yield* OrchestrationBridge.OrchestrationBridge;
   const commandCenterEvents = yield* CommandCenterEventStream;
   const sql = yield* SqlClient.SqlClient;
 
@@ -234,17 +244,11 @@ export const make = Effect.gen(function* () {
     // states that merely existed at boot).
     yield* Deferred.await(seedComplete);
     const environmentId = yield* serverEnvironment.getEnvironmentId;
-    const thread = yield* snapshotQuery.getThreadShellById(threadId);
+    const thread = yield* orchestration.getThreadShellById(threadId);
     const project = Option.isSome(thread)
-      ? yield* snapshotQuery.getProjectShellById(thread.value.projectId)
+      ? yield* orchestration.getProjectShellById(thread.value.projectId)
       : Option.none<OrchestrationProjectShell>();
-    const snapshot = resolveAgentAwarenessRelayPublishSnapshot({
-      environmentId,
-      threadId,
-      thread,
-      project,
-    });
-    const state = snapshot.state;
+    const state = awarenessState(environmentId, thread, project);
     const publishIdentity = agentAwarenessPublishIdentity(state);
     const published = yield* Ref.get(publishedIdentityByThreadRef);
     const nowMs = (yield* DateTime.now).epochMilliseconds;
@@ -297,16 +301,16 @@ export const make = Effect.gen(function* () {
         return;
       }
       const environmentId = yield* serverEnvironment.getEnvironmentId;
-      const snapshot = yield* snapshotQuery.getShellSnapshot();
+      const snapshot = yield* orchestration.getShellSnapshot();
       const projectById = new Map(snapshot.projects.map((project) => [project.id, project]));
       const seeded = new Map<ThreadId, string>();
       for (const thread of snapshot.threads) {
         const project = projectById.get(thread.projectId);
-        const state = project
-          ? sanitizeRelayAgentActivityState(
-              projectThreadAwareness({ environmentId, project, thread }),
-            )
-          : null;
+        const state = awarenessState(
+          environmentId,
+          Option.some(thread),
+          Option.fromNullishOr(project),
+        );
         seeded.set(thread.id, agentAwarenessPublishIdentity(state));
       }
       yield* Ref.set(publishedIdentityByThreadRef, seeded);
@@ -348,13 +352,18 @@ export const make = Effect.gen(function* () {
       // seed is buffered in the worker rather than lost; each queued processThread
       // waits on `seedComplete` (below) before comparing against the seed.
       yield* forkParked(
-        Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
-          const threadId = eventThreadId(event);
-          if (threadId === null || !shouldPublishAgentAwarenessEvent(event)) {
+        Stream.runForEach(orchestration.streamThreadEvents, (event) => {
+          if (!shouldPublishAgentAwarenessEvent(event)) {
             return Effect.void;
           }
-          return worker.enqueue(threadId);
-        }),
+          return worker.enqueue(eventThreadId(event));
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("web push notifier thread event stream failed", {
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        ),
       );
       yield* forkParked(followSpaceAgentQuestions.pipe(Effect.ignore));
       // Seed the last-seen identities, then open the gate. Startup catch-up never

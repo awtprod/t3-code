@@ -23,6 +23,13 @@ export interface McpCredentialRequest {
    */
   readonly browserToolsAvailable?: boolean;
   readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
+  /** Local project owning the thread, when issued through project orchestration. */
+  readonly projectId?: ProjectId;
+  readonly cwd?: string;
+  /** Supabase connector grant for the thread's project database connection. */
+  readonly databaseAccess?: "read" | "write";
+  readonly spaceId?: SpaceId;
+  readonly repositoryId?: RepositoryId;
 }
 
 export interface McpThreadScope {
@@ -199,6 +206,17 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
       const browserToolsAvailable = request.browserToolsAvailable ?? true;
+      // A Command Center Run or Space agent thread carries its registered scope;
+      // its capabilities replace the request's so tool input cannot widen them.
+      const registeredScope = yield* scopeForThread(request.threadId);
+      const spaceId = request.spaceId ?? registeredScope?.spaceId;
+      const repositoryId = request.repositoryId ?? registeredScope?.repositoryId;
+      const databaseCapabilities: ReadonlyArray<McpInvocationContext.McpCapability> =
+        request.databaseAccess === "write"
+          ? ["database.read", "database.write"]
+          : request.databaseAccess === "read"
+            ? ["database.read"]
+            : [];
       const scope: McpInvocationContext.McpThreadInvocationScope = {
         environmentId,
         requestNamespace: providerSessionId,
@@ -212,8 +230,17 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           "orchestration",
           "worktree",
           "pull-requests",
-          ...(request.capabilities ?? (browserToolsAvailable ? (["preview"] as const) : [])),
+          ...(registeredScope?.capabilities ??
+            request.capabilities ??
+            (browserToolsAvailable ? (["preview"] as const) : [])),
+          ...databaseCapabilities,
         ]),
+        ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
+        ...(request.cwd?.trim() ? { cwd: request.cwd.trim() } : {}),
+        ...(spaceId === undefined ? {} : { spaceId }),
+        ...(repositoryId === undefined ? {} : { repositoryId }),
+        memoryWriteMode: registeredScope?.memoryWriteMode ?? "propose",
+        ...(registeredScope?.role === undefined ? {} : { role: registeredScope.role }),
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records, threadScopes }) => {
@@ -344,8 +371,36 @@ export const issueActiveMcpCredential = (
 export const touchActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.touch(threadId) : Effect.void;
 
-const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
-  activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeThread(threadId) : Effect.void;
+/**
+ * Revokes a thread's credentials and drops its Command Center scope, so a
+ * finished Run or Space agent thread cannot keep calling scoped tools.
+ */
+export const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry
+        .revokeThread(threadId)
+        .pipe(Effect.andThen(activeMcpSessionRegistry.unregisterThreadScope(threadId)))
+    : Effect.void;
+
+export const registerActiveMcpThreadScope = (
+  threadId: ThreadId,
+  scope: McpThreadScope,
+): Effect.Effect<boolean> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry.registerThreadScope(threadId, scope).pipe(Effect.as(true))
+    : Effect.succeed(false);
+
+/**
+ * Whether a thread is bound to a Command Center scope (registered for a Run,
+ * or durable for a Space agent). Such threads need a credential even when no
+ * browser or database tools are enabled.
+ */
+export const hasActiveMcpThreadScope = (threadId: ThreadId): Effect.Effect<boolean> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry
+        .scopeForThread(threadId)
+        .pipe(Effect.map((scope) => scope !== undefined))
+    : Effect.succeed(false);
 
 const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeAll : Effect.void;

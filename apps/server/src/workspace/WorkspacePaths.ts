@@ -17,6 +17,7 @@ import * as Schema from "effect/Schema";
 
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 
 /** The probe is a liveness check, not real work; it must not hang a create. */
 const PROBE_TIMEOUT_MS = 10_000;

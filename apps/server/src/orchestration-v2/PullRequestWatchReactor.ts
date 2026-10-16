@@ -228,7 +228,7 @@ export class PullRequestWatchReactor extends Context.Service<
     /** One pass over every watched pull request. */
     readonly sweep: Effect.Effect<void>;
   }
->()("t3/orchestration-v2/PullRequestWatchReactor") {}
+>()("@awtprod/command-center/orchestration-v2/PullRequestWatchReactor") {}
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {

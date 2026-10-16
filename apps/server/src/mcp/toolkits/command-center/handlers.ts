@@ -12,8 +12,9 @@ import { googleCapabilityForOperation } from "../../../command-center/GoogleCapa
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
 import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
 import { commandCenterProviderAvailability } from "../../../command-center/ProviderAvailability.ts";
-import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
 import { CommandCenterToolkit } from "./tools.ts";
 
 const bySpace = <A extends { readonly spaceId: string }>(
@@ -62,7 +63,21 @@ const requireScopedSpace = Effect.fn("CommandCenterToolkit.requireScopedSpace")(
       });
     }
   }
-  return { ...scope, spaceId: scope.spaceId };
+  // Command Center scopes are minted only for agent thread credentials; flatten
+  // the V2 thread caller so tools can attribute writes to the thread.
+  if (scope.thread === undefined) {
+    return yield* new CommandCenterError({
+      reason: "validation",
+      message: "Command Center tools need an agent thread credential.",
+    });
+  }
+  return {
+    ...scope,
+    spaceId: scope.spaceId,
+    threadId: scope.thread.threadId,
+    providerSessionId: scope.thread.providerSessionId,
+    providerInstanceId: scope.thread.providerInstanceId,
+  };
 });
 
 export const memoryVisibleToScope = (
@@ -229,9 +244,9 @@ const invocationAuthoritiesMatch = (
 ): boolean =>
   left.spaceId === right.spaceId &&
   left.repositoryId === right.repositoryId &&
-  left.threadId === right.threadId &&
-  left.providerSessionId === right.providerSessionId &&
-  left.providerInstanceId === right.providerInstanceId;
+  left.thread?.threadId === right.thread?.threadId &&
+  left.thread?.providerSessionId === right.thread?.providerSessionId &&
+  left.thread?.providerInstanceId === right.thread?.providerInstanceId;
 
 export const resolveRunStartScope = (input: {
   readonly requestedSpaceId?: string;
@@ -685,4 +700,23 @@ const handlers = {
     }),
 } satisfies Parameters<typeof CommandCenterToolkit.toLayer>[0];
 
-export const CommandCenterToolkitHandlersLive = CommandCenterToolkit.toLayer(handlers);
+/** Every Command Center tool declares its access (see `McpToolAccess`). */
+export const CommandCenterToolkitHandlersLive = McpToolAccess.toLayer(CommandCenterToolkit, {
+  cc_spaces_list: McpToolAccess.reads(handlers.cc_spaces_list),
+  cc_items_list: McpToolAccess.reads(handlers.cc_items_list),
+  cc_memory_list: McpToolAccess.reads(handlers.cc_memory_list),
+  cc_memory_search: McpToolAccess.reads(handlers.cc_memory_search),
+  cc_space_brief: McpToolAccess.reads(handlers.cc_space_brief),
+  cc_automations_list: McpToolAccess.reads(handlers.cc_automations_list),
+  cc_runs_list: McpToolAccess.reads(handlers.cc_runs_list),
+  cc_google_read: McpToolAccess.reads(handlers.cc_google_read),
+  cc_space_activity: McpToolAccess.reads(handlers.cc_space_activity),
+  // Writes check their Command Center capability in the handler.
+  cc_items_create: McpToolAccess.writesWithCapability(handlers.cc_items_create),
+  cc_items_update: McpToolAccess.writesWithCapability(handlers.cc_items_update),
+  cc_memory_propose: McpToolAccess.writesWithCapability(handlers.cc_memory_propose),
+  cc_automations_create: McpToolAccess.writesWithCapability(handlers.cc_automations_create),
+  cc_automations_save: McpToolAccess.writesWithCapability(handlers.cc_automations_save),
+  cc_runs_start: McpToolAccess.writesWithCapability(handlers.cc_runs_start),
+  cc_automations_run: McpToolAccess.writesWithCapability(handlers.cc_automations_run),
+});

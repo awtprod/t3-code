@@ -9,6 +9,7 @@ import {
   SpaceId,
 } from "@command-center/core";
 import {
+  OrchestratorMcpFailure,
   CommandCenterError,
   CommandCenterAutomationExecution,
   CommandCenterAutomationDefinitionCreateInput,
@@ -40,11 +41,18 @@ import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
 import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
-import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { commandCenterCapability } from "../../ToolCapability.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 
-const failure = Schema.Union([CommandCenterError, CommandCenterMcpCapabilityUnavailableError]);
+// `McpToolAccess` refuses a write from a read-only client or a caller whose run is not
+// live with `OrchestratorMcpFailure`, so every tool can fail with it.
+const failure = Schema.Union([
+  CommandCenterError,
+  CommandCenterMcpCapabilityUnavailableError,
+  OrchestratorMcpFailure,
+]);
 
 const scopedInput = Schema.Struct({ spaceId: Schema.optional(SpaceId) });
 
@@ -71,6 +79,7 @@ const SpaceListResult = Schema.Struct({
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
+  ThreadManagementService.ThreadManagementService,
   CommandCenterService.CommandCenterService,
   AutomationRuns.AutomationRuns,
   MemorySearchIndex.MemorySearchIndex,

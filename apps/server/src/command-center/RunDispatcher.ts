@@ -12,7 +12,6 @@ import {
   SpacePolicy as SpacePolicySchema,
 } from "@command-center/core";
 import {
-  type ClientOrchestrationCommand,
   CommandCenterCommandSubmitInput,
   type CommandCenterCommandSubmitInput as CommandCenterCommandInput,
   CommandId,
@@ -39,7 +38,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerConfig from "../config.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as OrchestrationBridge from "./OrchestrationBridge.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
 import { makeCommandApprovalPayload } from "./CommandApproval.ts";
@@ -119,7 +118,7 @@ export interface RunRecoveryAuthorization {
 }
 
 export type DispatchClientCommand<E, R> = (
-  command: ClientOrchestrationCommand,
+  command: OrchestrationBridge.LegacyOrchestrationCommand,
 ) => Effect.Effect<{ readonly sequence: number }, E, R>;
 
 export interface RunDispatcherShape {
@@ -664,7 +663,7 @@ export const resolveCommandCenterSystemProject = <E, R>(input: {
   readonly baseDir: string;
   readonly fileSystem: FileSystem.FileSystem;
   readonly path: Path.Path;
-  readonly projection: ProjectionSnapshotQuery.ProjectionSnapshotQueryShape;
+  readonly projection: OrchestrationBridge.OrchestrationBridgeShape;
   readonly modelSelection: {
     readonly instanceId: ProviderInstanceId;
     readonly model: string;
@@ -1117,7 +1116,7 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
             route.repositoryId === null
               ? ("approval-required" as const)
               : ("auto-accept-edits" as const);
-          const command: ClientOrchestrationCommand = {
+          const command: OrchestrationBridge.LegacyOrchestrationCommand = {
             type: "thread.turn.start",
             commandId: CommandId.make(`cc:run:${run.id}:turn`),
             threadId,
@@ -1238,7 +1237,7 @@ const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const projection = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const projection = yield* OrchestrationBridge.OrchestrationBridge;
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const sourceControlRepositories =
@@ -2124,7 +2123,7 @@ const make = Effect.gen(function* () {
     queueApproved,
     markFailed,
     recordDispatch,
-    randomUUID: crypto.randomUUIDv4.pipe(Effect.orDie),
+    randomUUID: crypto.randomUUIDv4().pipe(Effect.orDie),
     now: Effect.map(DateTime.now, DateTime.formatIso),
     registerScope: McpSessionRegistry.registerActiveMcpThreadScope,
     unregisterScope: McpSessionRegistry.revokeActiveMcpThread,

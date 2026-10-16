@@ -256,7 +256,7 @@ export interface EffectOutboxV2Shape {
 }
 
 export class EffectOutboxV2 extends Context.Service<EffectOutboxV2, EffectOutboxV2Shape>()(
-  "t3/orchestration-v2/EffectOutbox/EffectOutboxV2",
+  "@awtprod/command-center/orchestration-v2/EffectOutbox/EffectOutboxV2",
 ) {}
 
 type EffectRow = {

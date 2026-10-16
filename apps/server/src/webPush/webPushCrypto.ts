@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Web Push VAPID/ECE crypto needs node:crypto ECDH and HKDF primitives.
 // Copied from infra/relay/src/agentActivity/webPushCrypto.ts — keep in sync.
 import * as NodeCrypto from "node:crypto";
 

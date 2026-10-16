@@ -1,11 +1,27 @@
-import { ORCHESTRATION_V2_WS_METHODS, WS_METHODS, type WsRpcGroup } from "@t3tools/contracts";
+import {
+  INSTAGRAM_REEL_METHODS,
+  ORCHESTRATION_V2_WS_METHODS,
+  WS_METHODS,
+  type WsCommandCenterRpcGroup,
+  type WsRpcGroup,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
 
+import { COMMAND_CENTER_RPC_SCOPE_ENTRIES } from "../command-center/RpcAuthorization.ts";
 import { rpcRequestDuration, rpcRequestsTotal, withMetrics } from "./Metrics.ts";
+
+type CommandCenterRpcMethod = RpcGroup.Rpcs<typeof WsCommandCenterRpcGroup>["_tag"];
+
+// Every Command Center RPC has a scope entry (RpcAuthorization fails closed on a
+// missing one), so the same list names their aggregate.
+const COMMAND_CENTER_RPC_AGGREGATES = Object.fromEntries([
+  ...COMMAND_CENTER_RPC_SCOPE_ENTRIES.map(([method]) => [method, "command-center"] as const),
+  ...Object.values(INSTAGRAM_REEL_METHODS).map((method) => [method, "command-center"] as const),
+]) as Readonly<Record<CommandCenterRpcMethod, "command-center">>;
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
@@ -15,6 +31,12 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  * prefix. Adding an RPC to `WsRpcGroup` without a label is a type error.
  */
 const RPC_AGGREGATES = {
+  ...COMMAND_CENTER_RPC_AGGREGATES,
+  [WS_METHODS.usageQuery]: "usage",
+  [WS_METHODS.efficiencyPreviewDecision]: "efficiency",
+  [WS_METHODS.serverGetHostUsage]: "server",
+  [WS_METHODS.serverScanHostDiskUsage]: "server",
+  [WS_METHODS.serverReclaimHostDiskArtifacts]: "server",
   [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: "orchestrationV2",
   [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: "orchestration",

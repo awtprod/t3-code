@@ -49,7 +49,6 @@ export type BuiltInDriversEnv =
   | CodexDriverEnv
   | CursorDriverEnv
   | GrokDriverEnv
-  | KimiDriverEnv
   | OpenCodeDriverEnv
   | PiDriverEnv
   | MuseDriverEnv;
@@ -65,7 +64,6 @@ export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv
   CursorDriver,
   GrokDriver,
   OpenCodeDriver,
-  KimiDriver,
   AntigravityDriver,
   PiDriver,
   MuseDriver,

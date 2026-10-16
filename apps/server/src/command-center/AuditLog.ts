@@ -168,7 +168,7 @@ export const makeCommandCenterAuditLog = Effect.gen(function* () {
       return yield* Effect.die(new Error("Command Center audit chain head is missing."));
     }
 
-    const eventId = input.eventId ?? (yield* crypto.randomUUIDv4);
+    const eventId = input.eventId ?? (yield* crypto.randomUUIDv4());
     const eventHash = yield* digest(
       commandCenterAuditHashDocument({
         hashVersion: COMMAND_CENTER_AUDIT_HASH_VERSION,

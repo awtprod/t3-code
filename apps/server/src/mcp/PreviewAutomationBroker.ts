@@ -40,7 +40,6 @@ import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as McpInvocationContext from "./McpInvocationContext.ts";
-import { desktopGateway } from "../sandbox/DesktopGatewayService.ts";
 
 const HOST_RESPONSE_GRACE_MS = 1_000;
 
@@ -605,27 +604,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       ] as const;
     });
     if (!route) {
-      const directTarget = desktopGateway.automationTarget(input.scope.threadId);
-      if (directTarget !== null) {
-        const direct = yield* Effect.tryPromise({
-          try: () =>
-            desktopGateway.invokeAutomation(
-              input.scope.threadId,
-              input.operation,
-              input.input,
-              timeoutMs,
-            ),
-          catch: () =>
-            new PreviewAutomationNoAvailableHostError({
-              operation: input.operation,
-              environmentId: input.scope.environmentId,
-              threadId: input.scope.threadId,
-              providerSessionId: input.scope.providerSessionId,
-              providerInstanceId: input.scope.providerInstanceId,
-            }),
-        });
-        if (direct !== null) return direct as A;
-      }
       return yield* new PreviewAutomationNoAvailableHostError({
         operation: input.operation,
         environmentId: input.scope.environmentId,

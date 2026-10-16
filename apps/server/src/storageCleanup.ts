@@ -169,7 +169,7 @@ export class StorageCleanup extends Context.Service<
     readonly reports: Stream.Stream<StorageCleanupReport | null>;
     readonly drain: Effect.Effect<void>;
   }
->()("t3/storageCleanup") {}
+>()("@awtprod/command-center/storageCleanup") {}
 
 const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;

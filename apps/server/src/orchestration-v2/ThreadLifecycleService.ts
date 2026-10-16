@@ -72,7 +72,7 @@ export class ThreadLifecycleService extends Context.Service<
       readonly modelSelection: ModelSelection;
     }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
   }
->()("t3/orchestration-v2/ThreadLifecycleService") {}
+>()("@awtprod/command-center/orchestration-v2/ThreadLifecycleService") {}
 
 const make = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;

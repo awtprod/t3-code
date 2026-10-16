@@ -523,7 +523,7 @@ export const layer = Layer.effect(
         Effect.gen(function* () {
           const resolved = yield* resolveAccount(request);
           yield* verifyBinary();
-          const artifactId = yield* crypto.randomUUIDv4.pipe(
+          const artifactId = yield* crypto.randomUUIDv4().pipe(
             Effect.mapError(
               (cause) =>
                 new GoogleReadConnectorError({

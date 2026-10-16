@@ -84,7 +84,7 @@ export class SecretRequests extends Context.Service<
       readonly projectId: ProjectId;
     }) => Effect.Effect<string, SecretRequestError>;
   }
->()("t3/secrets/SecretRequests") {}
+>()("@awtprod/command-center/secrets/SecretRequests") {}
 
 const make = Effect.gen(function* () {
   const store = yield* ServerSecretStore.ServerSecretStore;

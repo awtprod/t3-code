@@ -66,6 +66,7 @@ import {
 } from "./sourceControl/sourceControlHostSecrets.ts";
 
 import { mapSettingsSecrets, SECRET_REDACTED, type SettingsSecret } from "./settingsSecrets.ts";
+import { withServerSettingsFileLock } from "./serverSettingsFileLock.ts";
 
 export {
   resolveReviewGuideModelSelection,
@@ -1075,31 +1076,46 @@ const make = Effect.gen(function* () {
     update: (current: ServerSettings) => Effect.Effect<ServerSettings, ServerSettingsError>,
   ): Effect.Effect<ServerSettings, ServerSettingsError> =>
     writeSemaphore.withPermits(1)(
-      Effect.gen(function* () {
-        const current = yield* getSettingsFromCache;
-        const updated = yield* update(current);
-        const persisted = yield* persistSettingsSecrets(current, updated);
-        const next = yield* normalizeServerSettings(persisted.settings);
-        const materialized = yield* Effect.uninterruptibleMask(() =>
-          Effect.gen(function* () {
-            const rollbackSecretChanges = yield* applySettingsSecretChanges(persisted.changes);
-            const materializedExit = yield* Effect.exit(materializeSettingsSecrets(next));
-            if (Exit.isFailure(materializedExit)) {
-              yield* rollbackSecretChanges;
-              return yield* Effect.failCause(materializedExit.cause);
-            }
-            const writeExit = yield* Effect.exit(writeSettingsAtomically(next));
-            if (Exit.isFailure(writeExit)) {
-              yield* rollbackSecretChanges;
-              return yield* Effect.failCause(writeExit.cause);
-            }
-            return materializedExit.value;
-          }),
-        );
-        yield* Cache.set(settingsCache, cacheKey, next);
-        yield* emitChange(next);
-        return resolveTextGenerationProvider(materialized);
-      }),
+      // The theme CLI writes settings.json from another process, so updates
+      // re-read the file under the shared lock and merge onto it instead of a
+      // possibly stale cache.
+      withServerSettingsFileLock(
+        settingsPath,
+        Effect.gen(function* () {
+          const current = yield* loadSettingsFromDisk;
+          const updated = yield* update(current);
+          const persisted = yield* persistSettingsSecrets(current, updated);
+          const next = yield* normalizeServerSettings(persisted.settings);
+          const materialized = yield* Effect.uninterruptibleMask(() =>
+            Effect.gen(function* () {
+              const rollbackSecretChanges = yield* applySettingsSecretChanges(persisted.changes);
+              const materializedExit = yield* Effect.exit(materializeSettingsSecrets(next));
+              if (Exit.isFailure(materializedExit)) {
+                yield* rollbackSecretChanges;
+                return yield* Effect.failCause(materializedExit.cause);
+              }
+              const writeExit = yield* Effect.exit(writeSettingsAtomically(next));
+              if (Exit.isFailure(writeExit)) {
+                yield* rollbackSecretChanges;
+                return yield* Effect.failCause(writeExit.cause);
+              }
+              return materializedExit.value;
+            }),
+          );
+          yield* Cache.set(settingsCache, cacheKey, next);
+          yield* emitChange(next);
+          return resolveTextGenerationProvider(materialized);
+        }),
+      ).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, pathService),
+        Effect.mapError((cause) =>
+          cause._tag === "ServerSettingsFileLockError" ||
+          cause._tag === "ServerSettingsFileLockBusyError"
+            ? new ServerSettingsError({ settingsPath, operation: "write-file", cause })
+            : cause,
+        ),
+      ),
     );
 
   const withSettingsSnapshot: ServerSettingsService["Service"]["withSettingsSnapshot"] = (use) =>

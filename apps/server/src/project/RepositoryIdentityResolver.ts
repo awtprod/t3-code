@@ -189,11 +189,7 @@ const resolveRemoteFetchUrlsFromCacheKey = Effect.fn(
     return null;
   }
 
-  const remotes = parseRemoteFetchUrls(remoteResult.value.stdout);
-  const remote = pickPrimaryRemote(remotes);
-  return remote
-    ? buildRepositoryIdentity({ ...remote, originUrl: remotes.get("origin"), rootPath: cacheKey })
-    : null;
+  return parseRemoteFetchUrls(remoteResult.value.stdout);
 });
 
 export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
@@ -247,7 +243,11 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
           const remote = remotes === null ? null : pickPrimaryRemote(remotes);
           return remote === null
             ? null
-            : buildRepositoryIdentity({ ...remote, rootPath: cacheKey });
+            : buildRepositoryIdentity({
+                ...remote,
+                originUrl: remotes?.get("origin"),
+                rootPath: cacheKey,
+              });
         }),
         Effect.filterOrElse(
           (identity): identity is null => identity === null,

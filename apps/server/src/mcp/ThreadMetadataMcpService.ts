@@ -25,7 +25,7 @@ export class ThreadMetadataMcpService extends Context.Service<
       input: ThreadMetadataMcpUpdateInput,
     ) => Effect.Effect<ThreadMetadataMcpUpdateResult, OrchestratorMcpFailure>;
   }
->()("t3/mcp/ThreadMetadataMcpService") {}
+>()("@awtprod/command-center/mcp/ThreadMetadataMcpService") {}
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
   return new OrchestratorMcpFailure({ code, message });

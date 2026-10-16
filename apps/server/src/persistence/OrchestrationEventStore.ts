@@ -152,7 +152,7 @@ export class OrchestrationEventStore extends Context.Service<
       readonly project: (event: ApplicationStoredEvent) => A;
     }) => Stream.Stream<A, OrchestrationEventStoreError>;
   }
->()("t3/persistence/OrchestrationEventStore") {}
+>()("@awtprod/command-center/persistence/OrchestrationEventStore") {}
 
 const encodeProjectIcon = Schema.encodeSync(StoredProjectIcon);
 const decodeProjectEvent = Schema.decodeUnknownEffect(ApplicationProjectEvent);

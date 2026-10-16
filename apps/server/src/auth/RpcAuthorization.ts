@@ -16,6 +16,10 @@ import {
   AuthFilesystemReadScope,
   AuthFilesystemWriteScope,
   AuthDiagnosticsReadScope,
+  AuthCommandCenterReadScope,
+  AuthCommandCenterOperateScope,
+  AuthCommandCenterApproveScope,
+  INSTAGRAM_REEL_METHODS,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthPreviewOperateScope,
@@ -34,6 +38,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
+import { COMMAND_CENTER_RPC_SCOPE_ENTRIES } from "../command-center/RpcAuthorization.ts";
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
@@ -44,6 +49,17 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  */
 export const RPC_REQUIRED_SCOPES = {
   ...CLIENT_GUARDED_RPC_SCOPES,
+  ...Object.fromEntries(COMMAND_CENTER_RPC_SCOPE_ENTRIES),
+  [INSTAGRAM_REEL_METHODS.account]: AuthCommandCenterReadScope,
+  [INSTAGRAM_REEL_METHODS.request]: AuthCommandCenterOperateScope,
+  [INSTAGRAM_REEL_METHODS.query]: AuthCommandCenterReadScope,
+  [INSTAGRAM_REEL_METHODS.approve]: AuthCommandCenterApproveScope,
+  [INSTAGRAM_REEL_METHODS.cancel]: AuthCommandCenterApproveScope,
+  [WS_METHODS.efficiencyPreviewDecision]: AuthOrchestrationReadScope,
+  [WS_METHODS.serverGetHostUsage]: AuthOrchestrationReadScope,
+  [WS_METHODS.serverScanHostDiskUsage]: AuthOrchestrationOperateScope,
+  [WS_METHODS.serverReclaimHostDiskArtifacts]: AuthOrchestrationOperateScope,
+  [WS_METHODS.usageQuery]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: AuthOrchestrationOperateScope,

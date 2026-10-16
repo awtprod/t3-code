@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type * as SqlConnection from "effect/sql/SqlConnection";
 
-import { makeRuntimeSqliteLayer } from "./persistence/Layers/Sqlite.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const LOCK_ATTEMPTS = 40;
 const LOCK_RETRY_DELAY = Duration.millis(25);
@@ -146,7 +146,7 @@ export const withServerSettingsFileLock = <A, E, R>(
         );
       }).pipe(
         Effect.provide(
-          makeRuntimeSqliteLayer({
+          NodeSqliteClient.layer({
             filename: lockPath,
             spanAttributes: {
               "db.name": path.basename(lockPath),

@@ -1,4 +1,4 @@
-// @effect-diagnostics preferSchemaOverJson:off - this test plays the browser
+// @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - this test plays the browser
 // receiver: it decrypts raw bytes and inspects plain JSON exactly as a push
 // client library would, without Effect schemas in the loop.
 // Copied from infra/relay/src/agentActivity/webPushCrypto.test.ts — keep in sync.

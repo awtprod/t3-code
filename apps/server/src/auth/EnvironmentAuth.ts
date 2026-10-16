@@ -2,6 +2,7 @@ import {
   AuthAccessTokenType,
   AuthAccessWriteScope,
   AuthAdministrativeScopes,
+  AuthBearerSessionRenewalWindowMs,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthSettingsWriteScope,
@@ -487,6 +488,23 @@ export const serverAuthInvalidRequestReason = (
   error: ServerAuthInvalidRequestError,
 ): "invalid_scope" | "scope_not_granted" =>
   error._tag === "ServerAuthInvalidScopeError" ? "invalid_scope" : "scope_not_granted";
+
+/**
+ * Session renewal is only offered to bearer access tokens presented in the
+ * Authorization header. Cookie sessions renew by re-pairing in the browser,
+ * DPoP tokens are short-lived and refresh through their own grant, and
+ * websocket tickets are single-purpose.
+ */
+export class ServerAuthBearerSessionRequiredError extends Schema.TaggedError<ServerAuthBearerSessionRequiredError>()(
+  "ServerAuthBearerSessionRequiredError",
+  {
+    presented: Schema.Literals(["cookie", "dpop", "dpop-bound-bearer", "non-bearer-session"]),
+  },
+) {
+  override get message(): string {
+    return "Only bearer access tokens sent in the Authorization header can be renewed.";
+  }
+}
 
 export class ServerAuthMcpApprovalCodeError extends Schema.TaggedError<ServerAuthMcpApprovalCodeError>()(
   "ServerAuthMcpApprovalCodeError",

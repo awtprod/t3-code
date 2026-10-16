@@ -1,5 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - Command Center module that predates the Effect platform port.
 import { CommandCenterError } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -1409,7 +1410,7 @@ export const makeAtomicTargetExchange = (options: AtomicTargetExchangeOptions = 
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const runner = yield* ProcessRunner;
-    const hostPlatform = yield* HostProcessPlatform;
+    const hostPlatform = yield* HostProcess.Platform;
 
     const captureFile = Effect.fn("AtomicTargetExchange.captureFile")(function* (filePath: string) {
       const realPath = yield* fs

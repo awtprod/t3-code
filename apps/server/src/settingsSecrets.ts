@@ -41,6 +41,7 @@ export interface SettingsSecret {
   readonly sensitive: boolean;
   readonly providerInstanceId?: string;
   readonly environmentVariable?: string;
+  readonly databaseConnectionId?: string;
 }
 
 type SecretValue = Pick<SettingsSecret, "value" | "redacted">;
@@ -146,5 +147,36 @@ export function mapSettingsSecrets(
     ]),
   ) as ServerSettings["usageLimitSources"];
 
-  return { ...settings, providerInstances, sourceControlHosts, usageLimitSources };
+  // Database connection access tokens keep the fork's on-disk shape (empty
+  // token + `accessTokenRedacted`) and store key, so tokens saved before the
+  // V2 re-platform stay readable.
+  const databaseConnections = Object.fromEntries(
+    Object.entries(settings.databaseConnections).map(([connectionId, connection]) => {
+      const result = map({
+        secretName: `database-supabase-${encode(connectionId)}`,
+        kind: "field",
+        value: connection.accessToken,
+        redacted: connection.accessTokenRedacted === true,
+        sensitive: true,
+        databaseConnectionId: connectionId,
+      });
+      const { accessTokenRedacted: _omit, ...rest } = connection;
+      return [
+        connectionId,
+        {
+          ...rest,
+          accessToken: result.redacted ? "" : result.value,
+          ...(result.redacted ? { accessTokenRedacted: true } : {}),
+        },
+      ];
+    }),
+  ) as ServerSettings["databaseConnections"];
+
+  return {
+    ...settings,
+    providerInstances,
+    sourceControlHosts,
+    usageLimitSources,
+    databaseConnections,
+  };
 }

@@ -295,7 +295,7 @@ export interface ProviderEventIngestorV2Shape {
 export class ProviderEventIngestorV2 extends Context.Service<
   ProviderEventIngestorV2,
   ProviderEventIngestorV2Shape
->()("t3/orchestration-v2/ProviderEventIngestor/ProviderEventIngestorV2") {}
+>()("@awtprod/command-center/orchestration-v2/ProviderEventIngestor/ProviderEventIngestorV2") {}
 
 function compactUndefined<T extends Record<string, unknown>>(record: T): T {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined)) as T;

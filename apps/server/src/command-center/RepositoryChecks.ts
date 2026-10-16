@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Command Center module that predates the Effect platform port.
 import * as NodeCrypto from "node:crypto";
 
 import { ItemId, SpaceId } from "@command-center/core";
@@ -14,8 +15,9 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as CommandCenter from "./Service.ts";
-import * as GitHubCli from "../sourceControl/GitHubCli.ts";
-import * as SourceControlRateLimit from "../sourceControl/SourceControlRateLimit.ts";
+import { SourceControlProviderKind } from "@t3tools/contracts";
+import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 
 const MAX_OPEN_PRS = 10;
 const MAX_PAGES = 20;
@@ -270,7 +272,10 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const commandCenter = yield* CommandCenter.CommandCenterService;
-    const github = yield* GitHubCli.GitHubCli;
+    // Upstream moved its GitHub integration to the HTTP API; Command Center's
+    // checks keep reading through the `gh` CLI, spawned like every other
+    // protected host executable.
+    const vcsProcess = yield* VcsProcess.VcsProcess;
     const rateLimit = yield* SourceControlRateLimit.SourceControlRateLimit;
     const retireItem: RetireItem = (input) =>
       commandCenter
@@ -319,27 +324,23 @@ export const layer = Layer.effect(
             "Repository checks require exactly one Space binding for this remote.",
           );
         }
-        const rateKey = { provider: "github" as const, host: "github.com" };
+        const rateKey = { provider: SourceControlProviderKind.make("github"), host: "github.com" };
         const lease = yield* rateLimit.check(rateKey);
         const command = Effect.fn("RepositoryChecks.githubRead")(function* (
           args: ReadonlyArray<string>,
           allowNonZeroExit = false,
         ) {
-          const output = yield* github
-            .execute({
+          const output = yield* vcsProcess
+            .run({
+              operation: "RepositoryChecks.githubRead",
+              command: "gh",
               cwd: process.cwd(),
               args,
               timeoutMs: COMMAND_TIMEOUT_MS,
               maxOutputBytes: MAX_OUTPUT_BYTES,
               allowNonZeroExit,
             })
-            .pipe(
-              Effect.catchTag("GitHubCliRateLimitError", (error) =>
-                rateLimit
-                  .recordRateLimit({ ...rateKey, lease })
-                  .pipe(Effect.flatMap(() => Effect.fail(error))),
-              ),
-            );
+            .pipe(Effect.mapError((error) => `GitHub check read failed: ${error.message}`));
           if (
             output.stdoutTruncated ||
             output.stderrTruncated ||

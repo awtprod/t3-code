@@ -42,7 +42,7 @@ export class DirectEndpoints extends Context.Service<
   {
     readonly resolve: () => Effect.Effect<ReadonlyArray<ServerDirectEndpoint>>;
   }
->()("t3/environment/DirectEndpoints") {}
+>()("@awtprod/command-center/environment/DirectEndpoints") {}
 
 /**
  * Only numeric private-network IPv4 addresses, including VPN ranges such as
