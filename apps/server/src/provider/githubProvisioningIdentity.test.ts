@@ -1,11 +1,20 @@
-import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ProviderInstanceEnvironment,
+} from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import type { AnyProviderDriver } from "@t3tools/provider-core/server/driver";
+import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import {
   GITHUB_IDENTITY_VARIABLE,
   GITHUB_PROVISIONING_IDENTITY_VARIABLE,
   withGitHubProvisioningIdentity,
 } from "./githubProvisioningIdentity.ts";
+import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistry.ts";
 
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
@@ -78,3 +87,40 @@ it("never shadows an explicitly configured provisioning identity", () => {
   expect(redacted).toHaveLength(1);
   expect(provisioningValue(redacted)).toBe("");
 });
+
+it.effect("the provider instance registry hands every driver the pinned identity", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const captured: Array<ProviderInstanceEnvironment> = [];
+      const driverKind = ProviderDriverKind.make("acmeDriver");
+      const instanceId = ProviderInstanceId.make("acme-acmebot");
+      // A driver that records what the registry passes it, then declines to
+      // start (the registry turns that into an unavailable snapshot).
+      const recordingDriver = {
+        driverKind,
+        metadata: { displayName: "Acme", hasDefaultInstance: false },
+        configSchema: Schema.Unknown,
+        defaultConfig: () => ({}),
+        create: (input: { readonly environment: ProviderInstanceEnvironment }) =>
+          Effect.suspend(() => {
+            captured.push(input.environment);
+            return Effect.fail(
+              new ProviderDriverError({
+                driver: driverKind,
+                instanceId,
+                detail: "recording driver does not start",
+              }),
+            );
+          }),
+      } as unknown as AnyProviderDriver<never>;
+      yield* makeProviderInstanceRegistry({
+        drivers: [recordingDriver],
+        configMap: {
+          [instanceId]: { driver: driverKind, enabled: true, config: {} },
+        },
+      });
+      expect(captured).toHaveLength(1);
+      expect(provisioningValue(captured[0]!)).toBe("acmebot");
+    }),
+  ),
+);
