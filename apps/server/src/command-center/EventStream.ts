@@ -557,6 +557,8 @@ const make = Effect.gen(function* () {
     limit: number,
   ): Effect.Effect<ReadonlyArray<TimelineRow>, CommandCenterEventStreamError> => {
     const query =
+      // V2PORT: the assistant excerpt below reads the frozen V1 messages table; after the
+      // cutover Runs on V2 threads get no excerpt until S2 reads V2 messages.
       input.afterSequence === undefined
         ? sql<TimelineRow>`
             SELECT e.sequence, r.id AS "runId", r.command_id AS "commandId",

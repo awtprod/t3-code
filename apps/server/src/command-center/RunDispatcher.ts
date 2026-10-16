@@ -1428,6 +1428,7 @@ const make = Effect.gen(function* () {
           ),
         );
         if (candidate.threadId === null) return { commandText: command.text };
+        // V2PORT: prior Command context reads the frozen V1 messages table (S2).
         const messages = yield* sql<{ readonly text: string }>`
           SELECT text
           FROM projection_thread_messages
