@@ -196,6 +196,20 @@ export function commandCenterProviderEnvironment(
   };
 }
 
+/** A Command Center thread was refused before any provider process started. */
+export class CommandCenterProviderAdmissionError extends Schema.TaggedError<CommandCenterProviderAdmissionError>()(
+  "CommandCenterProviderAdmissionError",
+  {
+    threadId: Schema.String,
+    provider: Schema.String,
+    issue: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.issue;
+  }
+}
+
 export class CommandCenterManagedWorktreeIsolationError extends Schema.TaggedError<CommandCenterManagedWorktreeIsolationError>()(
   "CommandCenterManagedWorktreeIsolationError",
   {
