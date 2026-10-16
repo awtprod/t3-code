@@ -50,6 +50,7 @@ type RpcMethod<TTag extends EnvironmentRpcTag> = WsRpcProtocolClient[TTag];
 
 export type EnvironmentSubscriptionRpcTag =
   | typeof COMMAND_CENTER_WS_METHODS.eventsSubscribe
+  | typeof COMMAND_CENTER_WS_METHODS.threadPlanProgressSubscribe
   | typeof WS_METHODS.codexAuthCallbackSubscribe
   | typeof WS_METHODS.providerAuthSubscribe
   | typeof WS_METHODS.providerInstallSubscribe

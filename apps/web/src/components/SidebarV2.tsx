@@ -98,6 +98,7 @@ import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings, useUpdateClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useNowMinute } from "../hooks/useNowMinute";
+import { useThreadPlanProgress } from "../command-center/threadPlanProgress";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useProjects, useThreadShells } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
@@ -528,6 +529,11 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   // flag must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarV2Status(thread);
+  const planProgress = useThreadPlanProgress({
+    environmentId: thread.environmentId,
+    threadId: thread.id,
+    enabled: status === "working",
+  });
   // A woken thread reappears at its original position (the sort is
   // deliberately static), so the pill has to carry the weight. Snoozing is
   // an explicit act, so the pill clears only when the user re-engages:
@@ -1160,10 +1166,18 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
               ) : null}
             </div>
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
-              {/* V2PORT: the working plan-step line (current step and n/m) read the v1
-                  shell's planProgress; the v2 thread shell carries no plan progress, so
-                  the row shows the branch until a v2 source exists. */}
-              {thread.branch ? (
+              {/* While working, the current plan step outranks the branch:
+                  it's the one line that says what the thread is doing. */}
+              {status === "working" && planProgress ? (
+                <span className="min-w-0 flex-1 truncate whitespace-nowrap">
+                  {planProgress.step}
+                  {/* Completed count, matching the transcript chip's n/m. */}
+                  <span className="text-icon-muted tabular-nums">
+                    {" "}
+                    {planProgress.completedSteps}/{planProgress.totalSteps}
+                  </span>
+                </span>
+              ) : thread.branch ? (
                 <span className="min-w-0 flex-1 truncate whitespace-nowrap">{thread.branch}</span>
               ) : (
                 <span className="flex-1" />

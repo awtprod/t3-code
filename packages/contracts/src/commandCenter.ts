@@ -120,6 +120,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   spaceAgentWake: "cc.spaceAgent.wake",
   spaceAgentSetPaused: "cc.spaceAgent.setPaused",
   spaceAgentActivity: "cc.spaceAgent.activity",
+  threadPlanProgressSubscribe: "cc.threads.planProgress.subscribe",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedError<CommandCenterError>()(
@@ -297,6 +298,32 @@ export const CommandCenterSpaceAgentActivityResult = Schema.Struct({
 });
 export type CommandCenterSpaceAgentActivityResult =
   typeof CommandCenterSpaceAgentActivityResult.Type;
+
+/** Most threads one plan-progress subscription follows (the sidebar's working rows). */
+export const COMMAND_CENTER_THREAD_PLAN_PROGRESS_MAX_THREADS = 50;
+
+export const CommandCenterThreadPlanProgressInput = Schema.Struct({
+  threadIds: Schema.Array(AssetThreadId).check(
+    Schema.isMaxLength(COMMAND_CENTER_THREAD_PLAN_PROGRESS_MAX_THREADS),
+  ),
+});
+export type CommandCenterThreadPlanProgressInput = typeof CommandCenterThreadPlanProgressInput.Type;
+
+/** The current step of a thread's active todo list, with the completed count (n/m). */
+export const CommandCenterThreadPlanProgress = Schema.Struct({
+  step: Schema.String,
+  completedSteps: NonNegativeInt,
+  totalSteps: NonNegativeInt,
+});
+export type CommandCenterThreadPlanProgress = typeof CommandCenterThreadPlanProgress.Type;
+
+/** One thread's plan progress; `null` when the thread has no active todo list. */
+export const CommandCenterThreadPlanProgressUpdate = Schema.Struct({
+  threadId: AssetThreadId,
+  progress: Schema.NullOr(CommandCenterThreadPlanProgress),
+});
+export type CommandCenterThreadPlanProgressUpdate =
+  typeof CommandCenterThreadPlanProgressUpdate.Type;
 
 /**
  * Client acknowledgement sent only after the route receipt has been rendered.
