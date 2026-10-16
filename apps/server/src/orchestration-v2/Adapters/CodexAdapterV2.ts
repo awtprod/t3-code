@@ -114,6 +114,22 @@ import {
 } from "../../provider/EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "../../provider/codexLaunchArgs.ts";
+import {
+  type CommandCenterCodexLaunch,
+  CodexCommandCenterSessionRefusedError,
+  commandCenterPermissionProfileMismatch,
+  commandCenterThreadStartParams,
+  commandCenterTurnPermissionProfile,
+  commandCenterTurnStartParams,
+  ensureCommandCenterWindowsSandbox,
+  prepareCommandCenterCodexLaunch,
+  verifyCommandCenterCodexIsolation,
+} from "./CodexCommandCenterIsolation.ts";
+import {
+  CODEX_PERMISSION_REQUEST_KIND,
+  classifyCodexPermissionRequest,
+  describeCodexPermissionRequest,
+} from "../../provider/security/CodexPermissionEscalation.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -570,16 +586,19 @@ function approvalDecisionToLegacyReviewDecision(
   }
 }
 
+/**
+ * Kind for a Codex sandbox escalation. Only a request that asks for reads and
+ * nothing else is a file read; any write, sandbox denial or network enable is
+ * carried as a file change so the prompt is never labelled a command.
+ */
 function providerRequestKindFromPermissions(
   permissions: CodexSchema.PermissionsRequestApprovalParams["permissions"],
 ): ProviderRequestKind {
-  if ((permissions.fileSystem?.write?.length ?? 0) > 0) {
-    return "file-change";
-  }
-  if ((permissions.fileSystem?.read?.length ?? 0) > 0) {
-    return "file-read";
-  }
-  return "command";
+  const classification = classifyCodexPermissionRequest(permissions);
+  const requestsReads =
+    (permissions.fileSystem?.read?.length ?? 0) > 0 ||
+    (permissions.fileSystem?.entries ?? []).some((entry) => entry.access === "read");
+  return classification.readOnly && requestsReads ? "file-read" : CODEX_PERMISSION_REQUEST_KIND;
 }
 
 function permissionsResponseFromDecision(input: {
@@ -1296,6 +1315,13 @@ export interface CodexAppServerClientFactoryShape {
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
     readonly settings: CodexSettings;
     readonly environment: NodeJS.ProcessEnv;
+    /**
+     * Set for Command Center threads. `environment` is then the complete
+     * allowlisted environment (never extended with the server's own), the
+     * user's launch arguments are not applied, and these locked isolation
+     * arguments are appended.
+     */
+    readonly commandCenterIsolation?: { readonly appServerArgs: ReadonlyArray<string> };
   }) => Effect.Effect<
     CodexClient.CodexAppServerClient["Service"],
     ProviderAdapter.ProviderAdapterOpenSessionError,
@@ -1361,6 +1387,11 @@ export function codexThreadRuntimeParams(input: {
     },
   };
 }
+
+const decodeCodexTurnStartResponse = Schema.decodeUnknownEffect(CodexSchema.V2TurnStartResponse);
+const decodeCodexThreadStartResponse = Schema.decodeUnknownEffect(
+  CodexSchema.V2ThreadStartResponse,
+);
 
 const decodeCodexResumeMetadata = Schema.decodeUnknownEffect(
   Schema.Struct({ thread: Schema.Struct({ id: Schema.String, updatedAt: Schema.Number }) }),
@@ -1548,12 +1579,17 @@ export const layerAppServerClientFactory: Layer.Layer<
             ...codexAppServerEnvironment(input.environment),
             ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
           };
+          const isolation = input.commandCenterIsolation;
           const command = yield* makeCodexAppServerSpawnCommand({
             command: input.settings.binaryPath || "codex",
-            args: codexAppServerArgs(
-              resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
-            ),
+            args:
+              isolation === undefined
+                ? codexAppServerArgs(
+                    resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
+                  )
+                : [...codexAppServerArgs(), ...isolation.appServerArgs],
             env: environment,
+            ...(isolation === undefined ? {} : { extendEnv: false }),
             threadId: input.threadId,
           }).pipe(Effect.provideService(AgentScope, agentScope));
           const handle = yield* spawner.spawn(command).pipe(
@@ -1660,6 +1696,7 @@ const layer: Layer.Layer<
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
+  | Path.Path
   | ServerConfig
 > = Layer.effect(
   ProviderAdapter.ProviderAdapterV2,
@@ -1702,6 +1739,10 @@ export interface CodexAdapterV2Options {
   readonly fileSystem: FileSystem.FileSystem;
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   readonly serverConfig: ServerConfig["Service"];
+  /** Test seams for Command Center isolation; production reads the host. */
+  readonly commandCenterPlatform?: NodeJS.Platform;
+  readonly commandCenterArchitecture?: NodeJS.Architecture;
+  readonly commandCenterRuntimeCommandPath?: string;
   /**
    * Sink for post-settle background command completions so the orchestrator
    * can start a continuation run. Optional: adapters that omit it keep
@@ -1718,6 +1759,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   adapterOptions: CodexAdapterV2Options,
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const pathService = yield* Path.Path;
   const readMcpSession = (threadId: ThreadId | null) =>
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
@@ -1744,14 +1786,126 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
+        const sessionSettings = resolvedRuntime?.config ?? adapterOptions.settings;
+        const sessionEnvironment = resolvedRuntime?.environment ?? adapterOptions.environment;
+        // Command Center threads launch isolated or not at all.
+        const commandCenterLaunch: CommandCenterCodexLaunch | undefined =
+          yield* prepareCommandCenterCodexLaunch({
+            threadId: input.threadId,
+            runtimeMode: input.runtimePolicy.runtimeMode,
+            cwd: input.runtimePolicy.cwd,
+            settings: sessionSettings,
+            sourceEnvironment: sessionEnvironment,
+            platform: adapterOptions.commandCenterPlatform ?? (yield* HostProcess.Platform),
+            architecture:
+              adapterOptions.commandCenterArchitecture ?? (yield* HostProcess.Architecture),
+            stateDir: serverConfig.stateDir,
+            baseDir: serverConfig.baseDir,
+            worktreesDir: serverConfig.worktreesDir,
+            fileSystem,
+            path: pathService,
+            crypto,
+            homeDirectory: yield* HostProcess.HomeDirectory,
+            ...(adapterOptions.commandCenterRuntimeCommandPath === undefined
+              ? {}
+              : { runtimeCommandPath: adapterOptions.commandCenterRuntimeCommandPath }),
+          });
+        const isolationSentinel =
+          commandCenterLaunch === undefined ? undefined : yield* crypto.randomUUIDv4();
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
           providerSessionId: input.providerSessionId,
           runtimePolicy: input.runtimePolicy,
-          settings: resolvedRuntime?.config ?? adapterOptions.settings,
-          environment: resolvedRuntime?.environment ?? adapterOptions.environment,
+          settings: commandCenterLaunch?.settings ?? sessionSettings,
+          environment:
+            commandCenterLaunch === undefined
+              ? sessionEnvironment
+              : {
+                  ...commandCenterLaunch.environment,
+                  // Must never be visible to a command Codex runs; the probe checks.
+                  CC_PROVIDER_ISOLATION_SENTINEL: isolationSentinel,
+                },
+          ...(commandCenterLaunch === undefined
+            ? {}
+            : { commandCenterIsolation: { appServerArgs: commandCenterLaunch.appServerArgs } }),
         });
+        const windowsSandboxSetupCompleted =
+          yield* Deferred.make<CodexSchema.V2WindowsSandboxSetupCompletedNotification>();
+        if (commandCenterLaunch?.windowsSandboxMode !== undefined) {
+          yield* client.handleServerNotification("windowsSandbox/setupCompleted", (payload) =>
+            Deferred.succeed(windowsSandboxSetupCompleted, payload).pipe(Effect.asVoid),
+          );
+        }
+        /**
+         * Before any model turn: the elevated Windows sandbox must be ready and
+         * the live probe must pass through the admitted profile. Fails closed.
+         */
+        const verifyCommandCenterIsolation = (launch: CommandCenterCodexLaunch) =>
+          Effect.gen(function* () {
+            const cwd = input.runtimePolicy.cwd ?? "";
+            if (launch.platform === "win32") {
+              if (launch.windowsSandboxMode === undefined) {
+                return yield* new CodexCommandCenterSessionRefusedError({
+                  issue: "Command Center did not select a native Windows sandbox mode.",
+                });
+              }
+              yield* ensureCommandCenterWindowsSandbox({
+                client: client.raw,
+                cwd,
+                mode: launch.windowsSandboxMode,
+                setupCompleted: Deferred.await(windowsSandboxSetupCompleted),
+              });
+            }
+            yield* verifyCommandCenterCodexIsolation({
+              client: client.raw,
+              cwd,
+              permissionProfile: launch.permissionProfile,
+              platform: launch.platform,
+            });
+          });
+        const commandCenterProfileFor = (
+          launch: CommandCenterCodexLaunch,
+          runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"],
+        ) => {
+          const decision = commandCenterTurnPermissionProfile(launch, runtimeMode);
+          return "issue" in decision
+            ? Effect.fail(new CodexCommandCenterSessionRefusedError({ issue: decision.issue }))
+            : Effect.succeed(decision.permissionProfile);
+        };
+        /**
+         * `cc:` turns run under the admitted permission profile with approvals
+         * off; caller sandbox and approval overrides are dropped. Sent raw
+         * because the generated request schema has no `permissions` field.
+         */
+        const startCommandCenterTurn = (
+          launch: CommandCenterCodexLaunch,
+          runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"],
+          params: CodexTurnStartParamsWithCollaborationMode,
+        ) =>
+          Effect.gen(function* () {
+            const permissionProfile = yield* commandCenterProfileFor(launch, runtimeMode);
+            const raw = yield* client.raw.request(
+              "turn/start",
+              commandCenterTurnStartParams(params, permissionProfile),
+            );
+            return yield* decodeCodexTurnStartResponse(raw);
+          });
+        const startCommandCenterThread = (
+          launch: CommandCenterCodexLaunch,
+          runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"],
+          params: ReturnType<typeof codexThreadRuntimeParams>,
+        ) =>
+          Effect.gen(function* () {
+            const permissionProfile = yield* commandCenterProfileFor(launch, runtimeMode);
+            const raw = yield* client.raw.request(
+              "thread/start",
+              commandCenterThreadStartParams(params, permissionProfile),
+            );
+            const mismatch = commandCenterPermissionProfileMismatch(permissionProfile, raw);
+            if (mismatch !== undefined) return yield* mismatch;
+            return yield* decodeCodexThreadStartResponse(raw);
+          });
         const additionalContextByThread = yield* Ref.make(
           new Map<
             string,
@@ -1826,6 +1980,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 }),
               );
             yield* client.notify("initialized", undefined);
+            if (commandCenterLaunch !== undefined) {
+              yield* verifyCommandCenterIsolation(commandCenterLaunch);
+            }
             yield* Ref.set(initialized, true);
           }),
         );
@@ -5266,13 +5423,32 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               );
             }
 
+            // Auto-approval is keyed on the requested permissions, never on the
+            // tool that triggered them: a read-only tool can still ask for write.
+            // The grant is echoed back scoped to this turn only.
+            if (
+              sessionSettings.autoApproveReadOnlyPermissions === true &&
+              classifyCodexPermissionRequest(payload.permissions).readOnly
+            ) {
+              yield* Effect.logDebug("Auto-approved a read-only Codex sandbox escalation.", {
+                threadId: payload.threadId,
+                itemId: payload.itemId,
+              });
+              return {
+                permissions: payload.permissions,
+                scope: "turn",
+              } satisfies CodexSchema.PermissionsRequestApprovalResponse;
+            }
+
             const requestKind = providerRequestKindFromPermissions(payload.permissions);
             const artifacts = yield* buildApprovalRequestArtifacts({
               context,
               nativeItemId: payload.itemId,
               nativeRequestId: payload.itemId,
               requestKind,
-              ...(payload.reason === undefined ? {} : { prompt: payload.reason }),
+              // Names the requested paths and network access, not only the
+              // model-supplied reason, so the prompt is reviewable.
+              prompt: describeCodexPermissionRequest(payload),
             });
             const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
             yield* Ref.update(pendingRuntimeRequests, (current) => {
@@ -6312,7 +6488,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               else next.delete(threadId);
               return next;
             });
-            const started = yield* client.request("turn/start", turnStartParams);
+            const started =
+              commandCenterLaunch === undefined
+                ? yield* client.request("turn/start", turnStartParams)
+                : yield* startCommandCenterTurn(
+                    commandCenterLaunch,
+                    turnInput.runtimePolicy.runtimeMode,
+                    turnStartParams,
+                  );
             yield* registerRootTurn({
               turnInput,
               nativeTurnId: started.turn.id,
@@ -6568,16 +6751,20 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ensureThread: (threadInput) =>
             ensureInitialized.pipe(
               Effect.andThen(mcpSessions.read(threadInput.threadId)),
-              Effect.flatMap((mcpSession) =>
-                client.request(
-                  "thread/start",
-                  codexThreadRuntimeParams({
-                    mcpSession,
-                    modelSelection: threadInput.modelSelection,
-                    runtimePolicy: threadInput.runtimePolicy,
-                  }),
-                ),
-              ),
+              Effect.flatMap((mcpSession) => {
+                const params = codexThreadRuntimeParams({
+                  mcpSession,
+                  modelSelection: threadInput.modelSelection,
+                  runtimePolicy: threadInput.runtimePolicy,
+                });
+                return commandCenterLaunch === undefined
+                  ? client.request("thread/start", params)
+                  : startCommandCenterThread(
+                      commandCenterLaunch,
+                      threadInput.runtimePolicy.runtimeMode,
+                      params,
+                    );
+              }),
               Effect.map((response): OrchestrationV2ProviderThread =>
                 providerThreadFromCodexThread({
                   appThreadId: threadInput.threadId,
@@ -7458,6 +7645,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ),
             ),
         };
+        if (commandCenterLaunch !== undefined) {
+          // Prove isolation before the orchestrator can hand this session a turn.
+          yield* ensureInitialized;
+        }
         return runtime;
       }).pipe(
         Effect.mapError(
