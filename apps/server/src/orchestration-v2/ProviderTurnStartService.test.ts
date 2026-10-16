@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
+  ChatAttachmentId,
   CheckpointScopeId,
   MessageId,
   NodeId,
@@ -165,6 +166,7 @@ it("does not commit running state when inherited background routing cannot be re
 
 function makeLocalCommandHarness(input: {
   readonly text: string;
+  readonly attachments?: OrchestrationV2ThreadProjection["messages"][number]["attachments"];
   readonly worktreePath?: string;
   readonly fileSystem?: FileSystem.FileSystem;
   readonly previousNativeSession?: boolean;
@@ -237,7 +239,7 @@ function makeLocalCommandHarness(input: {
     nodeId: rootNodeId,
     role: "user",
     text: input.text,
-    attachments: [],
+    attachments: input.attachments ?? [],
     streaming: false,
     createdBy: "user",
     creationSource: "web",
@@ -1052,3 +1054,32 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+effectIt.effect("sends a Windows file reference to the provider as a path and pull line", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Cut this clip down",
+      failReadsAfterRunning: true,
+      attachments: [
+        {
+          type: "windows-file",
+          id: ChatAttachmentId.make("windows-file-provider-turn"),
+          name: "Take 3.mov",
+          mimeType: "video/quicktime",
+          sizeBytes: 1024,
+          host: "editing-pc",
+          path: "D:\\Footage\\Take 3.mov",
+        },
+      ],
+    });
+    yield* harness.start.pipe(Effect.exit);
+    expect(harness.startRootRun).toHaveBeenCalledTimes(1);
+    const sent = harness.startRootRun.mock.calls[0]![0].message;
+    expect(sent.text.startsWith("Cut this clip down\n\n")).toBe(true);
+    expect(sent.text).toContain(
+      '[Referenced Windows file "Take 3.mov" lives on host editing-pc at: D:\\Footage\\Take 3.mov',
+    );
+    const remotePath = ["D:", "Footage", "Take 3.mov"].join("/");
+    expect(sent.text).toContain(`'editing-pc:${remotePath}' <dest>]`);
+  }),
+);
