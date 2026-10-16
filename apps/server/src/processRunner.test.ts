@@ -172,7 +172,7 @@ describe("runProcess", () => {
       Effect.sync(() => {
         expect(command.command).toBe(
           [
-            '^"C:\\Users\\tester\\AppData\\Roaming\\npm\\az.cmd^"',
+            "C:\\Users\\tester\\AppData\\Roaming\\npm\\az.cmd",
             '^"repos^"',
             '^"pr^"',
             '^"list^"',

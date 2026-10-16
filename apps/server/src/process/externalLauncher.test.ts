@@ -199,7 +199,7 @@ it.effect("launches an installed editor with platform-safe arguments", () =>
     assert.equal(
       spawned.command,
       [
-        '^"C:\\Program^ Files\\Microsoft^ VS^ Code\\bin\\code.CMD^"',
+        "C:\\Program^ Files\\Microsoft^ VS^ Code\\bin\\code.CMD",
         '^"--goto^"',
         '^"C:\\workspace^ with^ spaces\\src\\index.ts:12:4^"',
       ].join(" "),
@@ -292,7 +292,7 @@ it.effect("launches Cursor in classic IDE mode through the Windows command shim"
     assert.equal(
       spawned.command,
       [
-        '^"C:\\Program^ Files\\Cursor\\bin\\cursor.CMD^"',
+        "C:\\Program^ Files\\Cursor\\bin\\cursor.CMD",
         '^"--classic^"',
         '^"--goto^"',
         '^"C:\\workspace^ with^ spaces\\src\\index.ts:12:4^"',
@@ -1120,7 +1120,7 @@ for (const { platform, installPath, editor, args } of [
         const shim = executable.endsWith(".cmd");
         assert.equal(
           spawned.command,
-          shim ? [`^"${executable.replaceAll(" ", "^ ")}^"`, ...args].join(" ") : executable,
+          shim ? [executable.replaceAll(" ", "^ "), ...args].join(" ") : executable,
         );
         assert.deepEqual(spawned.args, shim ? [] : args);
         assert.equal(spawned.options.shell, shim);
