@@ -26,8 +26,11 @@ import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as TestConsole from "effect/testing/TestConsole";
+import { Command } from "effect/cli";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
+import { cli } from "./binCli.ts";
 import { sourceControlHostSecretName } from "./sourceControl/sourceControlHostSecrets.ts";
 import * as ServerConfig from "./config.ts";
 import * as SqlitePersistence from "./persistence/Sqlite.ts";
@@ -38,6 +41,11 @@ import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.t
 const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
+
+const runCli = (args: ReadonlyArray<string>) =>
+  Command.runWith(cli, { version: "0.0.0" })(args).pipe(
+    Effect.provide(Layer.mergeAll(NodeServices.layer, NetService.layer, TestConsole.layer)),
+  );
 
 const layerServerSettings = () =>
   ServerSettingsModule.layer.pipe(
@@ -2204,6 +2212,46 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(settings.projectSettingsOverrides, {});
       // The user's file is still there to repair; nothing was written over it.
       assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), broken);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("merges theme CLI writes from disk instead of a stale server cache", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+
+      // Populate the cache before the independent CLI writer changes disk.
+      yield* serverSettings.getSettings;
+      yield* runCli(["theme", "set", "ocean", "--base-dir", serverConfig.baseDir]);
+
+      const afterServer = yield* serverSettings.updateSettings({
+        enableProviderUpdateChecks: false,
+      });
+      const firstRaw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const firstPersisted = JSON.parse(firstRaw);
+      assert.equal(firstPersisted.defaultTheme, "ocean");
+      assert.isFalse(firstPersisted.enableProviderUpdateChecks);
+      assert.equal(afterServer.defaultTheme, "ocean");
+
+      // Reverse the writer order: the CLI must preserve the server's key.
+      yield* serverSettings.updateSettings({ addProjectBaseDirectory: "~/Development" });
+      yield* runCli(["theme", "clear", "--base-dir", serverConfig.baseDir]);
+      const secondRaw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const secondPersisted = JSON.parse(secondRaw);
+      assert.equal(secondPersisted.addProjectBaseDirectory, "~/Development");
+      assert.isFalse(secondPersisted.enableProviderUpdateChecks);
+      assert.isFalse(Object.hasOwn(secondPersisted, "defaultTheme"));
+
+      // A following server update reloads the CLI result and refreshes cache.
+      const refreshed = yield* serverSettings.updateSettings({
+        enableProviderUpdateChecks: true,
+      });
+      assert.equal(refreshed.addProjectBaseDirectory, "~/Development");
+      assert.equal(refreshed.defaultTheme, DEFAULT_SERVER_SETTINGS.defaultTheme);
+      assert.deepEqual(yield* serverSettings.getSettings, refreshed);
     }).pipe(Effect.provide(layerServerSettings())),
   );
 });
