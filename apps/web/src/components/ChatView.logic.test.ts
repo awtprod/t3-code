@@ -64,6 +64,7 @@ import {
   observeProactivePanelUserChoice,
   resolveProactiveTurnDiffAction,
   resolveThreadMetadataUpdateForNextTurn,
+  shouldSwitchToManualRoutingOnModelPick,
   resolveSendEnvMode,
   threadShellHasStarted,
   resolveDraftHeroState,
@@ -1087,6 +1088,61 @@ describe("resolveThreadMetadataUpdateForNextTurn", () => {
         nextBranch: "feature/current",
       }),
     ).toBeNull();
+  });
+});
+
+describe("shouldSwitchToManualRoutingOnModelPick", () => {
+  const opus = { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-opus-5-5" };
+  const fable = { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-fable" };
+
+  it("switches an auto thread to manual when the user picks a different model", () => {
+    expect(
+      shouldSwitchToManualRoutingOnModelPick({
+        routingMode: "auto",
+        currentModelSelection: opus,
+        nextModelSelection: fable,
+      }),
+    ).toBe(true);
+  });
+
+  it("switches when the same model name moves to another provider instance", () => {
+    expect(
+      shouldSwitchToManualRoutingOnModelPick({
+        routingMode: "auto",
+        currentModelSelection: opus,
+        nextModelSelection: { ...opus, instanceId: ProviderInstanceId.make("claudeWork") },
+      }),
+    ).toBe(true);
+  });
+
+  it("switches when there is no current selection to compare against", () => {
+    expect(
+      shouldSwitchToManualRoutingOnModelPick({
+        routingMode: "auto",
+        currentModelSelection: undefined,
+        nextModelSelection: fable,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps auto routing when the pick re-selects the current model", () => {
+    expect(
+      shouldSwitchToManualRoutingOnModelPick({
+        routingMode: "auto",
+        currentModelSelection: opus,
+        nextModelSelection: { ...opus },
+      }),
+    ).toBe(false);
+  });
+
+  it("never changes a thread that is already manual", () => {
+    expect(
+      shouldSwitchToManualRoutingOnModelPick({
+        routingMode: "manual",
+        currentModelSelection: opus,
+        nextModelSelection: fable,
+      }),
+    ).toBe(false);
   });
 });
 
