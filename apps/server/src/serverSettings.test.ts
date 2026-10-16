@@ -1695,7 +1695,6 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         // ...and settings.json never contains it.
         const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
         assert.notInclude(raw, token);
-        // @effect-diagnostics-next-line preferSchemaOverJson:off
         assert.deepInclude(JSON.parse(raw).databaseConnections[connectionId], {
           projectId,
           label: "prod",
