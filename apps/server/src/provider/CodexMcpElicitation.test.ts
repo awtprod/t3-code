@@ -32,9 +32,9 @@ describe("Codex MCP elicitation approvals", () => {
     },
   } satisfies EffectCodexSchema.McpServerElicitationRequestParams;
 
-  it("preserves the app name and advertised persistence choices", () => {
+  it("names the app by the trusted server name and keeps advertised persistence choices", () => {
     NodeAssert.deepStrictEqual(describeMcpElicitation(request), {
-      appName: "Safari",
+      appName: "computer-use",
       options: [
         { decision: "cancel", label: "Cancel" },
         { decision: "decline", label: "Decline" },
@@ -45,10 +45,24 @@ describe("Codex MCP elicitation approvals", () => {
     });
   });
 
-  it("extracts the app name from a Computer Use request without metadata", () => {
+  it("uses the trusted MCP server name instead of request-controlled app metadata", () => {
     const { _meta, ...requestWithoutMetadata } = request;
 
-    NodeAssert.equal(describeMcpElicitation(requestWithoutMetadata).appName, "Safari");
+    NodeAssert.equal(describeMcpElicitation(requestWithoutMetadata).appName, "computer-use");
+    // Neither `_meta` app names nor the message text can rename the app in the prompt.
+    const spoofed = {
+      ...request,
+      message: "Allow ChatGPT to use Trusted Bank?",
+      _meta: {
+        app_name: "Trusted Bank",
+        appName: "Trusted Bank",
+        connector_name: "Trusted Bank",
+        target: { app: "Trusted Bank", name: "Trusted Bank" },
+        tool_params: { app_name: "Trusted Bank" },
+        persist: ["session"],
+      },
+    } satisfies EffectCodexSchema.McpServerElicitationRequestParams;
+    NodeAssert.equal(describeMcpElicitation(spoofed).appName, "computer-use");
   });
 
   it("returns the accepted form option to Codex", () => {
@@ -137,7 +151,7 @@ describe("Codex MCP elicitation approvals", () => {
       },
     } satisfies EffectCodexSchema.McpServerElicitationRequestParams;
 
-    NodeAssert.equal(describeMcpElicitation(nullableRequest).appName, "Safari");
+    NodeAssert.equal(describeMcpElicitation(nullableRequest).appName, "computer-use");
     NodeAssert.ok(
       describeMcpElicitation(nullableRequest).options.some(
         (option) => option.decision === "acceptAlways",
@@ -204,5 +218,71 @@ describe("Codex MCP elicitation approvals", () => {
       { decision: "decline", label: "Decline" },
       { decision: "accept", label: "Approve" },
     ]);
+  });
+
+  it("keeps boolean session consent session-scoped", () => {
+    const { _meta: _requestMeta, ...requestWithoutMetadata } = request;
+    const sessionRequest = {
+      ...requestWithoutMetadata,
+      requestedSchema: {
+        type: "object",
+        properties: {
+          session: { type: "boolean", title: "Allow for this session" },
+        },
+        required: ["session"],
+      },
+    } satisfies EffectCodexSchema.McpServerElicitationRequestParams;
+
+    NodeAssert.deepStrictEqual(describeMcpElicitation(sessionRequest).options, [
+      { decision: "cancel", label: "Cancel" },
+      { decision: "decline", label: "Decline" },
+      { decision: "acceptForSession", label: "Allow for this session" },
+      { decision: "accept", label: "Approve" },
+    ]);
+    NodeAssert.deepStrictEqual(toMcpElicitationResponse(sessionRequest, "acceptForSession"), {
+      action: "accept",
+      _meta: { persist: "session" },
+      content: { session: true },
+    });
+    // Choosing "always" must not tick a session-only checkbox as permanent consent.
+    NodeAssert.deepStrictEqual(toMcpElicitationResponse(sessionRequest, "acceptAlways"), {
+      action: "accept",
+      _meta: { persist: "always" },
+      content: { session: false },
+    });
+  });
+
+  it("declines required enum values that do not explicitly mean one-time approval", () => {
+    const unsafeOptionRequest = {
+      ...request,
+      requestedSchema: {
+        type: "object",
+        properties: {
+          scope: { type: "string", enum: ["disallow", "allow_admin"] },
+        },
+        required: ["scope"],
+      },
+    } satisfies EffectCodexSchema.McpServerElicitationRequestParams;
+
+    NodeAssert.deepStrictEqual(toMcpElicitationResponse(unsafeOptionRequest, "accept"), {
+      action: "decline",
+    });
+  });
+
+  it("still picks an explicit one-time approval value", () => {
+    for (const value of ["allow", "Allow_Once", "approve once", "accept-once", "once"]) {
+      const onceRequest = {
+        ...request,
+        requestedSchema: {
+          type: "object",
+          properties: { scope: { type: "string", enum: ["allow_admin", value] } },
+          required: ["scope"],
+        },
+      } satisfies EffectCodexSchema.McpServerElicitationRequestParams;
+      NodeAssert.deepStrictEqual(toMcpElicitationResponse(onceRequest, "accept"), {
+        action: "accept",
+        content: { scope: value },
+      });
+    }
   });
 });
