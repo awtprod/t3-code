@@ -134,6 +134,8 @@ export const AuthGrantScopes = Schema.Array(AuthGrantScope);
 export type AuthGrantScopes = typeof AuthGrantScopes.Type;
 
 // Frozen wire vocabulary for clients released before granular permissions.
+// Command Center clients from before granular permissions already knew the
+// command-center:* scopes, so they stay in the frozen vocabulary.
 const legacyScopes = new Set<AuthEnvironmentScope>([
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
@@ -143,6 +145,9 @@ const legacyScopes = new Set<AuthEnvironmentScope>([
   AuthAccessWriteScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  AuthCommandCenterReadScope,
+  AuthCommandCenterOperateScope,
+  AuthCommandCenterApproveScope,
 ]);
 
 /** Format public auth metadata without changing the server's authorization grant. */

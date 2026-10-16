@@ -62,12 +62,15 @@ const codexCaps: ModelCapabilities = createModelCapabilities({
 });
 
 describe("model slug normalization", () => {
-  it("preserves exact custom slugs instead of expanding provider aliases", () => {
-    // Claude aliases now resolve through the model catalog (#9084), so the
-    // provider alias table passes unknown slugs through unchanged.
+  it("expands Command Center's Claude aliases and keeps custom slugs exact", () => {
+    // Upstream empties the Claude alias table and resolves aliases through the
+    // model catalog (#9084). Command Center keeps its own Claude alias table
+    // (contracts MODEL_SLUG_ALIASES_BY_PROVIDER), so a bare family name
+    // resolves to the fleet's pinned model; custom slugs are still not expanded.
     const claude = ProviderDriverKind.make("claudeAgent");
 
-    expect(normalizeModelSlug("opus", claude)).toBe("opus");
+    expect(normalizeModelSlug("opus", claude)).toBe("claude-opus-5-5");
+    expect(normalizeModelSlug("acme-custom-model", claude)).toBe("acme-custom-model");
     expect(normalizeCustomModelSlug(" opus ")).toBe("opus");
   });
 });

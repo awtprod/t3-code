@@ -34,6 +34,10 @@ describe("authorization grants", () => {
       "access:write",
       "relay:read",
       "relay:write",
+      // Command Center clients before granular permissions (origin/main b02115a6f4).
+      "command-center:read",
+      "command-center:operate",
+      "command-center:approve",
     ]),
   );
 
