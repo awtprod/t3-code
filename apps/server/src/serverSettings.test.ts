@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import {
+  DatabaseConnectionId,
   DEFAULT_SERVER_SETTINGS,
   ModelSelection,
   ProjectId,
@@ -1651,6 +1652,73 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         "legacy-api-key",
       );
     }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect(
+    "stores Supabase access tokens in the secret store, never settings.json, hidden from clients",
+    () =>
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const store = yield* ServerSecretStore.ServerSecretStore;
+        const projectId = ProjectId.make("project-database");
+        const connectionId = DatabaseConnectionId.make("conn-database");
+        const token = "sbp-acme-database-placeholder";
+        const connection = {
+          provider: "supabase" as const,
+          projectId,
+          workspaceRoot: "/work/project-database",
+          label: "prod",
+          isDefault: true,
+          projectRef: "abcdefghijk",
+          readOnly: true,
+        };
+
+        const next = yield* serverSettings.updateSettings({
+          databaseConnections: { [connectionId]: { ...connection, accessToken: token } },
+        });
+
+        // The server-side view resolves the token for the connector...
+        assert.equal(next.databaseConnections[connectionId]?.accessToken, token);
+        // ...the secret store holds it under the fork's stable key...
+        const stored = yield* store.get(
+          `database-supabase-${Buffer.from(connectionId, "utf8").toString("base64url")}`,
+        );
+        assert.isTrue(Option.isSome(stored));
+        assert.equal(new TextDecoder().decode(Option.getOrThrow(stored)), token);
+        // ...clients only ever see the redacted marker...
+        const client = ServerSettingsModule.redactServerSettingsForClient(next);
+        assert.equal(client.databaseConnections[connectionId]?.accessToken, "");
+        assert.isTrue(client.databaseConnections[connectionId]?.accessTokenRedacted);
+        assert.notInclude(JSON.stringify(client), token);
+        // ...and settings.json never contains it.
+        const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+        assert.notInclude(raw, token);
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        assert.deepInclude(JSON.parse(raw).databaseConnections[connectionId], {
+          projectId,
+          label: "prod",
+          projectRef: "abcdefghijk",
+          accessToken: "",
+          accessTokenRedacted: true,
+        });
+
+        // Echoing the redacted client value back keeps the stored token.
+        const roundTripped = yield* serverSettings.updateSettings({
+          databaseConnections: {
+            [connectionId]: {
+              ...connection,
+              readOnly: false,
+              accessToken: "",
+              accessTokenRedacted: true,
+            },
+          },
+        });
+        assert.equal(roundTripped.databaseConnections[connectionId]?.accessToken, token);
+        assert.isFalse(roundTripped.databaseConnections[connectionId]?.readOnly);
+        assert.notInclude(yield* fileSystem.readFileString(serverConfig.settingsPath), token);
+      }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
   );
 
   it.effect("stores sensitive provider instance environment values outside settings.json", () =>
