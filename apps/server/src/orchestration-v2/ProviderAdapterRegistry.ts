@@ -72,7 +72,7 @@ const SESSION_THREAD_MISMATCH =
   "A Command Center thread runs only in the provider session launched for it, and no other thread may join that session.";
 
 /** True when `threadId` may not use a session opened for `owner`. */
-export function commandCenterSessionMismatch(owner: ThreadId, threadId: ThreadId): boolean {
+function commandCenterSessionMismatch(owner: ThreadId, threadId: ThreadId): boolean {
   if (threadId === owner) return false;
   return isCommandCenterThreadId(owner) || isCommandCenterThreadId(threadId);
 }
