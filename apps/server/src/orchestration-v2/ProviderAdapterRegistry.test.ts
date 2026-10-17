@@ -420,6 +420,61 @@ describe("Command Center admission gate", () => {
     }).pipe(Effect.provide(fromAdapters([openingAdapter("codex", opened)])));
   });
 
+  // Isolation is decided at open from the opening thread, so the session must
+  // stay that thread's: a cc: thread may not run in a session another thread
+  // opened (its launch is unisolated), and nothing may join a cc: session.
+  const sessionAdapter = (calls: Array<string>) =>
+    ({
+      ...makeAdapter(personalId),
+      openSession: () =>
+        Effect.succeed({
+          ensureThread: (input: { readonly threadId: ThreadId }) =>
+            Effect.sync(() => {
+              calls.push(`ensure:${input.threadId}`);
+              return {} as never;
+            }),
+        } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+    }) as unknown as ProviderAdapter.ProviderAdapterV2["Service"];
+  const ensureIn = (runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime, threadId: string) =>
+    runtime.ensureThread({
+      threadId: ThreadId.make(threadId),
+      modelSelection: { instanceId: personalId, model: "gpt-test" },
+      runtimePolicy: {
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        cwd: "/workspace",
+      },
+    } as ProviderAdapter.ProviderAdapterV2EnsureThreadInput);
+
+  it.effect("keeps a cc: thread out of a session another thread opened, and vice versa", () => {
+    const calls: Array<string> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+        const adapter = yield* registry.get(personalId);
+        const shared = yield* adapter.openSession(openInput("thread-acme", "approval-required"));
+        const intruder = yield* ensureIn(shared, "cc:interactive:acme").pipe(Effect.flip);
+        assert.strictEqual(intruder._tag, "ProviderAdapterEnsureThreadError");
+        assert.isTrue(isAdmissionError("cause" in intruder ? intruder.cause : undefined));
+        yield* ensureIn(shared, "thread-acme");
+        yield* ensureIn(shared, "thread-acme-peer");
+
+        const isolated = yield* adapter.openSession(
+          openInput("cc:interactive:acme", "approval-required"),
+        );
+        const joiner = yield* ensureIn(isolated, "thread-acme-peer").pipe(Effect.flip);
+        assert.isTrue(isAdmissionError("cause" in joiner ? joiner.cause : undefined));
+        yield* ensureIn(isolated, "cc:interactive:acme");
+        // The refused calls never reached the adapter.
+        assert.deepEqual(calls, [
+          "ensure:thread-acme",
+          "ensure:thread-acme-peer",
+          "ensure:cc:interactive:acme",
+        ]);
+      }),
+    ).pipe(Effect.provide(fromAdapters([sessionAdapter(calls)])));
+  });
+
   it.effect("gates the production instance-registry facade too", () =>
     Effect.gen(function* () {
       const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;

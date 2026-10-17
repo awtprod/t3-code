@@ -1,6 +1,7 @@
 import {
   ProviderInstanceId,
   ProviderSetupError,
+  type ThreadId,
   type OrchestrationV2ProviderCapabilities,
   type ProviderDriverKind,
   type ProviderInstanceConfig,
@@ -17,6 +18,7 @@ import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.
 import {
   CommandCenterProviderAdmissionError,
   commandCenterProviderIsolationIssue,
+  isCommandCenterThreadId,
 } from "../provider/security/CommandCenterProviderIsolation.ts";
 import {
   ProviderAdapterDriverCreateError,
@@ -46,7 +48,11 @@ function withCommandCenterAdmission(
         runtimeMode: input.runtimePolicy.runtimeMode,
       });
       return issue === undefined
-        ? adapter.openSession(input)
+        ? adapter
+            .openSession(input)
+            .pipe(
+              Effect.map((runtime) => bindSessionToOpeningThread(adapter.driver, input, runtime)),
+            )
         : Effect.fail(
             new ProviderAdapter.ProviderAdapterOpenSessionError({
               driver: adapter.driver,
@@ -60,6 +66,88 @@ function withCommandCenterAdmission(
           );
     },
   };
+}
+
+const SESSION_THREAD_MISMATCH =
+  "A Command Center thread runs only in the provider session launched for it, and no other thread may join that session.";
+
+/** True when `threadId` may not use a session opened for `owner`. */
+export function commandCenterSessionMismatch(owner: ThreadId, threadId: ThreadId): boolean {
+  if (threadId === owner) return false;
+  return isCommandCenterThreadId(owner) || isCommandCenterThreadId(threadId);
+}
+
+/**
+ * Isolation is decided when a session opens, from the thread that opens it. A
+ * `cc:` thread that joined a session another thread opened would run in that
+ * session's unisolated launch, and a thread joining a `cc:` session would run
+ * inside the Command Center sandbox. The Orchestrator gives every `cc:` thread
+ * its own session; this refuses any path that does not, before the adapter
+ * touches the thread.
+ */
+function bindSessionToOpeningThread(
+  driver: ProviderDriverKind,
+  opened: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
+  runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+): ProviderAdapter.ProviderAdapterV2SessionRuntime {
+  const owner = opened.threadId;
+  const refusal = (threadId: ThreadId) =>
+    new CommandCenterProviderAdmissionError({
+      threadId: String(threadId),
+      provider: String(driver),
+      issue: SESSION_THREAD_MISMATCH,
+    });
+  const bound: ProviderAdapter.ProviderAdapterV2SessionRuntime = Object.assign(
+    Object.create(Object.getPrototypeOf(runtime) as object | null) as object,
+    runtime,
+    {
+      ensureThread: (input: ProviderAdapter.ProviderAdapterV2EnsureThreadInput) =>
+        commandCenterSessionMismatch(owner, input.threadId)
+          ? Effect.fail(
+              new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                driver,
+                threadId: input.threadId,
+                cause: refusal(input.threadId),
+              }),
+            )
+          : runtime.ensureThread(input),
+      resumeThread: (input: Parameters<typeof runtime.resumeThread>[0]) => {
+        const threadId = input.threadId ?? input.providerThread.appThreadId;
+        return threadId !== null && commandCenterSessionMismatch(owner, threadId)
+          ? Effect.fail(
+              new ProviderAdapter.ProviderAdapterResumeThreadError({
+                driver,
+                providerSessionId: opened.providerSessionId,
+                providerThreadId: input.providerThread.id,
+                cause: refusal(threadId),
+              }),
+            )
+          : runtime.resumeThread(input);
+      },
+      startTurn: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+        commandCenterSessionMismatch(owner, input.threadId)
+          ? Effect.fail(
+              new ProviderAdapter.ProviderAdapterTurnStartError({
+                driver,
+                threadId: input.threadId,
+                providerThreadId: input.providerThread.id,
+                cause: refusal(input.threadId),
+              }),
+            )
+          : runtime.startTurn(input),
+      forkThread: (input: ProviderAdapter.ProviderAdapterV2ForkThreadInput) =>
+        commandCenterSessionMismatch(owner, input.targetThreadId)
+          ? Effect.fail(
+              new ProviderAdapter.ProviderAdapterForkThreadError({
+                driver,
+                providerThreadId: input.sourceProviderThread.id,
+                cause: refusal(input.targetThreadId),
+              }),
+            )
+          : runtime.forkThread(input),
+    },
+  );
+  return bound;
 }
 
 export class ProviderAdapterRegistryLookupError extends Schema.TaggedError<ProviderAdapterRegistryLookupError>()(

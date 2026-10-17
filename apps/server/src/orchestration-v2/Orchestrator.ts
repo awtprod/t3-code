@@ -136,6 +136,7 @@ import {
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
+import { isCommandCenterThreadId } from "../provider/security/CommandCenterProviderIsolation.ts";
 
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
@@ -885,7 +886,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   }) =>
     input.adapter.getCapabilities().pipe(
       Effect.flatMap((capabilities) =>
-        capabilities.sessions.supportsMultipleProviderThreadsPerSession
+        // Fork: a Command Center thread is launched isolated in a session of its
+        // own; sharing would hand it whichever launch opened the shared session.
+        capabilities.sessions.supportsMultipleProviderThreadsPerSession &&
+        !isCommandCenterThreadId(input.threadId)
           ? Effect.succeed(
               idAllocator.derive.providerSession({
                 providerInstanceId: input.providerInstanceId,
