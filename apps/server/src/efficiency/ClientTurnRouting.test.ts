@@ -180,7 +180,8 @@ const storedResult = (
             sequence: 7,
             event: {
               id: EventId.make(`event:${runId}`),
-              type: "run.updated",
+              // What Orchestrator emits for a run a message.dispatch creates.
+              type: "run.created",
               threadId: command.threadId,
               runId,
               occurredAt: now,

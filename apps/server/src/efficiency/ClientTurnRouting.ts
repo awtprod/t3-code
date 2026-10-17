@@ -235,7 +235,11 @@ function runIdForMessage(
   messageId: MessageId,
 ): OrchestrationV2Run["id"] | undefined {
   for (const { event } of storedEvents) {
-    if (event.type === "run.updated" && event.payload.userMessageId === messageId) {
+    // A dispatch that starts or queues a run emits `run.created` for it.
+    if (
+      (event.type === "run.created" || event.type === "run.updated") &&
+      event.payload.userMessageId === messageId
+    ) {
       return event.payload.id;
     }
   }
