@@ -174,7 +174,9 @@ it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         "-g",
         "--prefix",
         v2Prefix,
-        "--allow-scripts=@opencode/cli",
+        // Fork: every script for this one install (maintenanceResolver.ts), because a
+        // per-package allowlist misses transitive native builds.
+        "--dangerously-allow-all-scripts",
         "@opencode/cli@latest",
       ]);
       const v1 = yield* resolveUpdate(
