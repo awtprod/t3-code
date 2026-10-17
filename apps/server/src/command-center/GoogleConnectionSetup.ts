@@ -11,13 +11,14 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import { ServerConfig } from "../config.ts";
 import { ProcessRunner } from "../processRunner.ts";
-import { CommandCenterConfig } from "./Config.ts";
+import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import { googleKeyringEnvironment } from "./GoogleKeyring.ts";
 import {
   buildGoogleHelperSearchPath,
@@ -179,6 +180,34 @@ export function validateGoogleCallbackAddress(
   }
 }
 
+type GoogleSetupCapabilities = CommandCenterGoogleConnectionSetupBeginInput["capabilities"];
+
+/**
+ * The `gog auth add` argv replayed for both remote OAuth steps.
+ *
+ * `--readonly` is always set: in gog 0.15.0 it selects `gmail.readonly` and
+ * `calendar.readonly` (without it, the calendar service maps to the
+ * read-write `auth/calendar` scope; see `internal/googleauth/service.go` at
+ * the v0.15.0 tag). Draft creation adds only the compose scope on top. The
+ * runtime read allowlist (`GOOGLE_READ_COMMAND_ALLOWLIST`) remains the second
+ * guard: it never enables a calendar write command, whatever the token allows.
+ */
+export const buildGoogleAuthReplayArgs = (
+  email: string,
+  capabilities: GoogleSetupCapabilities,
+): ReadonlyArray<string> => [
+  "auth",
+  "add",
+  email,
+  "--services",
+  capabilities.includes("calendar.read") ? "gmail,calendar" : "gmail",
+  "--gmail-scope",
+  "readonly",
+  "--readonly",
+  ...(capabilities.includes("gmail.drafts.create") ? ["--extra-scopes", GMAIL_COMPOSE_SCOPE] : []),
+  "--force-consent",
+];
+
 const decodeOAuthClients = Schema.decodeUnknownEffect(Schema.fromJsonString(OAuthClientsResult));
 const decodeOAuthBegin = Schema.decodeUnknownEffect(Schema.fromJsonString(OAuthBeginResult));
 const decodeOAuthComplete = Schema.decodeUnknownEffect(Schema.fromJsonString(OAuthCompleteResult));
@@ -262,41 +291,72 @@ export const layer = Layer.effect(
       yield* run(["--json", "--no-input", "auth", "credentials", "-"], oauthClientJson);
     });
 
-    const authReplayArgs = (
-      email: string,
-      capabilities: CommandCenterGoogleConnectionSetupBeginInput["capabilities"],
-    ): ReadonlyArray<string> => [
-      "auth",
-      "add",
-      email,
-      "--services",
-      "gmail",
-      "--gmail-scope",
-      "readonly",
-      ...(capabilities.includes("gmail.drafts.create")
-        ? ["--extra-scopes", GMAIL_COMPOSE_SCOPE]
-        : ["--readonly"]),
-      "--force-consent",
-    ];
+    /**
+     * Add `calendar.read` when an enabled connection of this Space already
+     * declares it for the same account, so consent for a configured
+     * connection grants every read it is declared to need.
+     */
+    const withDeclaredCalendarRead = Effect.fn("GoogleConnectionSetup.withDeclaredCalendarRead")(
+      function* (
+        loaded: LoadedCommandCenterConfig,
+        input: Pick<CommandCenterGoogleConnectionSetupBeginInput, "spaceId" | "email">,
+        requested: GoogleSetupCapabilities,
+      ) {
+        if (requested.includes("calendar.read")) return requested;
+        const candidates = loaded.connections.filter(
+          (connection) =>
+            connection.spaceId === input.spaceId &&
+            connection.kind === "google" &&
+            connection.capabilities.includes("cc.connections.google.calendar.read"),
+        );
+        let warned = false;
+        for (const connection of candidates) {
+          // A connection whose account cannot be resolved is treated as another
+          // account; the first such failure per setup is logged, since it can
+          // also be a config storage error that withholds calendar.read.
+          const account = yield* commandCenterConfig
+            .resolveGoogleAccount({ spaceId: input.spaceId, connectionId: connection.id })
+            .pipe(
+              Effect.tapError((error) => {
+                if (warned) return Effect.void;
+                warned = true;
+                return Effect.logWarning(
+                  "google setup could not resolve a declared Calendar connection's account",
+                  {
+                    spaceId: input.spaceId,
+                    connectionId: connection.id,
+                    reason: error.reason,
+                    message: error.message.slice(0, 300),
+                  },
+                );
+              }),
+              Effect.option,
+            );
+          if (
+            Option.isSome(account) &&
+            account.value.accountAlias.toLowerCase() === input.email.toLowerCase()
+          ) {
+            return [...requested, "calendar.read" as const];
+          }
+        }
+        return requested;
+      },
+    );
 
     const begin = Effect.fn("GoogleConnectionSetup.begin")(function* (
       input: CommandCenterGoogleConnectionSetupBeginInput,
     ) {
-      yield* commandCenterConfig.load.pipe(
-        Effect.flatMap((loaded) =>
-          loaded.spaces.some((space) => space.id === input.spaceId)
-            ? Effect.void
-            : Effect.fail(
-                new CommandCenterError({
-                  reason: "not_found",
-                  message: "The selected Space was not found.",
-                }),
-              ),
-        ),
-      );
+      const loaded = yield* commandCenterConfig.load;
+      if (!loaded.spaces.some((space) => space.id === input.spaceId)) {
+        return yield* new CommandCenterError({
+          reason: "not_found",
+          message: "The selected Space was not found.",
+        });
+      }
+      const capabilities = yield* withDeclaredCalendarRead(loaded, input, input.capabilities);
       yield* verifyBinary();
       yield* ensureOAuthClient(input.oauthClientJson);
-      const replayArgs = authReplayArgs(input.email, input.capabilities);
+      const replayArgs = buildGoogleAuthReplayArgs(input.email, capabilities);
       const result = yield* run([
         "--json",
         "--no-input",
@@ -320,7 +380,7 @@ export const layer = Layer.effect(
         next.set(sessionId, {
           spaceId: input.spaceId,
           email: input.email,
-          capabilities: input.capabilities,
+          capabilities,
           replayArgs,
           expectedRedirectUri: prepared.expectation.redirectUri,
           expectedState: prepared.expectation.state,

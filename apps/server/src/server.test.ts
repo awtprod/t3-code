@@ -4917,9 +4917,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
+      // The owner's view keeps mail and calendar rows, which the agent tools leave out.
       assert.deepEqual(queries, [
-        { spaceId: "acme", maxLimit: 100 },
-        { spaceId: "acme", limit: 100, maxLimit: 100 },
+        { spaceId: "acme", maxLimit: 100, includeExternal: true },
+        { spaceId: "acme", limit: 100, maxLimit: 100, includeExternal: true },
       ]);
 
       // Over the contract maximum is rejected before the service is reached.
