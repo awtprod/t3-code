@@ -145,7 +145,9 @@ function parseGrokRecord(parsed: unknown): readonly UsageRecord[] {
     }
   }
 
-  if (modelEntries.length === 0) {
+  // No per-model rows, or only empty ones: the turn's top-level totals are
+  // the only usage Grok reported, so they stand for the whole turn.
+  if (modelEntries.every(({ totals }) => totalTokens(grokTotalsToUsage(totals)) === 0)) {
     if (totalTokens(grokTotalsToUsage(topLevel)) === 0) return [];
     return [
       {
