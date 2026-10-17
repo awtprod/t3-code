@@ -707,7 +707,7 @@ const handlers = {
  * is not strict JSON, so `cc_items_list`, `cc_runs_list` and friends failed
  * every call. An absent key and an `undefined` one mean the same here.
  */
-export const withoutUndefinedFields = <A>(value: A): A => {
+const withoutUndefinedFields = <A>(value: A): A => {
   if (Array.isArray(value)) return value.map(withoutUndefinedFields) as A;
   if (value === null || typeof value !== "object") return value;
   if (Object.getPrototypeOf(value) !== Object.prototype) return value;
