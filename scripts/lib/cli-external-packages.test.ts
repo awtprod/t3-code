@@ -90,6 +90,9 @@ describe("selectCliRuntimeExternalDependencies", () => {
         "node-pty",
         "playwright-core",
         "undici",
+        // Bundled SDKs (MCP, Claude Agent) import zod/v4 while zod stays external
+        // for Cursor's closure, so the server declares it and the sidecar ships it.
+        "zod",
       ],
     );
   });
