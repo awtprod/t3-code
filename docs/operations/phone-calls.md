@@ -11,7 +11,8 @@ calls and SMS are not supported.
 - `cc_phone_call` never dials. It files a `decision` Item, "Call <callee>: <purpose>", with the full
   call plan as an Inbox `phone.call` candidate. Push notifications fire because the agent created
   it. **Approve and call** in the Inbox places the call; that accept needs the
-  `command-center:approve` scope.
+  `command-center:approve` scope and a plan the Space agent filed itself, and it does not dial if
+  the agent has since been disabled or lost `cc.phone.call` (a `Phone: not placed …` row says so).
 - During any call the voice agent can bridge the owner in ("patch me in") through ElevenLabs'
   `transfer_to_number` tool in conference mode. The owner hears a short brief before the callee is
   connected.
@@ -29,10 +30,15 @@ calls and SMS are not supported.
 | Outbound request timeout      | 15 s                                                            |
 | Webhook body                  | 1 MiB, signature within 5 minutes                               |
 
-The day and quiet hours use the Space agent's timezone (`agent.checkIns.timezone`, then
-`agent.quietHours.timezone`). Counts come from the activity rows, so a call that ElevenLabs refused
-does not count. A refused call returns the reason to the agent; an approved call that cannot be
-placed leaves a `Phone: not placed …` row.
+The day and quiet hours use one timezone: `agent.quietHours.timezone`, then
+`agent.checkIns.timezone`, then `America/New_York`. Counts come from the activity rows (phone rows
+are exempt from the 500-row activity retention), so a call that ElevenLabs refused does not count.
+A refused call returns the reason to the agent; an approved call that cannot be placed leaves a
+`Phone: not placed …` row. If ElevenLabs gives no usable answer (timeout, connection failure, or an
+unreadable success response), the call may already be ringing: it leaves a
+`Phone: outcome unknown …` row that counts toward the daily cap, and the tool or the Inbox accept
+reports "outcome unknown — do not retry" instead of "not placed" (no end-of-call row follows, so
+check the ElevenLabs conversation history).
 
 ## Space policy
 

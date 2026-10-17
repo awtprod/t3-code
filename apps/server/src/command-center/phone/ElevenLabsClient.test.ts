@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 
 import {
+  callMayHaveStarted,
   ElevenLabsCallError,
   type FetchLike,
   makeElevenLabsClient,
@@ -104,6 +105,8 @@ describe("ElevenLabsClient.startOutboundCall", () => {
       const client = makeElevenLabsClient({ fetchImpl, timeoutMs: 5 });
       const error = yield* Effect.flip(client.startOutboundCall(request));
       expect(error.reason).toBe("timeout");
+      // No answer: the call may have started.
+      expect(callMayHaveStarted(error)).toBe(true);
       expect(signals).toHaveLength(1);
       expect(signals[0]?.aborted).toBe(true);
     }),
@@ -134,6 +137,7 @@ describe("ElevenLabsClient.startOutboundCall", () => {
       );
       expect(error).toBeInstanceOf(ElevenLabsCallError);
       expect(error.reason).toBe("http");
+      expect(callMayHaveStarted(error)).toBe(false);
       expect(error.status).toBe(422);
       expect(error.body?.length).toBeLessThanOrEqual(300);
       expect(error.body).toContain("…0000");
@@ -159,7 +163,26 @@ describe("ElevenLabsClient.startOutboundCall", () => {
           makeElevenLabsClient({ fetchImpl }).startOutboundCall(request),
         );
         expect(error.reason).toBe(reason);
+        // Only an explicit success=false proves a 2xx answer did not start the call.
+        expect(callMayHaveStarted(error)).toBe(reason !== "rejected");
       }
+    }),
+  );
+
+  it.effect("reports an HTTP error status as a definite refusal even if its body fails", () =>
+    Effect.gen(function* () {
+      const broken = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.error(new TypeError("terminated"));
+        },
+      });
+      const { fetchImpl } = capturing(() => new Response(broken, { status: 503 }));
+      const error = yield* Effect.flip(
+        makeElevenLabsClient({ fetchImpl }).startOutboundCall(request),
+      );
+      expect(error.reason).toBe("http");
+      expect(error.status).toBe(503);
+      expect(callMayHaveStarted(error)).toBe(false);
     }),
   );
 
@@ -191,6 +214,7 @@ describe("ElevenLabsClient.startOutboundCall", () => {
         makeElevenLabsClient({ fetchImpl }).startOutboundCall(request),
       );
       expect(error.reason).toBe("transport");
+      expect(callMayHaveStarted(error)).toBe(true);
     }),
   );
 });

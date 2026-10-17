@@ -12,22 +12,29 @@
  *   approval executor (`PhoneCallProposals`) calls this, after Andrew accepted
  *   the call plan in the Inbox.
  *
- * The call is recorded as a `command_center_space_activity` row only after
- * ElevenLabs confirmed it started ("Phone: calling …"). Daily counts are read
- * from those rows, so there is no extra table; a call that failed to start
- * leaves no row and does not count. One lock serializes check, dial, and
- * record, so concurrent requests cannot both pass the cap.
+ * A call ElevenLabs confirmed is recorded as a `command_center_space_activity`
+ * row "Phone: calling …". A call whose start ElevenLabs neither confirmed nor
+ * refused (timeout, transport failure, unusable 2xx answer) may be ringing, so
+ * it is recorded too, as "Phone: outcome unknown …", and the caller is told not
+ * to retry. Daily counts are read from both kinds of row, so there is no extra
+ * table; only a call ElevenLabs refused leaves no row and does not count. One
+ * lock serializes the clock read, quiet-hours and cap checks, dial, and record,
+ * so concurrent or queued requests cannot pass on a stale check, and the dial
+ * and record cannot be interrupted between them.
  *
  * Phone rows use `source_kind = 'run'` (the activity table only admits thread
- * and run rows), `source_id = 'phone-start:<conversation id>'`, and event
- * sequence 0, which the activity reactor's resume cursor ignores.
+ * and run rows), `source_id = 'phone-start:<conversation id>'` or
+ * `'phone-uncertain:<kind>:<space id>:<attempt id>'`, and event sequence 0,
+ * which the activity reactor's resume cursor ignores.
  *
  * @module PhoneCalls
  */
-import { SpaceId } from "@command-center/core";
+import { type SpaceAgentConfig, SpaceId } from "@command-center/core";
 import { CommandCenterError } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -42,6 +49,7 @@ import * as SpaceActivity from "../SpaceActivity.ts";
 import { isSpaceAgentQuietTime } from "../SpaceAgentWaker.ts";
 import { spaceAgentTimezone } from "../SpaceAgentWakeState.ts";
 import {
+  callMayHaveStarted,
   ElevenLabsClient,
   type ElevenLabsCallError,
   type PhoneCallDynamicVariables,
@@ -71,12 +79,17 @@ export const PhoneCallStatus = {
   ended: "ended",
   notConnected: "not-connected",
   notPlaced: "not-placed",
+  /** ElevenLabs neither confirmed nor refused the start; the call may be ringing. */
+  outcomeUnknown: "outcome-unknown",
 } as const;
+export type PhoneCallKind = "owner" | "third-party";
 const OWNER_CALL_STATUSES = [PhoneCallStatus.callingOwner, PhoneCallStatus.askingOwner];
 const THIRD_PARTY_CALL_STATUSES = [PhoneCallStatus.callingThirdParty];
 
 export const phoneStartSourceId = (conversationId: string) => `phone-start:${conversationId}`;
 export const phoneEndSourceId = (conversationId: string) => `phone-end:${conversationId}`;
+export const phoneUncertainSourceId = (kind: PhoneCallKind, spaceId: string, attemptId: string) =>
+  `phone-uncertain:${kind}:${spaceId}:${attemptId}`;
 
 const START_TITLE_PREFIX = "Phone: calling ";
 
@@ -163,12 +176,23 @@ export const PHONE_NOT_CONFIGURED_REASON =
 
 const refused = (reason: string): PhoneCallOutcome => ({ placed: false, reason });
 
+/**
+ * The local clock for quiet hours and daily caps: the quiet-hours timezone
+ * (the one `isSpaceAgentQuietTime` reads), else the check-in timezone, else
+ * the Space agent default.
+ */
+export const phoneCallTimezone = (
+  agent: Pick<SpaceAgentConfig, "checkIns" | "quietHours"> | undefined,
+): string => agent?.quietHours?.timezone ?? spaceAgentTimezone(agent ?? {});
+
 export interface PhoneCallsShape {
   readonly callOwner: (
     request: OwnerCallRequest,
   ) => Effect.Effect<PhoneCallOutcome, CommandCenterError>;
+  /** `attemptId` keys the "outcome unknown" row; the approval executor passes the revision id. */
   readonly callThirdParty: (
     plan: PhoneCallPlan,
+    options?: { readonly attemptId?: string },
   ) => Effect.Effect<PhoneCallOutcome, CommandCenterError>;
 }
 
@@ -186,6 +210,35 @@ const providerError = (error: ElevenLabsCallError) =>
     cause: error,
   });
 
+/**
+ * The `cause` of a CommandCenterError for a call that may be live (its outcome
+ * is unknown, or it started but its row failed). Such a call is never reported
+ * as "not placed" and must not be retried.
+ */
+export class PhoneCallMayBeLive extends Schema.TaggedError<PhoneCallMayBeLive>()(
+  "PhoneCallMayBeLive",
+  { message: Schema.String, cause: Schema.optional(Schema.Defect()) },
+) {}
+const isPhoneCallMayBeLive = Schema.is(PhoneCallMayBeLive);
+export const phoneCallMayBeLive = (error: CommandCenterError): boolean =>
+  isPhoneCallMayBeLive(error.cause);
+
+const outcomeUnknownError = (error: ElevenLabsCallError, recorded: boolean) => {
+  const message = [
+    `Call outcome unknown — do not retry. ${error.message}`,
+    "ElevenLabs may have started the call, so it may be ringing now.",
+    recorded
+      ? "It counts toward today's call limit."
+      : "It could not be recorded, so it does not count toward today's call limit.",
+    "Check Space activity and the ElevenLabs conversation history before calling again.",
+  ].join(" ");
+  return new CommandCenterError({
+    reason: "connector",
+    message,
+    cause: new PhoneCallMayBeLive({ message, cause: error }),
+  });
+};
+
 const invalidRequest = (message: string) => (cause: unknown) =>
   new CommandCenterError({ reason: "validation", message, cause });
 
@@ -193,26 +246,32 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const store = yield* PhoneConnectionStore;
   const client = yield* ElevenLabsClient;
+  const crypto = yield* Crypto.Crypto;
   const commandCenter = yield* CommandCenterService.CommandCenterService;
   const activity = yield* SpaceActivity.SpaceActivity;
   // One call is checked, placed, and recorded at a time (per server process).
   const dialLock = yield* Semaphore.make(1);
 
+  /** Calls of `kind` started today, including those whose outcome is unknown. */
   const callsToday = Effect.fn("PhoneCalls.callsToday")(function* (input: {
     readonly spaceId: string;
-    readonly statuses: ReadonlyArray<string>;
+    readonly kind: PhoneCallKind;
     readonly nowMs: number;
     readonly timezone: string;
   }) {
     const now = DateTime.formatIso(DateTime.makeUnsafe(input.nowMs));
     const since = DateTime.formatIso(DateTime.makeUnsafe(input.nowMs - DAILY_COUNT_WINDOW_MS));
+    const statuses = input.kind === "owner" ? OWNER_CALL_STATUSES : THIRD_PARTY_CALL_STATUSES;
+    const uncertainPrefix = `phone-uncertain:${input.kind}:%`;
     const rows = yield* sql<{ readonly occurredAt: string }>`
       SELECT occurred_at AS "occurredAt"
       FROM command_center_space_activity
       WHERE space_id = ${input.spaceId}
         AND source_kind = ${PHONE_ACTIVITY_SOURCE_KIND}
-        AND source_id LIKE 'phone-start:%'
-        AND status IN ${sql.in(input.statuses)}
+        AND (
+          (source_id LIKE 'phone-start:%' AND status IN ${sql.in(statuses)})
+          OR (source_id LIKE ${uncertainPrefix} AND status = ${PhoneCallStatus.outcomeUnknown})
+        )
         AND occurred_at >= ${since}
       ORDER BY occurred_at DESC
       LIMIT ${DAILY_COUNT_SCAN_ROWS}
@@ -232,8 +291,26 @@ const make = Effect.gen(function* () {
 
   const requireConnection = store.load;
 
-  /** Dial, then record the start row. Runs under `dialLock`. */
+  const newAttemptId = crypto.randomUUIDv4.pipe(
+    Effect.mapError(
+      (cause) =>
+        new CommandCenterError({
+          reason: "persistence",
+          message: "Could not create a phone call attempt id; nothing was dialed.",
+          cause,
+        }),
+    ),
+  );
+
+  /**
+   * Dial, then record the start row, or the "outcome unknown" row when
+   * ElevenLabs may have started the call without confirming it. Runs under
+   * `dialLock`; the dial (bounded by the client's deadline) and the record
+   * cannot be separated by an interrupt.
+   */
   const dialAndRecord = Effect.fn("PhoneCalls.dialAndRecord")(function* (input: {
+    readonly kind: PhoneCallKind;
+    readonly attemptId: string;
     readonly spaceId: string;
     readonly connection: PhoneConnection;
     readonly agentId: string;
@@ -244,18 +321,53 @@ const make = Effect.gen(function* () {
     readonly summary: string;
     readonly dynamicVariables: PhoneCallDynamicVariables;
   }) {
-    const started = yield* client
-      .startOutboundCall({
+    const attempt = yield* Effect.result(
+      client.startOutboundCall({
         apiKey: input.connection.apiKey,
         agentId: input.agentId,
         agentPhoneNumberId: input.connection.phoneNumberId,
         to: input.to,
         dynamicVariables: input.dynamicVariables,
-      })
-      .pipe(Effect.mapError(providerError));
+      }),
+    );
+    /** A call that may be ringing still gets a row, so it counts and nobody dials again. */
+    const recordOutcomeUnknown = (detail: string) =>
+      Effect.gen(function* () {
+        yield* activity.record({
+          spaceId: input.spaceId,
+          occurredAt: DateTime.formatIso(yield* DateTime.now),
+          sourceKind: PHONE_ACTIVITY_SOURCE_KIND,
+          sourceId: phoneUncertainSourceId(input.kind, input.spaceId, input.attemptId),
+          projectId: null,
+          title: `Phone: outcome unknown ${input.calleeLabel} — ${input.purpose}`,
+          status: PhoneCallStatus.outcomeUnknown,
+          text: [
+            detail,
+            "ElevenLabs may have started this call, so it may be ringing; do not retry it.",
+            "It counts toward today's call limit. No end-of-call result will be recorded",
+            "here; check the ElevenLabs conversation history.",
+          ].join(" "),
+          eventSequence: 0,
+        });
+        return true;
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("phone call outcome-unknown activity could not be recorded", {
+            attemptId: input.attemptId,
+            cause: Cause.pretty(cause),
+          }).pipe(Effect.as(false)),
+        ),
+      );
+
+    if (attempt._tag === "Failure") {
+      const error = attempt.failure;
+      if (!callMayHaveStarted(error)) return yield* providerError(error);
+      return yield* outcomeUnknownError(error, yield* recordOutcomeUnknown(error.message));
+    }
+    const started = attempt.success;
     const occurredAt = DateTime.formatIso(yield* DateTime.now);
-    yield* activity
-      .record({
+    const startRecorded = yield* Effect.result(
+      activity.record({
         spaceId: input.spaceId,
         occurredAt,
         sourceKind: PHONE_ACTIVITY_SOURCE_KIND,
@@ -265,21 +377,28 @@ const make = Effect.gen(function* () {
         status: input.status,
         text: input.summary,
         eventSequence: 0,
-      })
-      .pipe(
-        // The call is already ringing; surface the bookkeeping failure with the
-        // conversation id instead of reporting a call that never happened.
-        Effect.mapError(
-          (cause) =>
-            new CommandCenterError({
-              reason: "persistence",
-              message: `The call started (conversation ${started.conversationId}) but could not be recorded.`,
-              cause,
-            }),
-        ),
+      }),
+    );
+    if (startRecorded._tag === "Failure") {
+      // The call is ringing but its start row is missing: fall back to an
+      // outcome-unknown row so it still counts, and never report it as not placed.
+      const recorded = yield* recordOutcomeUnknown(
+        `The call started (conversation ${started.conversationId}) but its start row could not be recorded.`,
       );
+      const message = [
+        `The call started (conversation ${started.conversationId}) but could not be recorded; do not retry.`,
+        recorded
+          ? "It was recorded as outcome unknown and counts toward today's call limit."
+          : "It does not count toward today's call limit.",
+      ].join(" ");
+      return yield* new CommandCenterError({
+        reason: "persistence",
+        message,
+        cause: new PhoneCallMayBeLive({ message, cause: startRecorded.failure }),
+      });
+    }
     return { placed: true, conversationId: started.conversationId } satisfies PhoneCallOutcome;
-  });
+  }, Effect.uninterruptible);
 
   const callOwner: PhoneCallsShape["callOwner"] = (raw) =>
     Effect.gen(function* () {
@@ -289,19 +408,21 @@ const make = Effect.gen(function* () {
       const space = yield* commandCenter.getConfiguredSpace(request.spaceId);
       const connection = yield* requireConnection;
       if (Option.isNone(connection)) return refused(PHONE_NOT_CONFIGURED_REASON);
-      const nowMs = yield* Clock.currentTimeMillis;
-      if (space.agent !== undefined && isSpaceAgentQuietTime(space.agent, nowMs)) {
-        return refused(
-          "It is the Space agent's quiet hours; Andrew is not called now. File a decision Item instead.",
-        );
-      }
       return yield* dialLock.withPermits(1)(
         Effect.gen(function* () {
+          // Read the clock under the lock: a call that waited for it must not
+          // dial on a quiet-hours check or a local day from before the wait.
+          const nowMs = yield* Clock.currentTimeMillis;
+          if (space.agent !== undefined && isSpaceAgentQuietTime(space.agent, nowMs)) {
+            return refused(
+              "It is the Space agent's quiet hours; Andrew is not called now. File a decision Item instead.",
+            );
+          }
           const placedToday = yield* callsToday({
             spaceId: request.spaceId,
-            statuses: OWNER_CALL_STATUSES,
+            kind: "owner",
             nowMs,
-            timezone: spaceAgentTimezone(space.agent ?? {}),
+            timezone: phoneCallTimezone(space.agent),
           });
           if (placedToday >= PHONE_OWNER_CALLS_PER_DAY) {
             return refused(
@@ -311,6 +432,8 @@ const make = Effect.gen(function* () {
           const owner = connection.value;
           const question = request.question ?? "";
           return yield* dialAndRecord({
+            kind: "owner",
+            attemptId: yield* newAttemptId,
             spaceId: request.spaceId,
             connection: owner,
             agentId: owner.ownerAgentId,
@@ -336,7 +459,7 @@ const make = Effect.gen(function* () {
       );
     });
 
-  const callThirdParty: PhoneCallsShape["callThirdParty"] = (raw) =>
+  const callThirdParty: PhoneCallsShape["callThirdParty"] = (raw, options) =>
     Effect.gen(function* () {
       const plan = yield* decodePlan(raw).pipe(
         Effect.mapError(invalidRequest("The phone call plan is invalid.")),
@@ -349,9 +472,9 @@ const make = Effect.gen(function* () {
           const nowMs = yield* Clock.currentTimeMillis;
           const placedToday = yield* callsToday({
             spaceId: plan.spaceId,
-            statuses: THIRD_PARTY_CALL_STATUSES,
+            kind: "third-party",
             nowMs,
-            timezone: spaceAgentTimezone(space.agent ?? {}),
+            timezone: phoneCallTimezone(space.agent),
           });
           if (placedToday >= PHONE_THIRD_PARTY_CALLS_PER_DAY) {
             return refused(
@@ -360,6 +483,8 @@ const make = Effect.gen(function* () {
           }
           const value = connection.value;
           return yield* dialAndRecord({
+            kind: "third-party",
+            attemptId: options?.attemptId ?? (yield* newAttemptId),
             spaceId: plan.spaceId,
             connection: value,
             agentId: value.agentId,

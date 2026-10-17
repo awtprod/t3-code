@@ -24,7 +24,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 const SPACE_ACTIVITY_SUMMARY_CHARS = 1_000;
 const SPACE_ACTIVITY_TITLE_CHARS = 200;
-/** Rows kept per Space; older rows are pruned on insert. */
+/** Rows kept per Space (phone rows excepted); older rows are pruned on insert. */
 export const SPACE_ACTIVITY_RETENTION = 500;
 export const SPACE_ACTIVITY_MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
@@ -239,12 +239,16 @@ export const make = Effect.gen(function* () {
             RETURNING id
           `;
           if (inserted.length === 0) return false;
+          // Phone rows are kept: daily call caps and webhook matching read them,
+          // and at most a few are written per day.
           yield* sql`
             DELETE FROM command_center_space_activity
             WHERE space_id = ${input.spaceId}
+              AND NOT (source_kind = 'run' AND source_id LIKE 'phone-%')
               AND id NOT IN (
                 SELECT id FROM command_center_space_activity
                 WHERE space_id = ${input.spaceId}
+                  AND NOT (source_kind = 'run' AND source_id LIKE 'phone-%')
                 ORDER BY occurred_at DESC, id DESC
                 LIMIT ${SPACE_ACTIVITY_RETENTION}
               )

@@ -6,7 +6,9 @@ import { ItemId, SpaceId } from "@command-center/core";
 import type { CommandCenterError } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -48,12 +50,24 @@ const NIGHT = "2026-10-18T05:00:00.000Z";
 
 interface Harness {
   readonly dialed: Array<OutboundCallRequest>;
+  /** Every request the fake ElevenLabs client received, including failed ones. */
+  readonly requested: Array<OutboundCallRequest>;
   /** Next outcomes of the fake ElevenLabs client; empty means "succeed". */
   readonly failures: Array<ElevenLabsCallError>;
+  /** Effects the next requests wait on before answering, to hold a dial in flight. */
+  readonly holds: Array<Effect.Effect<void>>;
+  /** The live Space config `getConfiguredSpace` returns; tests may edit it. */
+  readonly space: { enabled: boolean; capabilities: Array<string> };
 }
 
 const makeLayer = (options: { readonly configured?: boolean } = {}) => {
-  const harness: Harness = { dialed: [], failures: [] };
+  const harness: Harness = {
+    dialed: [],
+    requested: [],
+    failures: [],
+    holds: [],
+    space: { enabled: true, capabilities: ["cc.phone.call-owner", "cc.phone.call"] },
+  };
   const secrets = new Map<string, Uint8Array>(
     options.configured === false
       ? []
@@ -78,11 +92,14 @@ const makeLayer = (options: { readonly configured?: boolean } = {}) => {
     ElevenLabsClient,
     ElevenLabsClient.of({
       startOutboundCall: (request) =>
-        Effect.suspend(() => {
+        Effect.gen(function* () {
+          harness.requested.push(request);
+          const hold = harness.holds.shift();
+          if (hold !== undefined) yield* hold;
           const failure = harness.failures.shift();
-          if (failure !== undefined) return Effect.fail(failure);
+          if (failure !== undefined) return yield* failure;
           harness.dialed.push(request);
-          return Effect.succeed({ conversationId: `conv_${harness.dialed.length}` });
+          return { conversationId: `conv_${harness.dialed.length}` };
         }),
     }),
   );
@@ -93,15 +110,16 @@ const makeLayer = (options: { readonly configured?: boolean } = {}) => {
       const sql = yield* SqlClient.SqlClient;
       return {
         getConfiguredSpace: (spaceId: string) =>
-          Effect.succeed({
+          Effect.sync(() => ({
             id: spaceId,
+            policy: { allowedCapabilities: [...harness.space.capabilities] },
             agent: {
-              enabled: true,
+              enabled: harness.space.enabled,
               quietHours: { start: "23:00", end: "07:00", timezone: "America/New_York" },
               dailyWakeLimit: 8,
               debounceMinutes: 10,
             },
-          }),
+          })),
         createItem: (
           input: {
             requestId: string;
@@ -187,6 +205,23 @@ const plan = {
   allowedOutcomes: ["Thursday before noon", "keep Tuesday"],
   patchInWhen: "they need Andrew to confirm insurance details",
 };
+
+const timeoutError = () =>
+  new ElevenLabsCallError({
+    reason: "timeout",
+    message: "ElevenLabs did not answer within 15 s.",
+  });
+
+/** Holds the next dial in flight: `dialing` resolves when it starts, `release` lets it finish. */
+const holdNextDial = (harness: Harness) =>
+  Effect.gen(function* () {
+    const dialing = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    harness.holds.push(
+      Deferred.succeed(dialing, undefined).pipe(Effect.andThen(Deferred.await(release))),
+    );
+    return { dialing, release };
+  });
 
 const ownerCall = (question?: string) => ({
   spaceId: SpaceId.make(SPACE),
@@ -295,10 +330,109 @@ describe("PhoneCalls", () => {
         const error = yield* Effect.flip(calls.callOwner(ownerCall()));
         expect(error.reason).toBe("connector");
         expect(error.message).toContain("HTTP 429");
+        expect(PhoneCalls.phoneCallMayBeLive(error)).toBe(false);
       }
       expect(yield* phoneRows).toEqual([]);
       expect((yield* calls.callOwner(ownerCall())).placed).toBe(true);
     }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("records an unconfirmed call as outcome unknown and counts it toward the cap", () => {
+    const { harness, layer } = makeLayer();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(epoch(DAYTIME));
+      yield* seedSpace;
+      const calls = yield* PhoneCalls.PhoneCalls;
+      expect((yield* calls.callOwner(ownerCall())).placed).toBe(true);
+      harness.failures.push(
+        timeoutError(),
+        new ElevenLabsCallError({
+          reason: "transport",
+          message: "ElevenLabs could not be reached.",
+        }),
+      );
+      for (let index = 0; index < 2; index += 1) {
+        const error = yield* Effect.flip(calls.callOwner(ownerCall()));
+        expect(error.reason).toBe("connector");
+        expect(error.message).toMatch(/^Call outcome unknown — do not retry\./u);
+        expect(error.message).toContain("It counts toward today's call limit.");
+        expect(PhoneCalls.phoneCallMayBeLive(error)).toBe(true);
+      }
+      const rows = yield* phoneRows;
+      expect(rows.map((row) => row.status)).toEqual([
+        "calling-owner",
+        "outcome-unknown",
+        "outcome-unknown",
+      ]);
+      expect(rows[1]).toMatchObject({
+        sourceId: expect.stringMatching(/^phone-uncertain:owner:acme:[0-9a-f-]{36}$/u),
+        title: "Phone: outcome unknown Andrew (…0000) — Vendor switch",
+        summary: expect.stringMatching(
+          /^ElevenLabs did not answer within 15 s\. .*may be ringing; do not retry it\./u,
+        ),
+        eventSequence: 0,
+      });
+      expect(rows[2]?.sourceId).not.toBe(rows[1]?.sourceId);
+      // Both unconfirmed calls count like placed ones: the fourth is refused before dialing.
+      const fourth = yield* calls.callOwner(ownerCall());
+      expect(fourth.placed).toBe(false);
+      expect(fourth.reason).toMatch(/called 3 times today .*limit 3/u);
+      expect(harness.requested).toHaveLength(3);
+      // Owner rows do not use up the third-party allowance.
+      expect((yield* calls.callThirdParty(plan)).placed).toBe(true);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("re-checks quiet hours under the lock for a call queued behind another", () => {
+    const { harness, layer } = makeLayer();
+    return Effect.gen(function* () {
+      // 22:59 in New York, one minute before quiet hours.
+      yield* TestClock.setTime(epoch("2026-10-18T02:59:00.000Z"));
+      yield* seedSpace;
+      const calls = yield* PhoneCalls.PhoneCalls;
+      const { dialing, release } = yield* holdNextDial(harness);
+      const first = yield* Effect.forkChild(calls.callOwner(ownerCall()));
+      yield* Deferred.await(dialing);
+      const queued = yield* Effect.forkChild(calls.callOwner(ownerCall()));
+      // Let the queued call run up to the lock while it is still before quiet hours.
+      for (let spin = 0; spin < 200; spin += 1) yield* Effect.yieldNow;
+      // 23:01: quiet hours have begun by the time the lock is free.
+      yield* TestClock.setTime(epoch("2026-10-18T03:01:00.000Z"));
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(first)).placed).toBe(true);
+      const outcome = yield* Fiber.join(queued);
+      expect(outcome.placed).toBe(false);
+      expect(outcome.reason).toMatch(/quiet hours/u);
+      expect(harness.requested).toHaveLength(1);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("still records a call whose caller is interrupted while it dials", () => {
+    const { harness, layer } = makeLayer();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(epoch(DAYTIME));
+      yield* seedSpace;
+      const calls = yield* PhoneCalls.PhoneCalls;
+      const { dialing, release } = yield* holdNextDial(harness);
+      const call = yield* Effect.forkChild(calls.callOwner(ownerCall()));
+      yield* Deferred.await(dialing);
+      const interrupting = yield* Effect.forkChild(Fiber.interrupt(call));
+      for (let spin = 0; spin < 200; spin += 1) yield* Effect.yieldNow;
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(interrupting);
+      expect(harness.dialed).toHaveLength(1);
+      expect((yield* phoneRows).map((row) => [row.sourceId, row.status])).toEqual([
+        ["phone-start:conv_1", "calling-owner"],
+      ]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it("uses one timezone for quiet hours and the daily cap: quiet hours, then check-ins", () => {
+    const quietHours = { start: "23:00", end: "07:00", timezone: "America/Los_Angeles" };
+    const checkIns = { cron: ["0 9 * * *"], timezone: "Europe/Paris" };
+    expect(PhoneCalls.phoneCallTimezone({ quietHours, checkIns })).toBe("America/Los_Angeles");
+    expect(PhoneCalls.phoneCallTimezone({ checkIns })).toBe("Europe/Paris");
+    expect(PhoneCalls.phoneCallTimezone(undefined)).toBe("America/New_York");
   });
 
   it.effect("refuses when no phone connection is stored", () => {
@@ -327,7 +461,7 @@ const inboxVersion = (itemId: string) =>
       FROM command_center_inbox_state inbox
       LEFT JOIN command_center_inbox_revisions revision ON revision.item_id = inbox.item_id
       WHERE inbox.item_id = ${itemId}
-    `;
+    `.pipe(Effect.orDie);
     return rows[0]!;
   });
 
@@ -498,12 +632,15 @@ describe("PhoneCallProposals", () => {
       const filed = yield* fileCall();
       harness.failures.push(
         new ElevenLabsCallError({
-          reason: "timeout",
-          message: "ElevenLabs did not answer within 15 s.",
+          reason: "http",
+          status: 422,
+          message: "ElevenLabs refused the call (HTTP 422).",
+          body: "invalid to_number",
         }),
       );
       const error = yield* Effect.flip(accept(filed, { canApprove: true }));
       expect(error.reason).toBe("connector");
+      expect(error.message).toContain("HTTP 422");
       expect(yield* phoneRows).toMatchObject([
         {
           sourceId: `phone-not-placed:${filed.candidateRevisionId}`,
@@ -512,6 +649,178 @@ describe("PhoneCallProposals", () => {
         },
       ]);
       expect(harness.dialed).toEqual([]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("re-checks the live Space policy before dialing an approved call", () => {
+    const { harness, layer } = makeLayer();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(epoch(DAYTIME));
+      yield* seedSpace;
+      const disabled = yield* fileCall("dentist-disabled");
+      const narrowed = yield* fileCall("dentist-narrowed");
+      harness.space.enabled = false;
+      const first = yield* Effect.flip(accept(disabled, { canApprove: true }));
+      harness.space.enabled = true;
+      harness.space.capabilities = ["cc.phone.call-owner"];
+      const second = yield* Effect.flip(
+        accept(narrowed, { canApprove: true, mutationId: "web:accept-2" }),
+      );
+      for (const error of [first, second]) {
+        expect(error.reason).toBe("conflict");
+        expect(error.message).toMatch(/not placed: policy: /u);
+      }
+      expect((yield* phoneRows).map((row) => [row.sourceId, row.status])).toEqual([
+        [`phone-not-placed:${disabled.candidateRevisionId}`, "not-placed"],
+        [`phone-not-placed:${narrowed.candidateRevisionId}`, "not-placed"],
+      ]);
+      expect(harness.requested).toEqual([]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("refuses a phone.call candidate the Space agent did not file", () => {
+    const { harness, layer } = makeLayer();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(epoch(DAYTIME));
+      yield* seedSpace;
+      const filed = yield* fileCall();
+      // An operate session adds its own call plan to the Space agent's Item.
+      const inbox = yield* CommandCenterInbox.CommandCenterInbox;
+      const sql = yield* SqlClient.SqlClient;
+      const [item] = yield* sql<{ readonly updatedAt: string }>`
+        SELECT updated_at AS "updatedAt" FROM command_center_items WHERE id = ${filed.itemId}
+      `;
+      const forged = { ...plan, to: "+15550100999", calleeName: "Someone Else" };
+      const target = PhoneCalls.phoneCallTarget(forged);
+      yield* inbox.createCandidate(
+        {
+          spaceId: SpaceId.make(SPACE),
+          itemId: ItemId.make(filed.itemId),
+          mutationId: "web:forged-candidate",
+          expectedVersion: (yield* inboxVersion(filed.itemId)).version,
+          source: "direct",
+          payload: {
+            kind: "prepared-action",
+            actionKind: "phone.call",
+            target,
+            parameters: { ...forged, allowedOutcomes: [...forged.allowedOutcomes] },
+          },
+          preview: { summary: `Call ${target.id}`, after: "Call them." },
+          evidence: {
+            source: "command-center-item",
+            subjectId: filed.itemId,
+            version: item!.updatedAt,
+          },
+        },
+        { subject: "operator" },
+      );
+      const [revision] = yield* sql<{ readonly id: string }>`
+        SELECT id FROM command_center_inbox_revisions
+        WHERE item_id = ${filed.itemId} AND actor_subject = 'operator'
+      `;
+      const error = yield* Effect.flip(
+        accept(
+          { itemId: filed.itemId, candidateRevisionId: revision!.id },
+          { canApprove: true, mutationId: "web:accept-forged" },
+        ),
+      );
+      expect(error.reason).toBe("validation");
+      expect(error.message).toMatch(/filed by this Item's Space agent/u);
+      const [status] = yield* sql<{ readonly status: string }>`
+        SELECT status FROM command_center_inbox_revisions WHERE id = ${revision!.id}
+      `;
+      expect(status?.status).toBe("candidate");
+      expect(harness.requested).toEqual([]);
+      expect(yield* phoneRows).toEqual([]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("still dials and records an approved call when the accept is interrupted", () => {
+    const { harness, layer } = makeLayer();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(epoch(DAYTIME));
+      yield* seedSpace;
+      const filed = yield* fileCall();
+      const { dialing, release } = yield* holdNextDial(harness);
+      const accepting = yield* Effect.forkChild(accept(filed, { canApprove: true }));
+      yield* Deferred.await(dialing);
+      const interrupting = yield* Effect.forkChild(Fiber.interrupt(accepting));
+      for (let spin = 0; spin < 200; spin += 1) yield* Effect.yieldNow;
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(interrupting);
+      expect(harness.dialed).toHaveLength(1);
+      expect((yield* phoneRows).map((row) => [row.sourceId, row.status])).toEqual([
+        ["phone-start:conv_1", "calling-third-party"],
+      ]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect(
+    "records a started call whose start row fails as outcome unknown, not not-placed",
+    () => {
+      const { harness, layer } = makeLayer();
+      return Effect.gen(function* () {
+        yield* TestClock.setTime(epoch(DAYTIME));
+        yield* seedSpace;
+        const filed = yield* fileCall();
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`
+        CREATE TRIGGER fail_phone_start BEFORE INSERT ON command_center_space_activity
+        WHEN NEW.source_id LIKE 'phone-start:%'
+        BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END
+      `;
+        const error = yield* Effect.flip(accept(filed, { canApprove: true }));
+        expect(error.reason).toBe("persistence");
+        expect(error.message).toMatch(
+          /^The call started \(conversation conv_1\) .*do not retry\./u,
+        );
+        expect(error.message).toContain("recorded as outcome unknown");
+        expect(PhoneCalls.phoneCallMayBeLive(error)).toBe(true);
+        expect(harness.dialed).toHaveLength(1);
+        expect(yield* phoneRows).toMatchObject([
+          {
+            sourceId: `phone-uncertain:third-party:${SPACE}:${filed.candidateRevisionId}`,
+            status: "outcome-unknown",
+            summary: expect.stringMatching(/^The call started \(conversation conv_1\)/u),
+          },
+        ]);
+      }).pipe(Effect.provide(layer));
+    },
+  );
+
+  it.effect("treats an approved call whose outcome is unknown as dialed and counts it", () => {
+    const { harness, layer } = makeLayer();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(epoch(DAYTIME));
+      yield* seedSpace;
+      const calls = yield* PhoneCalls.PhoneCalls;
+      for (let index = 0; index < 4; index += 1) {
+        expect((yield* calls.callThirdParty(plan)).placed).toBe(true);
+      }
+      const filed = yield* fileCall();
+      harness.failures.push(timeoutError());
+      const error = yield* Effect.flip(accept(filed, { canApprove: true }));
+      expect(error.reason).toBe("connector");
+      expect(error.message).toMatch(/^Call outcome unknown — do not retry\./u);
+      expect(error.message).not.toMatch(/not placed/u);
+      const rows = yield* phoneRows;
+      expect(rows.slice(4)).toMatchObject([
+        {
+          sourceId: `phone-uncertain:third-party:${SPACE}:${filed.candidateRevisionId}`,
+          title: "Phone: outcome unknown Acme Dental (…0123) — Move Tuesday's cleaning to Thursday",
+          status: "outcome-unknown",
+        },
+      ]);
+      expect(rows.filter((row) => row.status === "not-placed")).toEqual([]);
+      // The revision stays accepted, like a dialed call: accepting it again never dials.
+      expect((yield* inboxVersion(filed.itemId)).status).toBe("current");
+      const again = yield* Effect.flip(
+        accept(filed, { canApprove: true, mutationId: "web:accept-2" }),
+      );
+      expect(again.reason).toBe("conflict");
+      // It is the fifth third-party call today, so the next one is refused by the cap.
+      expect((yield* calls.callThirdParty(plan)).reason).toMatch(/^5 third-party .*limit 5/u);
+      expect(harness.requested).toHaveLength(5);
     }).pipe(Effect.provide(layer));
   });
 });

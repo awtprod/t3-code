@@ -16,6 +16,12 @@
  * fiber aborts the request. Errors carry the HTTP status and a short, redacted
  * body; the API key is never part of an error.
  *
+ * Only an HTTP error status (`http`) or an explicit `success: false`
+ * (`rejected`) proves the call was not started. A timeout or transport failure
+ * has no answer at all, and an unusable 2xx answer (`invalid-response`) may
+ * belong to a call that is already ringing; `callMayHaveStarted` tells them
+ * apart.
+ *
  * @module ElevenLabsClient
  */
 import * as Context from "effect/Context";
@@ -92,6 +98,10 @@ const OutboundCallResponse = Schema.Struct({
   callSid: Schema.optional(Schema.NullOr(Schema.String)),
 });
 const isElevenLabsCallError = Schema.is(ElevenLabsCallError);
+
+/** False only when ElevenLabs answered that it did not start the call (HTTP error or `success: false`). */
+export const callMayHaveStarted = (error: ElevenLabsCallError): boolean =>
+  error.reason !== "http" && error.reason !== "rejected";
 const decodeResponse = Schema.decodeUnknownOption(Schema.fromJsonString(OutboundCallResponse));
 const isConversationId = Schema.is(ElevenLabsConversationId);
 
@@ -181,8 +191,9 @@ export const makeElevenLabsClient = (
         redirect: "error",
         signal,
       });
-      const text = await readBoundedText(response, RESPONSE_MAX_BYTES);
       if (!response.ok) {
+        // An error status is a definite refusal even when its body cannot be read.
+        const text = await readBoundedText(response, RESPONSE_MAX_BYTES).catch(() => "");
         throw new ElevenLabsCallError({
           reason: "http",
           message: `ElevenLabs refused the call (HTTP ${response.status}).`,
@@ -190,6 +201,7 @@ export const makeElevenLabsClient = (
           body: redactProviderText(text),
         });
       }
+      const text = await readBoundedText(response, RESPONSE_MAX_BYTES);
       const decoded = decodeResponse(text);
       if (Option.isNone(decoded)) {
         throw new ElevenLabsCallError({

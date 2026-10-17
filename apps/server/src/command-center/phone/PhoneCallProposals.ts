@@ -8,16 +8,25 @@
  *
  * Accepting that candidate is the approval: `acceptCandidate` wraps the Inbox
  * accept for every candidate. For a `phone.call` candidate it requires the
- * `command-center:approve` scope (plain accepts only need operate), lets the
- * Inbox accept it, and then runs the executor exactly once: only for a fresh
- * accept (a replayed mutation returns `duplicate` and never dials again), only
- * for the revision this session just made current, and only with a plan that
- * still decodes strictly and matches the target the approver saw. Nothing else
- * reaches `PhoneCalls.callThirdParty`.
+ * `command-center:approve` scope (plain accepts only need operate) and a
+ * revision authored by the Item's own Space agent thread (an operate session
+ * can add candidates to any Item, so a hand-made `phone.call` candidate is
+ * refused before it is accepted), lets the Inbox accept it, and then runs the
+ * executor exactly once: only for a fresh accept (a replayed mutation returns
+ * `duplicate` and never dials again), only for the revision this session just
+ * made current, only while the live Space config still enables the agent and
+ * allows `cc.phone.call`, and only with a plan that still decodes strictly and
+ * matches the target the approver saw. The accept and the executor run
+ * uninterruptibly, so a closed socket cannot strand an accepted call without a
+ * dial or a row. Nothing else reaches `PhoneCalls.callThirdParty`.
  *
- * A call that is accepted but cannot be placed (daily cap, provider error)
+ * A call that is accepted but cannot be placed (daily cap, provider refusal)
  * leaves an activity row "Phone: not placed …" so the Space agent learns why,
- * and the accept reports the failure.
+ * and the accept reports the failure. A call whose outcome is unknown (no
+ * answer from ElevenLabs) may be ringing: `PhoneCalls` records it as "Phone:
+ * outcome unknown …" under the revision id, no "not placed" row is written, and
+ * the accept reports "outcome unknown — do not retry". Either way the revision
+ * stays accepted, so the same candidate never dials twice.
  *
  * @module PhoneCallProposals
  */
@@ -47,6 +56,7 @@ import { maskPhoneNumber, PhoneConnectionStore } from "./PhoneConnection.ts";
 import {
   PHONE_ACTIVITY_SOURCE_KIND,
   PHONE_NOT_CONFIGURED_REASON,
+  phoneCallMayBeLive,
   PhoneCallPlan,
   phoneCallTarget,
   PhoneCalls,
@@ -54,6 +64,7 @@ import {
 } from "./PhoneCalls.ts";
 
 const PHONE_CALL_ACTION_KIND = "phone.call";
+const PHONE_CALL_CAPABILITY = "cc.phone.call";
 
 export interface PhoneCallFiled {
   readonly status: "awaiting-approval";
@@ -138,6 +149,23 @@ const renderPlan = (plan: EncodedPlan): string =>
       : `Patch Andrew in when: ${plan.patchInWhen}`,
     "Accepting this candidate places the call immediately.",
   ].join("\n\n");
+
+/**
+ * Whether the revision was authored by the Space agent thread that owns the
+ * Item (`file` writes candidates as `space-agent:<thread id>`).
+ */
+const filedBySpaceAgent = (row: {
+  readonly actorSubject: string;
+  readonly metadataJson: string;
+}): boolean => {
+  if (!isSpaceAgentItemMetadata(row.metadataJson)) return false;
+  const metadata = Option.getOrUndefined(decodeJson(row.metadataJson));
+  const threadId =
+    typeof metadata === "object" && metadata !== null
+      ? (metadata as Record<string, unknown>)["threadId"]
+      : undefined;
+  return typeof threadId === "string" && row.actorSubject === `space-agent:${threadId}`;
+};
 
 /** A call is only placed from an Item that is neither closed nor dismissed. */
 const openForCalling = (row: { readonly itemStatus: string; readonly lifecycle: string }) =>
@@ -235,11 +263,13 @@ const make = Effect.gen(function* () {
   ) {
     const rows = yield* sql<{
       readonly payloadJson: string;
+      readonly actorSubject: string;
+      readonly metadataJson: string;
       readonly itemStatus: string;
       readonly lifecycle: string;
     }>`
-      SELECT revision.payload_json AS "payloadJson", item.status AS "itemStatus",
-        inbox.lifecycle
+      SELECT revision.payload_json AS "payloadJson", revision.actor_subject AS "actorSubject",
+        item.metadata_json AS "metadataJson", item.status AS "itemStatus", inbox.lifecycle
       FROM command_center_inbox_revisions revision
       JOIN command_center_items item ON item.id = revision.item_id
       JOIN command_center_inbox_state inbox ON inbox.item_id = item.id
@@ -293,6 +323,7 @@ const make = Effect.gen(function* () {
     const rows = yield* sql<{
       readonly status: string;
       readonly acceptedBySubject: string | null;
+      readonly actorSubject: string;
       readonly payloadJson: string;
       readonly metadataJson: string;
       readonly itemStatus: string;
@@ -300,7 +331,8 @@ const make = Effect.gen(function* () {
       readonly currentRevisionId: string | null;
     }>`
       SELECT revision.status, revision.accepted_by_subject AS "acceptedBySubject",
-        revision.payload_json AS "payloadJson", item.metadata_json AS "metadataJson",
+        revision.actor_subject AS "actorSubject", revision.payload_json AS "payloadJson",
+        item.metadata_json AS "metadataJson",
         item.status AS "itemStatus", inbox.lifecycle,
         inbox.current_revision_id AS "currentRevisionId"
       FROM command_center_inbox_revisions revision
@@ -321,7 +353,7 @@ const make = Effect.gen(function* () {
         "The call plan is no longer the accepted proposal; nothing was dialed.",
       );
     }
-    if (!isSpaceAgentItemMetadata(row.metadataJson)) {
+    if (!filedBySpaceAgent(row)) {
       return yield* invalid("Only a Space agent's call proposal can be placed.");
     }
     if (!openForCalling(row)) {
@@ -344,17 +376,39 @@ const make = Effect.gen(function* () {
         "The accepted call plan does not match its target; nothing was dialed.",
       );
     }
-    const outcome = yield* phoneCalls.callThirdParty(plan).pipe(
-      Effect.tapError((error) =>
-        recordNotPlaced({
-          spaceId: input.spaceId,
-          revisionId: input.candidateRevisionId,
-          targetLabel: target.id,
-          purpose: plan.purpose,
-          reason: error.message,
-        }),
-      ),
-    );
+    // Re-check the live policy: the agent may have been disabled, or lost the
+    // capability, between filing and approval.
+    const space = yield* commandCenter.getConfiguredSpace(input.spaceId);
+    if (
+      space.agent?.enabled !== true ||
+      !space.policy.allowedCapabilities.includes(PHONE_CALL_CAPABILITY)
+    ) {
+      const reason = `policy: the Space agent is disabled or no longer allowed ${PHONE_CALL_CAPABILITY}.`;
+      yield* recordNotPlaced({
+        spaceId: input.spaceId,
+        revisionId: input.candidateRevisionId,
+        targetLabel: target.id,
+        purpose: plan.purpose,
+        reason,
+      });
+      return yield* conflict(`Accepted, but the call was not placed: ${reason}`);
+    }
+    const outcome = yield* phoneCalls
+      .callThirdParty(plan, { attemptId: input.candidateRevisionId })
+      .pipe(
+        Effect.tapError((error) =>
+          // A call that may be ringing already has its own row; never call it "not placed".
+          phoneCallMayBeLive(error)
+            ? Effect.void
+            : recordNotPlaced({
+                spaceId: input.spaceId,
+                revisionId: input.candidateRevisionId,
+                targetLabel: target.id,
+                purpose: plan.purpose,
+                reason: error.message,
+              }),
+        ),
+      );
     if (!outcome.placed) {
       const reason = outcome.reason ?? "the call was refused.";
       yield* recordNotPlaced({
@@ -380,13 +434,23 @@ const make = Effect.gen(function* () {
           "Accepting this candidate places a phone call, which needs approval authority.",
         );
       }
+      if (!filedBySpaceAgent(phoneCall.value)) {
+        return yield* invalid(
+          "Only a call plan filed by this Item's Space agent can be approved; nothing was accepted.",
+        );
+      }
       if (!openForCalling(phoneCall.value)) {
         return yield* conflict("Reopen this Item before approving its call.");
       }
-      const result = yield* inbox.acceptCandidate(input, { subject: context.subject });
-      if (result.duplicate) return result;
-      yield* execute(input, context.subject);
-      return result;
+      // Once accepted, the call is attempted and recorded even if the caller goes away.
+      return yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          const result = yield* inbox.acceptCandidate(input, { subject: context.subject });
+          if (result.duplicate) return result;
+          yield* execute(input, context.subject);
+          return result;
+        }),
+      );
     });
 
   return PhoneCallProposals.of({ file, acceptCandidate });
