@@ -199,6 +199,7 @@ const storedResult = (
 
 const makeLayer = (input: {
   readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+  readonly judge?: Judge.JudgeShape;
   readonly threads: ReadonlyMap<ThreadId, RoutingThreadSnapshot>;
   readonly conversation?: ReadonlyArray<{
     readonly role: "user" | "assistant";
@@ -226,7 +227,9 @@ const makeLayer = (input: {
         getProviders: Effect.succeed(providers),
       } as unknown as ProviderRegistry["Service"]),
     ),
-    Layer.provide(Judge.layerTest),
+    Layer.provide(
+      input.judge === undefined ? Judge.layerTest : Layer.succeed(Judge.Judge, input.judge),
+    ),
     Layer.provide(ServerSettings.layerTest(input.settings ?? {})),
     Layer.provide(NodeServices.layer),
   );
@@ -387,6 +390,52 @@ describe("auto routing on V2 client turns", () => {
             ...boundParent,
             runs: [{ ...completedRun(parentId, 2), status: "running" }],
           }),
+        }),
+      ),
+    ),
+  );
+
+  it.effect("applies a confident Jev tier judgment and records it on the decision", () =>
+    Effect.gen(function* () {
+      yield* setRouting(parentId, "auto", "economy");
+      const { reached } = yield* dispatchThroughRouter(messageDispatch());
+      const dispatched = reached[0] as Extract<
+        OrchestrationV2Command,
+        { type: "message.dispatch" }
+      >;
+      // Judged "hard" with confidence 0.9 >= minConfidence: economy -> quality.
+      assert.deepStrictEqual(dispatched.modelSelection, astra);
+      const decision = (yield* Effect.flatMap(ThreadRoutingService, (routing) =>
+        routing.get(parentId),
+      )).latestDecision?.decision;
+      assert.strictEqual(decision?.tier, "quality");
+      assert.strictEqual(decision?.judgment?.applied, true);
+      assert.strictEqual(decision?.judgment?.model, "jev-latest");
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          settings: {
+            efficiency: { ...efficiencyOn.efficiency, tierJudgment: { enabled: true } },
+          },
+          // Not yet bound to a provider thread, so the route applies in place.
+          threads: threads({ ...boundParent, thread: appThread(parentId) }),
+          judge: {
+            enabled: true,
+            ask: () =>
+              Effect.succeed({
+                answers: {
+                  complexity: {
+                    type: "score",
+                    score: 2,
+                    confidence: 0.9,
+                    probabilities: { "0": 0.05, "1": 0.05, "2": 0.9 },
+                  },
+                },
+                model: "jev-latest",
+                usage: { inputTokens: 10, outputTokens: 0 },
+                latencyMs: 1,
+              }),
+          },
         }),
       ),
     ),
