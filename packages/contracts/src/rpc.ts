@@ -468,6 +468,8 @@ import {
   CommandCenterRunStartResult,
   CommandCenterSpaceAgentActivityInput,
   CommandCenterSpaceAgentActivityResult,
+  CommandCenterThreadPlanProgressInput,
+  CommandCenterThreadPlanProgressUpdate,
   CommandCenterSpaceAgentListInput,
   CommandCenterSpaceAgentListResult,
   CommandCenterSpaceAgentSetPausedInput,
@@ -818,6 +820,16 @@ export const WsCommandCenterRunStartRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.run
   success: CommandCenterRunStartResult,
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
+
+export const WsCommandCenterThreadPlanProgressSubscribeRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.threadPlanProgressSubscribe,
+  {
+    payload: CommandCenterThreadPlanProgressInput,
+    success: CommandCenterThreadPlanProgressUpdate,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+    stream: true,
+  },
+);
 
 export const WsCommandCenterEventsReplayRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.eventsReplay, {
   payload: CommandCenterEventReplayInput,
@@ -2768,6 +2780,7 @@ export const WsCommandCenterRpcGroup = RpcGroup.make(
   WsCommandCenterSpaceAgentWakeRpc,
   WsCommandCenterSpaceAgentSetPausedRpc,
   WsCommandCenterSpaceAgentActivityRpc,
+  WsCommandCenterThreadPlanProgressSubscribeRpc,
   WsCommandCenterEventsReplayRpc,
   WsCommandCenterEventsSubscribeRpc,
   WsCommandCenterTimelineQueryRpc,

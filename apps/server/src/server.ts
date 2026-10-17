@@ -216,6 +216,7 @@ import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as RunRecoveryCoordinator from "./command-center/RunRecoveryCoordinator.ts";
 import * as SpaceAgent from "./command-center/SpaceAgent.ts";
 import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
+import * as SpaceActivityReactor from "./command-center/SpaceActivityReactor.ts";
 import * as RunLifecycle from "./command-center/RunLifecycle.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import * as OrchestrationBridge from "./command-center/OrchestrationBridge.ts";
@@ -635,10 +636,10 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 
 // ---------------------------------------------------------------------------
 // Command Center (fork). The layer graph below is the fork's, re-hosted on the
-// orchestration V2 runtime. Workers that drove the deleted V1 engine
-// (RunDispatcher, RunLifecycle, RunRecoveryCoordinator, SpaceAgent,
-// SpaceAgentWaker, Instagram publishing) reach orchestration only through
-// `OrchestrationBridge`, whose unported operations fail with `V2PortPending`.
+// orchestration V2 runtime. Workers that drive orchestration (RunDispatcher,
+// RunLifecycle, RunRecoveryCoordinator, SpaceAgent, SpaceAgentWaker, the Space
+// activity feed, Instagram publishing) reach it only through
+// `OrchestrationBridge`.
 // ---------------------------------------------------------------------------
 
 const layerCommandCenterOrchestrationBridge = OrchestrationBridge.layer.pipe(
@@ -840,6 +841,13 @@ const layerSpaceAgent = SpaceAgent.layer.pipe(
   Layer.provide(layerPersistence),
 );
 
+const layerSpaceActivityReactor = SpaceActivityReactor.layer.pipe(
+  Layer.provide(layerCommandCenterBase),
+  Layer.provide(layerCommandCenterOrchestrationBridge),
+  Layer.provide(RepositoryIdentityResolver.layer),
+  Layer.provide(layerPersistence),
+);
+
 const layerSpaceAgentWaker = SpaceAgentWaker.layer.pipe(
   Layer.provide(layerSpaceAgent),
   Layer.provide(layerPersistence),
@@ -868,6 +876,7 @@ const layerCommandCenter = Layer.mergeAll(
   layerRunLifecycle,
   layerSpaceAgent,
   layerSpaceAgentWaker,
+  layerSpaceActivityReactor,
   layerCommandCenterOrchestrationBridge,
   SprintPlan.layer.pipe(Layer.provide(layerPersistence)),
   ReadinessGate.layer,

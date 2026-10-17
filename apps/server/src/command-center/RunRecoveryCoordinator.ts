@@ -277,8 +277,6 @@ const make = Effect.gen(function* () {
     dispatch: (runId) =>
       runDispatcher.dispatch({
         runId,
-        // V2PORT: Run recovery redispatch emits V1 commands, which the bridge
-        // fails with V2PortPending until S2 maps Runs onto OrchestratorV2.
         dispatchCommand: orchestration.dispatchCommand,
       }),
   });
