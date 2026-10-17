@@ -1,6 +1,7 @@
 import {
   INSTAGRAM_REEL_METHODS,
   ORCHESTRATION_V2_WS_METHODS,
+  EFFICIENCY_WS_METHODS,
   WS_METHODS,
   type WsCommandCenterRpcGroup,
   type WsRpcGroup,
@@ -34,6 +35,9 @@ const RPC_AGGREGATES = {
   ...COMMAND_CENTER_RPC_AGGREGATES,
   [WS_METHODS.usageQuery]: "usage",
   [WS_METHODS.efficiencyPreviewDecision]: "efficiency",
+  [EFFICIENCY_WS_METHODS.threadRoutingGet]: "efficiency",
+  [EFFICIENCY_WS_METHODS.threadRoutingSet]: "efficiency",
+  [EFFICIENCY_WS_METHODS.threadRoutingSubscribe]: "efficiency",
   [WS_METHODS.serverGetHostUsage]: "server",
   [WS_METHODS.serverScanHostDiskUsage]: "server",
   [WS_METHODS.serverReclaimHostDiskArtifacts]: "server",

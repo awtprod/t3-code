@@ -37,11 +37,10 @@
     // S3 re-wires the plain-browser preview iframe into upstream's PreviewView.
     "apps/web/src/browser/WebPreviewFrame.tsx": ["files"],
     // V2PORT: fork exports whose v1 consumers (or tests) were removed with v1
-    // orchestration; each slice re-wires its own. S1: raw-route auth. S4: efficiency Judge layers.
+    // orchestration; each slice re-wires its own. S1: raw-route auth.
     "apps/server/src/auth/EnvironmentAuth.ts": ["exports"],
     "apps/server/src/http.ts": ["exports"],
     "apps/server/src/server.ts": ["exports"],
-    "apps/server/src/efficiency/Judge.ts": ["exports"],
   },
   "workspaces": {
     ".": {

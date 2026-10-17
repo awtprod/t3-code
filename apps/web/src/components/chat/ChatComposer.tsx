@@ -27,6 +27,7 @@ import type {
   ChatAttachment as ContractChatAttachment,
   ChatFileAttachment,
   EnvironmentId,
+  EfficiencyRunDecision,
   EfficiencyTier,
   ModelSelection,
   ProjectId,
@@ -287,6 +288,7 @@ import {
 } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
+import { EfficiencyRoutingControl } from "./EfficiencyRoutingControl";
 import { ComposerImageThumbnail } from "./ComposerImageThumbnail";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
@@ -1658,6 +1660,9 @@ export interface ChatComposerProps {
   compactDisabledReason: string | null;
   efficiencyRoutingMode: ThreadRoutingMode;
   efficiencyTier: EfficiencyTier;
+  /** The thread's newest routed turn, shown on the routing control. */
+  efficiencyLatestDecision: EfficiencyRunDecision | null;
+  onEfficiencyRoutingChange: (mode: ThreadRoutingMode, tier: EfficiencyTier) => void;
 
   // Misc
   resolvedTheme: "light" | "dark";
@@ -1813,6 +1818,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     compactDisabledReason,
     efficiencyRoutingMode,
     efficiencyTier,
+    efficiencyLatestDecision,
+    onEfficiencyRoutingChange,
     resolvedTheme,
     settings,
     keybindings,
@@ -2477,9 +2484,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => resolveContextWindowModelDisplayName(activeThreadModelSelection, modelOptionsByInstance),
     [activeThreadModelSelection, modelOptionsByInstance],
   );
-  // V2PORT: efficiency routing fields (S4) — EnvironmentThreadShell has no
-  // routingMode/efficiencyTier, so the thresholds key off the routing state ChatView passes in
-  // (manual until v2 threads carry routing again).
+  // The routing state ChatView passes in comes from the efficiency side channel
+  // (V2 thread shells carry no routing fields).
   const contextAdviceThreshold =
     efficiencyRoutingMode === "auto" ? settings.efficiency.contextThresholds[efficiencyTier] : null;
   const toolWarningThreshold =
@@ -5385,6 +5391,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     hidden: composerControlsHidden || restingHiddenBlockCount > 1,
   });
   const restingBlockDefs = [
+    ...(settings.efficiency.enabled
+      ? [
+          {
+            id: "routing",
+            content: (
+              <EfficiencyRoutingControl
+                mode={efficiencyRoutingMode}
+                tier={efficiencyTier}
+                latestDecision={efficiencyLatestDecision}
+                size={composerControlsCollapsed ? "xs" : "sm"}
+                hidden={composerControlsHidden || restingHiddenBlockCount > 0}
+                onChange={onEfficiencyRoutingChange}
+              />
+            ),
+          },
+        ]
+      : []),
     ...(providerTraitsPicker
       ? [
           {

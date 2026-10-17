@@ -365,7 +365,13 @@ import {
   UsageSummary,
   UsageSummaryInput,
 } from "./usage.ts";
-import { EfficiencyPreviewInput, EfficiencyPreviewResult } from "./efficiency.ts";
+import {
+  EfficiencyPreviewInput,
+  EfficiencyPreviewResult,
+  WsEfficiencyThreadRoutingGetRpc,
+  WsEfficiencyThreadRoutingSetRpc,
+  WsEfficiencyThreadRoutingSubscribeRpc,
+} from "./efficiency.ts";
 import {
   StorageCleanupReport,
   ServerSettings,
@@ -2893,6 +2899,9 @@ export const WsCoreRpcGroup = RpcGroup.make(
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
   WsEfficiencyPreviewDecisionRpc,
+  WsEfficiencyThreadRoutingGetRpc,
+  WsEfficiencyThreadRoutingSetRpc,
+  WsEfficiencyThreadRoutingSubscribeRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerSearchAcpRegistryRpc,
   WsServerPrepareAcpRegistryAgentRpc,

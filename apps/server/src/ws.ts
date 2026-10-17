@@ -106,6 +106,7 @@ import {
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
   type WorktreeCleanupNotice,
+  EFFICIENCY_WS_METHODS,
   WS_METHODS,
   WsCoreRpcGroup,
   WsRpcGroup,
@@ -230,7 +231,9 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
 import * as HostUsage from "./resourceTelemetry/HostUsage.ts";
 import * as WorktreeCleanup from "./worktreeCleanup.ts";
+import * as ClientTurnRouting from "./efficiency/ClientTurnRouting.ts";
 import { resolveInteractiveEfficiency } from "./efficiency/EfficiencyRouting.ts";
+import * as ThreadRouting from "./efficiency/ThreadRouting.ts";
 import { ProjectionTurnUsageRepository } from "./persistence/Services/ProjectionTurnUsage.ts";
 import { ProjectionTurnUsageRepositoryLive } from "./persistence/Layers/ProjectionTurnUsage.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
@@ -1162,6 +1165,24 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
   },
 );
 
+/**
+ * The `dispatchCommand` path for every client command except a prepared-run
+ * retry: creation provenance, then efficiency routing (a pass-through unless
+ * the thread is auto-routed and `settings.efficiency.enabled`), then intake.
+ */
+export const intakeClientCommand = (
+  router: ClientTurnRouting.ClientTurnRouterShape,
+  command: OrchestrationV2Command,
+) =>
+  ClientTurnRouting.dispatchClientCommand(
+    router,
+    ThreadManagementService.withCreationProvenance(command, {
+      createdBy: "user",
+      creationSource: "creationSource" in command ? command.creationSource : "web",
+    }),
+    ThreadMessageIntake.dispatchCommand,
+  );
+
 const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientOrigin: OrchestrationClientOrigin,
@@ -1203,6 +1224,8 @@ const layerWsRpc = (
         }
       };
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
+      const clientTurnRouter = yield* ClientTurnRouting.ClientTurnRouter;
+      const threadRouting = yield* ThreadRouting.ThreadRoutingService;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const secretRequests = yield* SecretRequests.SecretRequests;
@@ -1841,13 +1864,7 @@ const layerWsRpc = (
                   // A retry also restarts the preparation work the launch owns.
                   (command.type === "prepared-run.retry"
                     ? threadLaunch.retryPreparation(command)
-                    : ThreadMessageIntake.dispatchCommand(
-                        ThreadManagementService.withCreationProvenance(command, {
-                          createdBy: "user",
-                          creationSource:
-                            "creationSource" in command ? command.creationSource : "web",
-                        }),
-                      )
+                    : intakeClientCommand(clientTurnRouter, command)
                   ).pipe(Effect.provide(intakeContext)),
                 )
                 .pipe(
@@ -1957,38 +1974,42 @@ const layerWsRpc = (
             Effect.andThen(
               startup
                 .enqueueCommand(
-                  ThreadMessageIntake.launchThread({
-                    commandId: input.commandId,
-                    ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
-                    ...(input.reuseExistingThread === undefined
-                      ? {}
-                      : { reuseExistingThread: input.reuseExistingThread }),
-                    projectId: input.projectId,
-                    title: input.title,
-                    ...(input.generateTitle === undefined
-                      ? {}
-                      : { generateTitle: input.generateTitle }),
-                    modelSelection: input.modelSelection,
-                    runtimeMode: input.runtimeMode,
-                    interactionMode: input.interactionMode,
-                    workspaceStrategy: input.workspaceStrategy,
-                    ...(input.initialMessage === undefined
-                      ? {}
-                      : {
-                          initialMessage: {
-                            ...(input.initialMessage.messageId === undefined
-                              ? {}
-                              : { messageId: input.initialMessage.messageId }),
-                            text: input.initialMessage.text,
-                            attachments: input.initialMessage.attachments,
-                            ...(input.initialMessage.context === undefined
-                              ? {}
-                              : { context: input.initialMessage.context }),
-                          },
-                        }),
-                    createdBy: "user",
-                    creationSource: input.creationSource ?? "web",
-                  }).pipe(Effect.provide(intakeContext)),
+                  ClientTurnRouting.launchClientThread(
+                    clientTurnRouter,
+                    {
+                      commandId: input.commandId,
+                      ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+                      ...(input.reuseExistingThread === undefined
+                        ? {}
+                        : { reuseExistingThread: input.reuseExistingThread }),
+                      projectId: input.projectId,
+                      title: input.title,
+                      ...(input.generateTitle === undefined
+                        ? {}
+                        : { generateTitle: input.generateTitle }),
+                      modelSelection: input.modelSelection,
+                      runtimeMode: input.runtimeMode,
+                      interactionMode: input.interactionMode,
+                      workspaceStrategy: input.workspaceStrategy,
+                      ...(input.initialMessage === undefined
+                        ? {}
+                        : {
+                            initialMessage: {
+                              ...(input.initialMessage.messageId === undefined
+                                ? {}
+                                : { messageId: input.initialMessage.messageId }),
+                              text: input.initialMessage.text,
+                              attachments: input.initialMessage.attachments,
+                              ...(input.initialMessage.context === undefined
+                                ? {}
+                                : { context: input.initialMessage.context }),
+                            },
+                          }),
+                      createdBy: "user",
+                      creationSource: input.creationSource ?? "web",
+                    },
+                    ThreadMessageIntake.launchThread,
+                  ).pipe(Effect.provide(intakeContext)),
                 )
                 .pipe(
                   Effect.tap(() =>
@@ -2435,6 +2456,16 @@ const layerWsRpc = (
                 }),
             ),
           ),
+        [EFFICIENCY_WS_METHODS.threadRoutingGet]: (input) => threadRouting.get(input.threadId),
+        [EFFICIENCY_WS_METHODS.threadRoutingSet]: (input) =>
+          threadRouting.set({
+            threadId: input.threadId,
+            routingMode: input.routingMode,
+            efficiencyTier: input.efficiencyTier,
+            ...(input.retryOfTurnId === undefined ? {} : { retryOfTurnId: input.retryOfTurnId }),
+          }),
+        [EFFICIENCY_WS_METHODS.threadRoutingSubscribe]: (input) =>
+          threadRouting.subscribe(input.threadId),
         [WS_METHODS.efficiencyPreviewDecision]: (input) =>
           Effect.gen(function* () {
             const threadId = ThreadId.make(input.threadId ?? "efficiency-preview-thread");
@@ -2448,9 +2479,9 @@ const layerWsRpc = (
               providerRegistry.getProviders,
             ]);
             // Tier judgment is a per-message live signal; the settings preview
-            // shows only the deterministic rule/static routing. V2 shells carry
-            // no routing fields yet (S4), so the thread contributes only its
-            // project and model.
+            // shows only the deterministic rule/static routing. The thread
+            // contributes its project and model; the client passes the tier
+            // it shows (the thread's side-channel routing tier).
             const resolution = resolveInteractiveEfficiency({
               command: {
                 type: "thread.turn.start",

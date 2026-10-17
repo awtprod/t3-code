@@ -167,6 +167,10 @@ import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAcco
 import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as ClaudeToolResultSieveLive from "./efficiency/ClaudeToolResultSieveLive.ts";
+import * as ClientTurnRouting from "./efficiency/ClientTurnRouting.ts";
+import * as Judge from "./efficiency/Judge.ts";
+import * as ThreadRouting from "./efficiency/ThreadRouting.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
@@ -922,8 +926,16 @@ const layerCommandCenterRuntime = Layer.mergeAll(
   layerLocalWebPushNotifier,
 );
 
+// Efficiency routing on orchestration V2 (fork): the client-turn router the
+// WebSocket dispatch path calls, and the per-thread routing side channel.
+const layerEfficiencyRouting = ClientTurnRouting.layer.pipe(
+  Layer.provideMerge(ThreadRouting.layer),
+  Layer.provide(ClientTurnRouting.readsLayer),
+);
+
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   AgentAwarenessRelay.layer,
+  layerEfficiencyRouting,
   layerCommandCenterRuntime,
   // Asks T3 Connect to deliver webhooks it held while this environment was offline.
   HeldHooksWaker.layer,
@@ -998,6 +1010,11 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;
   // hydration adds their default instances to `providerInstances` on boot.
   Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+  // The Claude driver's tool-result sieve hook (none while sieve.mode is off),
+  // then the efficiency judge it and tier judgment use. The judge is disabled
+  // (`transport: "off"`) unless configured.
+  Layer.provideMerge(ClaudeToolResultSieveLive.layer.pipe(Layer.provide(layerServerSettings))),
+  Layer.provideMerge(Judge.layer.pipe(Layer.provide(layerServerSettings))),
   Layer.provideMerge(
     Layer.mergeAll(
       AntigravityInstallation.AntigravityInstallation.layer,

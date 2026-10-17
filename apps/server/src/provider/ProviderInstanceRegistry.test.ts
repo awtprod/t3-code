@@ -48,7 +48,10 @@ import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
+import * as ClaudeToolResultSieveLive from "../efficiency/ClaudeToolResultSieveLive.ts";
+import * as Judge from "../efficiency/Judge.ts";
 import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -635,6 +638,14 @@ describe("ProviderInstanceRegistry — all drivers slice", () => {
     ),
   );
   const layerBaseDeps = AntigravityInstallation.AntigravityInstallation.layer.pipe(
+    // The Claude driver builds its tool-result sieve hook from the efficiency
+    // Judge (disabled here), as the server does.
+    Layer.provideMerge(
+      ClaudeToolResultSieveLive.layer.pipe(
+        Layer.provide(Judge.layerTest),
+        Layer.provide(NodeSqliteClient.layer({ filename: ":memory:" })),
+      ),
+    ),
     Layer.provideMerge(ServerSecretStore.layer),
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), {

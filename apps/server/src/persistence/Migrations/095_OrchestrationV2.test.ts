@@ -14,7 +14,7 @@ layer("095_OrchestrationV2", (it) => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
         // 57-60 are retired fork ids (see RETIRED_MIGRATION_IDS).
-        Array.from({ length: 102 }, (_, index) => index + 1).filter((id) => id < 57 || id > 60),
+        Array.from({ length: 103 }, (_, index) => index + 1).filter((id) => id < 57 || id > 60),
       );
     }),
   );
@@ -35,6 +35,7 @@ layer("095_OrchestrationV2", (it) => {
         [100, "ThreadSnapshotWindowIndexes"],
         [101, "PullRequestReviewGuides"],
         [102, "ThreadFailureLookupIndex"],
+        [103, "EfficiencyRoutingSideChannel"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -63,6 +64,7 @@ layer("095_OrchestrationV2", (it) => {
         { migration_id: 100, name: "ThreadSnapshotWindowIndexes" },
         { migration_id: 101, name: "PullRequestReviewGuides" },
         { migration_id: 102, name: "ThreadFailureLookupIndex" },
+        { migration_id: 103, name: "EfficiencyRoutingSideChannel" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`

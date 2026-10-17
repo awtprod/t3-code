@@ -80,6 +80,7 @@ import {
   waitForComposerDraftsLoaded,
 } from "./use-composer-drafts";
 import { useAtomCommand } from "./use-atom-command";
+import { mobileEfficiency } from "./efficiency";
 import {
   dispatchingQueuedMessageIdAtom,
   editingQueuedMessageIdsAtom,
@@ -696,6 +697,37 @@ async function preserveUploadedAttachmentsForEditor(
 
 export function useThreadOutboxDrain(): void {
   const startTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const setThreadRouting = useAtomCommand(mobileEfficiency.setThreadRouting, {
+    reportFailure: false,
+  });
+  /**
+   * Efficiency routing is a server side channel, so the queued routing choice is
+   * saved for the thread before its turn reaches the server's router. Nothing is
+   * sent while routing is off. A failed save is not fatal: the turn then runs
+   * with the thread's stored routing.
+   */
+  const persistQueuedRouting = useCallback(
+    async (input: {
+      readonly config: {
+        readonly settings?: { readonly efficiency: { readonly enabled: boolean } };
+      };
+      readonly environmentId: QueuedThreadMessage["environmentId"];
+      readonly threadId: QueuedThreadMessage["threadId"];
+      readonly routingMode: "manual" | "auto";
+      readonly efficiencyTier: QueuedThreadMessage["efficiencyTier"];
+    }) => {
+      if (input.config.settings?.efficiency.enabled !== true) return;
+      await setThreadRouting({
+        environmentId: input.environmentId,
+        input: {
+          threadId: input.threadId,
+          routingMode: input.routingMode,
+          efficiencyTier: input.efficiencyTier ?? null,
+        },
+      });
+    },
+    [setThreadRouting],
+  );
   const preparePullRequest = useAtomCommand(gitEnvironment.preparePullRequestThread, {
     reportFailure: false,
   });
@@ -950,6 +982,13 @@ export function useThreadOutboxDrain(): void {
         currentConfig.providers,
       );
       if (!hasAccess()) return true;
+      await persistQueuedRouting({
+        config: currentConfig,
+        environmentId: queuedMessage.environmentId,
+        threadId: queuedMessage.threadId,
+        routingMode: sendSettings.routingMode,
+        efficiencyTier: sendSettings.efficiencyTier,
+      });
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
         input: {
@@ -977,10 +1016,6 @@ export function useThreadOutboxDrain(): void {
           }),
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
-          // V2PORT: the v2 start-turn command (StartThreadTurnInput) and thread
-          // metadata update carry no routingMode/efficiencyTier, so the queued
-          // routing choice is not sent. Efficiency routing stays off until v2
-          // contracts grow a routing field.
           createdAt: queuedMessage.createdAt,
           // Rows written before follow-up behavior existed keep the previous
           // delivery, which the server turns into a queued run when a turn is
@@ -1006,6 +1041,7 @@ export function useThreadOutboxDrain(): void {
     },
     [
       makeDeliveryHelpers,
+      persistQueuedRouting,
       setThreadInteractionMode,
       setThreadRuntimeMode,
       startTurn,
@@ -1129,6 +1165,13 @@ export function useThreadOutboxDrain(): void {
           startFromOrigin: false,
         };
       }
+      await persistQueuedRouting({
+        config: currentConfig,
+        environmentId: queuedMessage.environmentId,
+        threadId: queuedMessage.threadId,
+        routingMode: sendSettings.routingMode,
+        efficiencyTier: sendSettings.efficiencyTier,
+      });
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
         input: buildProjectThreadStartTurnInput({
@@ -1183,7 +1226,13 @@ export function useThreadOutboxDrain(): void {
       }
       return outcome === "removed";
     },
-    [makeDeliveryHelpers, preparePullRequest, restoreQueuedMessage, startTurn],
+    [
+      makeDeliveryHelpers,
+      persistQueuedRouting,
+      preparePullRequest,
+      restoreQueuedMessage,
+      startTurn,
+    ],
   );
 
   // A creation outcome bridges setup until the server's shell has a turn.

@@ -313,6 +313,7 @@ import {
   AlarmClockIcon,
   CheckCircle2Icon,
   MessageCircleIcon,
+  RouteIcon,
   PaperclipIcon,
   ChevronDownIcon,
   DownloadIcon,
@@ -416,6 +417,10 @@ import { useEnvironmentDisconnectDelay } from "../hooks/useEnvironmentDisconnect
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useEnvironmentQuery } from "../state/query";
+import {
+  efficiencyThreadRoutingEnvironment,
+  efficiencyThreadRoutingSet,
+} from "../state/efficiency";
 import { useEnvironmentScope } from "~/state/session";
 import {
   environmentServerConfigsAtom,
@@ -561,7 +566,11 @@ import {
   getAntigravitySendBlockReason,
   observeProactivePanelUserChoice,
   resolveProactiveTurnDiffAction,
+  type ComposerEfficiencyRouting,
+  resolveComposerEfficiencyRouting,
   resolveThreadMetadataUpdateForNextTurn,
+  shouldPersistEfficiencyRoutingBeforeSend,
+  shouldSwitchToManualRoutingOnModelPick,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
@@ -874,6 +883,7 @@ function useLocalDispatchState(input: {
   activePendingApproval: RuntimeRequestId | null;
   activePendingUserInput: RuntimeRequestId | null;
   threadError: string | null | undefined;
+  sentMessageDelegated: boolean;
 }) {
   const [localDispatch, setLocalDispatch] = useState<LocalDispatchSnapshot | null>(null);
 
@@ -892,9 +902,7 @@ function useLocalDispatchState(input: {
         hasPendingApproval: input.activePendingApproval !== null,
         hasPendingUserInput: input.activePendingUserInput !== null,
         threadError: input.threadError,
-        // V2PORT: efficiency routing fields (S4) — v1 flagged a latest user message the
-        // router handed to a subagent thread via a "routing.subagent-started" activity;
-        // v2 has no equivalent signal yet, so `latestUserMessageDelegated` is not supplied.
+        sentMessageDelegated: input.sentMessageDelegated,
       }),
     [
       input.activeLatestRun,
@@ -904,6 +912,7 @@ function useLocalDispatchState(input: {
       input.activeThread?.runtime,
       input.phase,
       input.threadError,
+      input.sentMessageDelegated,
       localDispatch,
     ],
   );
@@ -1736,6 +1745,9 @@ export default function ChatView(props: ChatViewProps) {
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const setEfficiencyThreadRouting = useAtomCommand(efficiencyThreadRoutingSet, {
+    reportFailure: false,
+  });
   const canWriteSourceControl = useEnvironmentScope(environmentId, AuthSourceControlWriteScope);
   const switchGitRef = useAtomCommand(vcsEnvironment.switchRef, { reportFailure: false });
   const setThreadRuntimeMode = useOrchestrationCommand(threadEnvironment.setRuntimeMode, {
@@ -2323,12 +2335,79 @@ export default function ChatView(props: ChatViewProps) {
     (isServerThread ? activeThread?.runtimeMode : undefined) ??
     defaultRuntimeMode;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
-  // V2PORT: efficiency routing fields (S4) — v2 thread shells carry no routingMode/efficiencyTier
-  // and no v2 command can set them, so the composer shows the manual routing state at the
-  // configured default tier. The fork's per-thread override, retry-one-tier-higher prep
-  // (retryOfTurnId) and draft "auto" default return with S4.
-  const composerEfficiencyRoutingMode: ThreadRoutingMode = "manual";
-  const composerEfficiencyTier: EfficiencyTier = settings.efficiency.defaultTier;
+  // Efficiency routing lives in a server side channel (`efficiency.threadRouting`),
+  // not on the V2 thread shell. Nothing is read or written while routing is off.
+  const efficiencyEnabled = settings.efficiency.enabled;
+  const threadRoutingQuery = useEnvironmentQuery(
+    efficiencyEnabled && serverThread !== null
+      ? efficiencyThreadRoutingEnvironment({
+          environmentId,
+          input: { threadId: serverThread.id },
+        })
+      : null,
+  );
+  const storedThreadRouting = threadRoutingQuery.data;
+  // A choice made in this view, for the thread it was made on.
+  const [efficiencyRoutingChoice, setEfficiencyRoutingChoice] = useState<{
+    readonly threadKey: string;
+    readonly routing: ComposerEfficiencyRouting;
+  } | null>(null);
+  const efficiencyRoutingOverride =
+    efficiencyRoutingChoice?.threadKey === routeThreadKey ? efficiencyRoutingChoice.routing : null;
+  const composerEfficiencyRouting = resolveComposerEfficiencyRouting({
+    efficiencyEnabled,
+    defaultTier: settings.efficiency.defaultTier,
+    isLocalDraftThread,
+    override: efficiencyRoutingOverride,
+    stored: storedThreadRouting,
+  });
+  const composerEfficiencyRoutingMode: ThreadRoutingMode = composerEfficiencyRouting.mode;
+  const composerEfficiencyTier: EfficiencyTier = composerEfficiencyRouting.tier;
+  const handleEfficiencyRoutingChange = (mode: ThreadRoutingMode, tier: EfficiencyTier) => {
+    setEfficiencyRoutingChoice({ threadKey: routeThreadKey, routing: { mode, tier } });
+    if (!efficiencyEnabled || serverThread === null) return;
+    void setEfficiencyThreadRouting({
+      environmentId,
+      input: { threadId: serverThread.id, routingMode: mode, efficiencyTier: tier },
+    }).then(() => threadRoutingQuery.refresh());
+  };
+  const handleEfficiencyRoutingChangeStable = useStableCallback(handleEfficiencyRoutingChange);
+  /**
+   * Saves the composer's routing for `threadId` before a turn is sent, so the
+   * server routes it the way the composer shows (a no-op while routing is off).
+   * A failed save is not fatal: the turn then runs with the thread's stored routing.
+   */
+  const persistEfficiencyRoutingBeforeSend = async (input: {
+    readonly threadId: ThreadId;
+    readonly routing: ComposerEfficiencyRouting;
+    readonly stored: typeof storedThreadRouting;
+  }) => {
+    if (
+      !shouldPersistEfficiencyRoutingBeforeSend({
+        efficiencyEnabled,
+        composer: input.routing,
+        stored: input.stored ?? null,
+      })
+    ) {
+      return;
+    }
+    await setEfficiencyThreadRouting({
+      environmentId,
+      input: {
+        threadId: input.threadId,
+        routingMode: input.routing.mode,
+        efficiencyTier: input.routing.tier,
+      },
+    });
+  };
+  // A routed child ran the last message this view sent; see useLocalDispatchState.
+  const [sentMessageId, setSentMessageId] = useState<MessageId | null>(null);
+  const routedChildForSentMessage =
+    sentMessageId === null
+      ? null
+      : (storedThreadRouting?.delegations.find(
+          (delegation) => delegation.messageId === sentMessageId,
+        ) ?? null);
   const canCheckoutPullRequestIntoThread = canWriteSourceControl && isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
   // Prefer the larger of turn-item-committed ids and projection messages so
@@ -3692,6 +3771,7 @@ export default function ChatView(props: ChatViewProps) {
     activePendingApproval: activePendingApproval?.requestId ?? null,
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
+    sentMessageDelegated: routedChildForSentMessage !== null,
   });
   const optimisticCompactionMessage = optimisticUserMessages.at(-1);
   const latestServerUserItem = serverVisibleTurnItems.findLast(
@@ -6776,15 +6856,17 @@ export default function ChatView(props: ChatViewProps) {
     if (activeMessageCount === 0) {
       return;
     }
-    const removedMessages = optimisticUserMessages.filter((message) =>
-      serverAcknowledgedUserMessageIds.has(message.id),
-    );
+    // A message efficiency routing ran in a routed child never appears here.
+    const routedMessageId = routedChildForSentMessage?.messageId ?? null;
+    const acknowledged = (messageId: MessageId) =>
+      serverAcknowledgedUserMessageIds.has(messageId) || messageId === routedMessageId;
+    const removedMessages = optimisticUserMessages.filter((message) => acknowledged(message.id));
     if (removedMessages.length === 0) {
       return;
     }
     const timer = window.setTimeout(() => {
       setOptimisticUserMessages((existing) =>
-        existing.filter((message) => !serverAcknowledgedUserMessageIds.has(message.id)),
+        existing.filter((message) => !acknowledged(message.id)),
       );
     }, 0);
     for (const removedMessage of removedMessages) {
@@ -6804,6 +6886,7 @@ export default function ChatView(props: ChatViewProps) {
     serverAcknowledgedUserMessageIds,
     handoffAttachmentPreviewsStable,
     optimisticUserMessages,
+    routedChildForSentMessage?.messageId,
   ]);
 
   // Keyed on the thread, not the draft: a draft's promotion to its server
@@ -7300,6 +7383,32 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
   const onOpenRelatedThreadStable = useStableCallback(onOpenRelatedThread);
+  const [dismissedRoutedMessageId, setDismissedRoutedMessageId] = useState<MessageId | null>(null);
+  // Efficiency routing ran the last sent message in a routed child thread.
+  const routedTurnBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    const routed = routedChildForSentMessage;
+    if (routed === null || routed.messageId === dismissedRoutedMessageId) return null;
+    return {
+      id: `routed-turn:${routed.messageId}`,
+      variant: "info",
+      icon: <RouteIcon />,
+      title: `Routed to ${routed.modelSelection.model} in ${
+        routed.reusedChild ? "its routed thread" : "a new routed thread"
+      }`,
+      description: "This thread keeps its own model; the routed thread carries the conversation.",
+      actions: (
+        <Button
+          size="xs"
+          variant="ghost"
+          onClick={() => onOpenRelatedThreadStable(routed.childThreadId)}
+        >
+          Open thread
+        </Button>
+      ),
+      dismissLabel: "Dismiss routed turn notice",
+      onDismiss: () => setDismissedRoutedMessageId(routed.messageId),
+    };
+  }, [dismissedRoutedMessageId, onOpenRelatedThreadStable, routedChildForSentMessage]);
   const childThreadInputs = useChildThreadInputs(activeThreadRef);
   const childInputBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     const first = childThreadInputs[0];
@@ -7700,6 +7809,7 @@ export default function ChatView(props: ChatViewProps) {
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
     const backgroundWorkItems = [
+      routedTurnBannerItem,
       childInputBannerItem,
       goalBannerItem,
       backgroundWorkBannerItem,
@@ -7776,6 +7886,7 @@ export default function ChatView(props: ChatViewProps) {
     backgroundWorkBannerItem,
     childInputBannerItem,
     goalBannerItem,
+    routedTurnBannerItem,
     localCheckoutBranchMismatch,
     projectCloneBannerItem,
     showBranchMismatchBanner,
@@ -9744,9 +9855,9 @@ export default function ChatView(props: ChatViewProps) {
       ctxSelectedModel || activeProjectDefaultModelSelection?.model || DEFAULT_MODEL,
       ctxSelectedModelSelection.options,
     );
-    // V2PORT: efficiency routing fields (S4) — v2 StartThreadTurnInput, its createThread
-    // bootstrap and UpdateThreadMetadataInput carry no routingMode/efficiencyTier/retryOfTurnId,
-    // so this send (and the thread-settings persist below) dispatches without routing.
+    // Read before the awaits below: the routing this turn is sent with.
+    const efficiencyRoutingForSend = composerEfficiencyRouting;
+    const storedRoutingForSend = isServerThread ? storedThreadRouting : null;
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
 
@@ -9805,7 +9916,6 @@ export default function ChatView(props: ChatViewProps) {
                       projectId: activeProject.id,
                       title,
                       modelSelection: threadCreateModelSelection,
-                      // V2PORT: efficiency routing fields (S4) — not in v2 createThread bootstrap.
                       runtimeMode,
                       interactionMode: sendInteractionMode,
                       branch: activeThreadBranch,
@@ -9831,6 +9941,14 @@ export default function ChatView(props: ChatViewProps) {
           ? scopeThreadRef(environmentId, threadIdForSend)
           : null;
       if (backgroundThreadRef) beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
+      // Efficiency routing is a side channel: the thread's routing must be on the
+      // server before the turn reaches its router (a new thread's included).
+      await persistEfficiencyRoutingBeforeSend({
+        threadId: threadIdForSend,
+        routing: efficiencyRoutingForSend,
+        stored: storedRoutingForSend,
+      });
+      setSentMessageId(messageIdForSend);
       const startPromise = startThreadTurn({
         environmentId,
         input: {
@@ -9868,7 +9986,6 @@ export default function ChatView(props: ChatViewProps) {
             })(),
           },
           modelSelection: ctxSelectedModelSelection,
-          // V2PORT: efficiency routing fields (S4) — routingMode/efficiencyTier/retryOfTurnId not in v2.
           titleSeed: title,
           runtimeMode,
           interactionMode: sendInteractionMode,
@@ -9906,6 +10023,8 @@ export default function ChatView(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        // Picks up the routing decision (or the routed child) the server recorded.
+        if (efficiencyRoutingForSend.mode === "auto") threadRoutingQuery.refresh();
         setKeepFullHistory(routeThreadKey, false);
         // The turn is under way and will spend quota, so that thread's limits
         // snapshot is stale. Uploads may have outlasted a navigation, so only
@@ -10373,6 +10492,11 @@ export default function ChatView(props: ChatViewProps) {
         nextInteractionMode,
       );
 
+      await persistEfficiencyRoutingBeforeSend({
+        threadId: threadIdForSend,
+        routing: composerEfficiencyRouting,
+        stored: storedThreadRouting,
+      });
       const startResult = await startThreadTurn({
         environmentId,
         input: {
@@ -10385,8 +10509,6 @@ export default function ChatView(props: ChatViewProps) {
             attachments: [],
           },
           modelSelection: ctxSelectedModelSelection,
-          // V2PORT: efficiency routing fields (S4) — the plan follow-up send carried
-          // routingMode/efficiencyTier (here and in the settings persist above); v2 has neither.
           titleSeed: activeThread.title,
           runtimeMode,
           interactionMode: nextInteractionMode,
@@ -10480,7 +10602,6 @@ export default function ChatView(props: ChatViewProps) {
         projectId: activeProject.id,
         title: nextThreadTitle,
         modelSelection: nextThreadModelSelection,
-        // V2PORT: efficiency routing fields (S4) — v2 CreateThreadInput has no routingMode/efficiencyTier.
         runtimeMode: defaultRuntimeMode,
         interactionMode: "default",
         branch: activeThreadBranch,
@@ -10492,6 +10613,12 @@ export default function ChatView(props: ChatViewProps) {
       createResult._tag === "Failure" ? createResult : null;
 
     if (failure === null) {
+      // The new thread starts with this view's routing (it has no row yet).
+      await persistEfficiencyRoutingBeforeSend({
+        threadId: nextThreadId,
+        routing: composerEfficiencyRouting,
+        stored: null,
+      });
       const startResult = await startThreadTurn({
         environmentId,
         input: {
@@ -10503,7 +10630,6 @@ export default function ChatView(props: ChatViewProps) {
             attachments: [],
           },
           modelSelection: ctxSelectedModelSelection,
-          // V2PORT: efficiency routing fields (S4) — v2 StartThreadTurnInput has no routingMode/efficiencyTier.
           titleSeed: nextThreadTitle,
           runtimeMode: defaultRuntimeMode,
           interactionMode: "default",
@@ -10655,6 +10781,20 @@ export default function ChatView(props: ChatViewProps) {
       });
       if (options?.focusComposer !== false) scheduleComposerFocus();
       return;
+    }
+    // An explicit pick means "run this model" (PR #150): in auto routing the
+    // server would replace it with the tier policy model while the picker still
+    // shows the pick. Read the composer's selection before the draft write below.
+    if (
+      shouldSwitchToManualRoutingOnModelPick({
+        routingMode: composerEfficiencyRoutingMode,
+        currentModelSelection:
+          composerRef.current?.getSendContext().selectedModelSelection ??
+          activeThread.modelSelection,
+        nextModelSelection,
+      })
+    ) {
+      handleEfficiencyRoutingChange("manual", composerEfficiencyTier);
     }
     setComposerDraftModelSelection(
       scopeThreadRef(activeThread.environmentId, activeThread.id),
@@ -11636,6 +11776,8 @@ export default function ChatView(props: ChatViewProps) {
                               compactDisabledReason={compactDisabledReason}
                               efficiencyRoutingMode={composerEfficiencyRoutingMode}
                               efficiencyTier={composerEfficiencyTier}
+                              efficiencyLatestDecision={storedThreadRouting?.latestDecision ?? null}
+                              onEfficiencyRoutingChange={handleEfficiencyRoutingChangeStable}
                               resolvedTheme={resolvedTheme}
                               settings={settings}
                               keybindings={keybindings}

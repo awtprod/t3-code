@@ -1,11 +1,17 @@
 import { EfficiencyCandidateId, EfficiencyTier, RouteSelectionSource } from "@command-center/core";
 import * as Effect from "effect/Effect";
+import * as Rpc from "effect/rpc/Rpc";
 import * as Schema from "effect/Schema";
 
+import { EnvironmentAuthorizationError } from "./auth.ts";
 import {
+  IsoDateTime,
+  MessageId,
   NonNegativeInt,
   PositiveInt,
   ProjectId,
+  RunId,
+  ThreadId,
   TrimmedNonEmptyString,
   TurnId,
 } from "./baseSchemas.ts";
@@ -348,3 +354,95 @@ export const InternalGenerationUsage = Schema.Struct({
   completedAt: TrimmedNonEmptyString,
 });
 export type InternalGenerationUsage = typeof InternalGenerationUsage.Type;
+
+/**
+ * Per-thread efficiency routing, a fork-owned side channel next to the
+ * orchestration V2 thread shell (which carries no routing fields).
+ *
+ * `routingMode`/`efficiencyTier` are the composer's routing controls for the
+ * thread. `pendingRetryOfTurnId` marks the next routed turn as a "retry one
+ * tier higher" of an earlier turn; the server clears it when that turn routes.
+ * `latestDecision` is the newest per-run decision. `delegations` lists the
+ * child threads auto-routing forked for this thread (newest first, bounded),
+ * and `delegatedFrom` is set on a child thread.
+ */
+export const EfficiencyThreadDelegation = Schema.Struct({
+  parentThreadId: ThreadId,
+  childThreadId: ThreadId,
+  messageId: MessageId,
+  modelSelection: EfficiencyModelSelection,
+  reusedChild: Schema.Boolean,
+  createdAt: IsoDateTime,
+});
+export type EfficiencyThreadDelegation = typeof EfficiencyThreadDelegation.Type;
+
+export const EfficiencyRunDecision = Schema.Struct({
+  runId: RunId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  decision: EfficiencyDecision,
+  createdAt: IsoDateTime,
+});
+export type EfficiencyRunDecision = typeof EfficiencyRunDecision.Type;
+
+export const EfficiencyThreadRouting = Schema.Struct({
+  threadId: ThreadId,
+  routingMode: ThreadRoutingMode,
+  efficiencyTier: Schema.NullOr(EfficiencyTier),
+  pendingRetryOfTurnId: Schema.NullOr(TurnId),
+  /** False when the thread has no stored row (the defaults are shown). */
+  stored: Schema.Boolean,
+  latestDecision: Schema.NullOr(EfficiencyRunDecision),
+  delegations: Schema.Array(EfficiencyThreadDelegation),
+  delegatedFrom: Schema.NullOr(EfficiencyThreadDelegation),
+});
+export type EfficiencyThreadRouting = typeof EfficiencyThreadRouting.Type;
+
+export const EfficiencyThreadRoutingInput = Schema.Struct({ threadId: ThreadId });
+export type EfficiencyThreadRoutingInput = typeof EfficiencyThreadRoutingInput.Type;
+
+export const EfficiencyThreadRoutingSetInput = Schema.Struct({
+  threadId: ThreadId,
+  routingMode: ThreadRoutingMode,
+  efficiencyTier: Schema.NullOr(EfficiencyTier),
+  /** Set to retry an earlier turn one tier higher on the next routed turn. */
+  retryOfTurnId: Schema.optional(TurnId),
+});
+export type EfficiencyThreadRoutingSetInput = typeof EfficiencyThreadRoutingSetInput.Type;
+
+export class EfficiencyThreadRoutingError extends Schema.TaggedError<EfficiencyThreadRoutingError>()(
+  "EfficiencyThreadRoutingError",
+  {
+    threadId: ThreadId,
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export const EFFICIENCY_WS_METHODS = {
+  threadRoutingGet: "efficiency.threadRouting.get",
+  threadRoutingSet: "efficiency.threadRouting.set",
+  threadRoutingSubscribe: "efficiency.threadRouting.subscribe",
+} as const;
+
+export const WsEfficiencyThreadRoutingGetRpc = Rpc.make(EFFICIENCY_WS_METHODS.threadRoutingGet, {
+  payload: EfficiencyThreadRoutingInput,
+  success: EfficiencyThreadRouting,
+  error: Schema.Union([EfficiencyThreadRoutingError, EnvironmentAuthorizationError]),
+});
+
+export const WsEfficiencyThreadRoutingSetRpc = Rpc.make(EFFICIENCY_WS_METHODS.threadRoutingSet, {
+  payload: EfficiencyThreadRoutingSetInput,
+  success: EfficiencyThreadRouting,
+  error: Schema.Union([EfficiencyThreadRoutingError, EnvironmentAuthorizationError]),
+});
+
+export const WsEfficiencyThreadRoutingSubscribeRpc = Rpc.make(
+  EFFICIENCY_WS_METHODS.threadRoutingSubscribe,
+  {
+    payload: EfficiencyThreadRoutingInput,
+    success: EfficiencyThreadRouting,
+    error: Schema.Union([EfficiencyThreadRoutingError, EnvironmentAuthorizationError]),
+    stream: true,
+  },
+);
