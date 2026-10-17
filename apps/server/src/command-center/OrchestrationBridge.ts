@@ -360,7 +360,7 @@ const persistInlineImages = Effect.fn("OrchestrationBridge.persistInlineImages")
   );
 });
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const projects = yield* ProjectStoreV2;
   const projections = yield* ProjectionStoreV2;
   const threads = yield* ThreadManagementService;

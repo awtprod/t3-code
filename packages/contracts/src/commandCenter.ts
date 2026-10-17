@@ -300,7 +300,7 @@ export type CommandCenterSpaceAgentActivityResult =
   typeof CommandCenterSpaceAgentActivityResult.Type;
 
 /** Most threads one plan-progress subscription follows (the sidebar's working rows). */
-export const COMMAND_CENTER_THREAD_PLAN_PROGRESS_MAX_THREADS = 50;
+const COMMAND_CENTER_THREAD_PLAN_PROGRESS_MAX_THREADS = 50;
 
 export const CommandCenterThreadPlanProgressInput = Schema.Struct({
   threadIds: Schema.Array(AssetThreadId).check(
