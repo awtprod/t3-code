@@ -39,6 +39,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Predicate from "effect/Predicate";
 import * as FileSystem from "effect/FileSystem";
 import { MCP_APP_OUTPUT_KEY, readMcpAppReference } from "@t3tools/shared/mcpApp";
@@ -2435,6 +2436,70 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
       assert.lengthOf(harness.terminalEvents(), 1);
       assert.isFalse(yield* harness.hasPendingBackgroundWork);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("settles Stop when Codex reports the target turn already gone", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "gone-stop-thread";
+      const nativeTurnId = "gone-stop-turn";
+      const prompt = "Run a command.";
+      const transcript = makeCodexReplayTranscript({
+        scenario: "stop-target-already-gone",
+        entries: [
+          ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }),
+          {
+            type: "expect_outbound",
+            label: "turn/interrupt",
+            frame: {
+              id: 4,
+              method: "turn/interrupt",
+              params: { threadId: nativeThreadId, turnId: nativeTurnId },
+            },
+          },
+          {
+            type: "emit_inbound",
+            label: "turn/interrupt",
+            frame: { id: 4, error: { code: -32600, message: "no active turn to interrupt" } },
+          },
+          {
+            type: "emit_inbound",
+            label: "turn/completed",
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: nativeThreadId,
+                turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+              },
+            },
+          },
+        ],
+      });
+      const harness = yield* makeCodexReplayHarness(transcript);
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("gone-stop-attempt"),
+          text: prompt,
+        }),
+      );
+      const providerTurnId = (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+        driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+        nativeTurnId,
+      });
+      const outcome = yield* harness.runtime
+        .interruptTurn({ providerThread: harness.providerThread, providerTurnId })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isSuccess(outcome), `Stop failed: ${String(outcome)}`);
+      yield* harness.firstTerminal;
+      assert.lengthOf(harness.terminalEvents(), 1);
     }).pipe(
       Effect.scoped,
       Effect.provide(

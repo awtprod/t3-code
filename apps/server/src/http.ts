@@ -299,7 +299,7 @@ export function resolveDevRedirectUrl(devUrl: URL, requestUrl: URL): string {
   return redirectUrl.toString();
 }
 
-export const authenticateRawRouteWithScope = (
+const authenticateRawRouteWithScope = (
   scope: typeof AuthOrchestrationReadScope | typeof AuthOrchestrationOperateScope,
 ) =>
   Effect.gen(function* () {

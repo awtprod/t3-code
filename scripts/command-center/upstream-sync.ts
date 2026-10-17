@@ -2,14 +2,15 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
-import { advancePublicBaseline, planUpstreamSync } from "./upstreamSync.ts";
+import { advancePublicBaseline, planUpstreamSync, resolveLatestStableTag } from "./upstreamSync.ts";
 
 interface ParsedArguments {
-  readonly command: "plan" | "advance-baseline";
+  readonly command: "plan" | "advance-baseline" | "latest-stable-tag";
   readonly repositoryPath: string;
   readonly upstreamRef?: string | undefined;
   readonly expectedCommit?: string | undefined;
   readonly githubOutput?: string | undefined;
+  readonly remote?: string | undefined;
 }
 
 function usage(): never {
@@ -18,6 +19,8 @@ function usage(): never {
     --upstream-ref refs/tags/<tag> [--expected-commit <40-char-sha>] [--repository /path]
   node scripts/command-center/upstream-sync.ts advance-baseline \\
     --expected-commit <40-char-sha> [--repository /path]
+  node scripts/command-center/upstream-sync.ts latest-stable-tag \\
+    --remote upstream [--repository /path]
 
 The planner never fetches, merges, pushes, or opens a pull request. The scheduled upstream-sync
 workflow owns those GitHub writes; every change still lands through a reviewed pull request.`);
@@ -25,11 +28,18 @@ workflow owns those GitHub writes; every change still lands through a reviewed p
 
 function parseArguments(argv: readonly string[]): ParsedArguments {
   const [commandValue, ...rest] = argv;
-  if (commandValue !== "plan" && commandValue !== "advance-baseline") usage();
+  if (
+    commandValue !== "plan" &&
+    commandValue !== "advance-baseline" &&
+    commandValue !== "latest-stable-tag"
+  ) {
+    usage();
+  }
   let repositoryPath = process.cwd();
   let upstreamRef: string | undefined;
   let expectedCommit: string | undefined;
   let githubOutput: string | undefined;
+  let remote: string | undefined;
 
   for (let index = 0; index < rest.length; index += 2) {
     const flag = rest[index];
@@ -39,11 +49,21 @@ function parseArguments(argv: readonly string[]): ParsedArguments {
     else if (flag === "--upstream-ref") upstreamRef = value;
     else if (flag === "--expected-commit") expectedCommit = value;
     else if (flag === "--github-output") githubOutput = NodePath.resolve(value);
+    else if (flag === "--remote") remote = value;
     else usage();
   }
 
-  if (commandValue === "plan" ? !upstreamRef : !expectedCommit) usage();
-  return { command: commandValue, repositoryPath, upstreamRef, expectedCommit, githubOutput };
+  if (commandValue === "plan" && !upstreamRef) usage();
+  if (commandValue === "advance-baseline" && !expectedCommit) usage();
+  if (commandValue === "latest-stable-tag" && !remote) usage();
+  return {
+    command: commandValue,
+    repositoryPath,
+    upstreamRef,
+    expectedCommit,
+    githubOutput,
+    remote,
+  };
 }
 
 function appendGitHubOutput(path: string, values: Readonly<Record<string, string>>): void {
@@ -53,6 +73,11 @@ function appendGitHubOutput(path: string, values: Readonly<Record<string, string
 
 function main(): void {
   const args = parseArguments(process.argv.slice(2));
+  if (args.command === "latest-stable-tag") {
+    const tag = resolveLatestStableTag(args.repositoryPath, args.remote ?? "");
+    process.stdout.write(`${tag.ref} ${tag.commit}\n`);
+    return;
+  }
   if (args.command === "advance-baseline") {
     const target = args.expectedCommit ?? "";
     advancePublicBaseline(args.repositoryPath, target);

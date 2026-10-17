@@ -230,7 +230,7 @@ const advanceIdleClock = Effect.gen(function* () {
 });
 
 it.layer(layerOpenCodeTextGenerationTest)("OpenCodeTextGeneration", (it) => {
-  it.effect("excludes generic files from thread title generation", () =>
+  it.effect("includes generic files in thread title generation", () =>
     withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
       Effect.gen(function* () {
         runtimeMock.state.promptResult = {

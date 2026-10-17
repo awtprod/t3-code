@@ -9,6 +9,7 @@ import {
   PUBLIC_BASELINE_FILE,
   advancePublicBaseline,
   planUpstreamSync,
+  selectLatestStableTag,
   syncBranchName,
   validateUpstreamRef,
 } from "./upstreamSync.ts";
@@ -19,6 +20,46 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     NodeFS.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+describe("selectLatestStableTag", () => {
+  const sha = (digit: string) => digit.repeat(40);
+  const lsRemote = (entries: ReadonlyArray<readonly [string, string]>) =>
+    entries.map(([commit, tag]) => `${commit}\trefs/tags/${tag}`).join("\n");
+
+  it("picks the newest exact vMAJOR.MINOR.PATCH release, ignoring nightly and preview tags", () => {
+    const output = lsRemote([
+      [sha("1"), "v0.0.45"],
+      [sha("2"), "v0.1.0"],
+      [sha("3"), "v0.1.1-nightly.20261017.3272"],
+      [sha("4"), "v0.1.1-preview.20261017.3254"],
+      [sha("5"), "v0.10.0"],
+      [sha("6"), "v0.9.9"],
+      [sha("7"), "nightly"],
+    ]);
+    expect(selectLatestStableTag(output)).toEqual({ ref: "refs/tags/v0.10.0", commit: sha("5") });
+  });
+
+  it("returns the floor release itself when nothing newer is stable", () => {
+    const output = lsRemote([
+      [sha("2"), "v0.1.0"],
+      [sha("3"), "v0.1.1-nightly.20261017.3272"],
+    ]);
+    expect(selectLatestStableTag(output)).toEqual({ ref: "refs/tags/v0.1.0", commit: sha("2") });
+  });
+
+  it("refuses to move behind the re-platform floor or to run without any release", () => {
+    expect(() => selectLatestStableTag(lsRemote([[sha("1"), "v0.0.45"]]))).toThrow(
+      "older than the floor v0.1.0",
+    );
+    expect(() => selectLatestStableTag(lsRemote([[sha("3"), "v0.1.1-nightly.1"]]))).toThrow(
+      "no stable",
+    );
+  });
+
+  it("rejects a malformed commit for the chosen tag", () => {
+    expect(() => selectLatestStableTag(`not-a-sha\trefs/tags/v0.2.0`)).toThrow("40-character");
+  });
 });
 
 describe("planUpstreamSync", () => {

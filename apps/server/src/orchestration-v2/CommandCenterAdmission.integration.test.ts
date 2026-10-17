@@ -113,3 +113,112 @@ it.effect("still opens an ordinary client thread on the same path", () =>
     expectOpened: true,
   }),
 );
+
+// Isolation is chosen at session open from the thread that opens the session.
+// Codex can host many provider threads per session, so the Orchestrator would
+// otherwise hand every thread of an instance one shared session: a cc: thread
+// would then run in whatever launch opened it first (seen live: a Space agent
+// thread opened the shared, unisolated session and a later cc: Run joined it).
+const providerSessionsOpenedFor = (threadIds: ReadonlyArray<string>) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const cwd = yield* checkpointWorkspace("cc-session");
+      const instanceId = ProviderInstanceId.make("codex");
+      const opened: Array<{ threadId: string; providerSessionId: string }> = [];
+      const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+        instanceId,
+        driver: ProviderDriverKind.make("codex"),
+        getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+        planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+        openSession: (session) =>
+          Effect.sync(() => {
+            opened.push({
+              threadId: String(session.threadId),
+              providerSessionId: String(session.providerSessionId),
+            });
+          }).pipe(Effect.andThen(Effect.die("only the session id is under test"))),
+      };
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        for (const threadId of threadIds) {
+          const id = ThreadId.make(threadId);
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`create:${threadId}`),
+            threadId: id,
+            projectId: ProjectId.make("project:cc-session"),
+            title: "Session ownership",
+            modelSelection: { instanceId, model: "test-model" },
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`send:${threadId}`),
+            threadId: id,
+            messageId: MessageId.make(`message:${threadId}`),
+            text: "Hello",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* worker.drain();
+        }
+      }).pipe(
+        Effect.provide(
+          ProviderReplayHarness.layerWithRegistry(
+            { name: `cc-session-${threadIds.join("-").replaceAll(":", "-")}` },
+            ProviderAdapterRegistry.layerSingle(adapter),
+            { runEffectWorker: false },
+          ),
+        ),
+      );
+      return opened;
+    }),
+  );
+
+const SHARED = "provider-session:provider-instance:codex:shared";
+const assertSessionOwnership = (
+  opened: ReadonlyArray<{ threadId: string; providerSessionId: string }>,
+) => {
+  const threads = new Set(opened.map((open) => open.threadId));
+  assert.isAbove(threads.size, 1);
+  for (const open of opened) {
+    if (open.threadId.startsWith("cc:")) {
+      // Dedicated, and never shared with any other thread.
+      assert.notInclude(open.providerSessionId, ":shared");
+      assert.isTrue(
+        opened.every(
+          (other) =>
+            other.threadId === open.threadId || other.providerSessionId !== open.providerSessionId,
+        ),
+      );
+    } else {
+      assert.strictEqual(open.providerSessionId, SHARED);
+    }
+  }
+};
+
+it.effect("gives a cc: thread its own session when an ordinary thread opened first", () =>
+  providerSessionsOpenedFor([
+    "thread:acme-ordinary",
+    "cc-space-agent-acme-lab",
+    "cc:interactive:acme-session",
+  ]).pipe(Effect.map(assertSessionOwnership)),
+);
+
+it.effect(
+  "keeps ordinary threads out of a cc: thread's session when the cc: thread opened first",
+  () =>
+    providerSessionsOpenedFor([
+      "cc:automation:acme-session",
+      "cc-space-agent-acme-lab",
+      "thread:acme-ordinary",
+    ]).pipe(Effect.map(assertSessionOwnership)),
+);
