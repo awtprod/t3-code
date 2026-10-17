@@ -19,6 +19,7 @@ import {
   supportsHardenedHostGitAuthoring,
   trustedHostExecutablePath,
   unsafeHostGitConfigKey,
+  inheritedGitConfigPins,
 } from "./HostGitSecurity.ts";
 
 describe("host Git process boundary", () => {
@@ -103,10 +104,14 @@ describe("host Git process boundary", () => {
       SSH_ASKPASS: "true",
       SSH_ASKPASS_REQUIRE: "force",
     });
+    // Caller GIT_CONFIG_* never survives; only the server's own exact pins may.
+    const configKeys = Array.from(
+      { length: Number(environment.GIT_CONFIG_COUNT ?? "0") },
+      (_, index) => environment[`GIT_CONFIG_KEY_${index}`],
+    );
+    expect(configKeys).toEqual(inheritedGitConfigPins(process.env).map(([key]) => key));
+    expect(configKeys).not.toContain("core.fsmonitor");
     for (const key of [
-      "GIT_CONFIG_COUNT",
-      "GIT_CONFIG_KEY_0",
-      "GIT_CONFIG_VALUE_0",
       "GIT_DIR",
       "GIT_COMMON_DIR",
       "GIT_WORK_TREE",

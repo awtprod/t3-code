@@ -174,9 +174,55 @@ const classifyError = (cause: unknown, message: string, operation: string) => {
  */
 const LARGE_BINDING_SIZE = 64 * 1024;
 
-// `node:sqlite` binds both buffer views and raw buffers as blobs.
+// Buffer views and raw buffers are both blobs to the caller. `node:sqlite`
+// binds views as blobs, but some Node releases (24.13.1) bind a raw
+// `ArrayBuffer` as NULL, so `bindable` wraps raw buffers in a view first.
 const isBlob = (value: unknown): value is ArrayBufferView | ArrayBufferLike =>
   ArrayBuffer.isView(value) || NodeUtil.types.isAnyArrayBuffer(value);
+
+const bindableValue = (value: unknown): unknown =>
+  NodeUtil.types.isAnyArrayBuffer(value) ? new Uint8Array(value) : value;
+
+/**
+ * Wraps raw `ArrayBuffer`/`SharedArrayBuffer` parameters in a `Uint8Array`,
+ * positional or named. A named-parameter object is copied only when it holds
+ * a raw buffer and every enumerable property is a plain data property, so a
+ * getter is never called here and still runs once inside the statement.
+ */
+const bindable = (params: ReadonlyArray<unknown>): ReadonlyArray<unknown> => {
+  let converted: Array<unknown> | undefined;
+  params.forEach((param, index) => {
+    let next = param;
+    if (NodeUtil.types.isAnyArrayBuffer(param)) {
+      next = new Uint8Array(param);
+    } else if (
+      (typeof param === "object" || typeof param === "function") &&
+      param !== null &&
+      !isBlob(param)
+    ) {
+      try {
+        const properties = Object.entries(Object.getOwnPropertyDescriptors(param)).filter(
+          ([, property]) => property.enumerable,
+        );
+        if (
+          properties.every(([, property]) => "value" in property) &&
+          properties.some(([, property]) => NodeUtil.types.isAnyArrayBuffer(property.value))
+        ) {
+          next = Object.fromEntries(
+            properties.map(([key, property]) => [key, bindableValue(property.value)]),
+          );
+        }
+      } catch {
+        // A parameter that cannot be inspected is left for the statement to report.
+      }
+    }
+    if (next !== param) {
+      converted ??= [...params];
+      converted[index] = next;
+    }
+  });
+  return converted ?? params;
+};
 
 const bindingSize = (value: unknown): number => {
   if (typeof value === "string") {
@@ -415,8 +461,9 @@ const makeReader = Effect.fnUntraced(function* (options: SqliteClientConfig) {
           if (pending.size === 1) worker.ref();
           // The worker's statement cache would pin large parameters the same way.
           const cached = input.cached && !hasLargeBinding(input.params);
+          const message = { id, safeIntegers, ...input, params: bindable(input.params), cached };
           // oxlint-disable-next-line unicorn/require-post-message-target-origin -- Node workers do not accept a target origin.
-          worker.postMessage({ id, safeIntegers, ...input, cached });
+          worker.postMessage(message);
         });
       });
 
@@ -711,11 +758,11 @@ const make = Effect.fn("makeWithDatabase")(function* (
         try {
           statement.setReadBigInts(Boolean(Context.get(fiber.context, Client.SafeIntegers)));
           if (hasRows(statement)) {
-            const rows = statement.all(...(params as any));
+            const rows = statement.all(...(bindable(params) as any));
             checkpoint?.();
             return Effect.succeed(rows);
           }
-          const result = statement.run(...(params as any));
+          const result = statement.run(...(bindable(params) as any));
           checkpoint?.();
           return Effect.succeed(raw ? (result as unknown as ReadonlyArray<any>) : []);
         } catch (cause) {
@@ -745,13 +792,13 @@ const make = Effect.fn("makeWithDatabase")(function* (
               if (hasRows(statement)) {
                 statement.setReturnArrays(true);
                 // Safe to cast to array after we've setReturnArrays(true)
-                const rows = statement.all(...(params as any)) as unknown as ReadonlyArray<
-                  ReadonlyArray<unknown>
-                >;
+                const rows = statement.all(
+                  ...(bindable(params) as any),
+                ) as unknown as ReadonlyArray<ReadonlyArray<unknown>>;
                 checkpoint?.();
                 return rows;
               }
-              statement.run(...(params as any));
+              statement.run(...(bindable(params) as any));
               checkpoint?.();
               return [];
             },

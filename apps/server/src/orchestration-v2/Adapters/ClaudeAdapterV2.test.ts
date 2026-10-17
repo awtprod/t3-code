@@ -908,6 +908,13 @@ describe("ClaudeAdapterV2 context usage", () => {
       outputTokens: 1_000,
       reasoningOutputTokens: 0,
       updatedAt: "2026-08-29T00:00:00.000Z",
+      extended: {
+        cacheWriteInputTokens: 2_000,
+        lastInputTokens: 42_000,
+        lastCachedInputTokens: 5_000,
+        lastCacheWriteInputTokens: 2_000,
+        lastOutputTokens: 1_000,
+      },
     });
   });
 
@@ -2194,7 +2201,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     uuid: "00000000-0000-4000-8000-000000000101",
     session_id: WAKE_NATIVE_SESSION,
   });
-  const makeAssistantTextFrame = (input: { readonly uuid: string; readonly text: string }) =>
+  const makeAssistantTextFrame = (input: {
+    readonly uuid: string;
+    readonly text: string;
+    readonly usage?: {
+      readonly input_tokens: number;
+      readonly output_tokens: number;
+      readonly cache_creation_input_tokens: number;
+      readonly cache_read_input_tokens: number;
+    };
+  }) =>
     claudeSdkFrame({
       type: "assistant",
       message: {
@@ -2205,7 +2221,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         content: [{ type: "text", text: input.text }],
         stop_reason: null,
         stop_sequence: null,
-        usage: {
+        usage: input.usage ?? {
           input_tokens: 1,
           output_tokens: 1,
           cache_creation_input_tokens: 0,
@@ -2254,6 +2270,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly apiErrorStatus?: number;
     // null omits the field, as the CLI does on a zero-turn result.
     readonly terminalReason?: SDKResultMessage["terminal_reason"] | null;
+    readonly totalCostUsd?: number;
     readonly usage?: {
       readonly input_tokens: number;
       readonly output_tokens: number;
@@ -2270,7 +2287,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       num_turns: input.numTurns ?? 1,
       result: input.result,
       stop_reason: "end_turn",
-      total_cost_usd: 0,
+      total_cost_usd: input.totalCostUsd ?? 0,
       usage: input.usage ?? {
         input_tokens: 1,
         output_tokens: 1,
@@ -3581,6 +3598,68 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
+  it.effect("reports cache writes, the last request split and the result cost", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt-extended-usage"),
+          text: "Continue.",
+          attachments: [],
+        }),
+      );
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeAssistantTextFrame({
+          uuid: "00000000-0000-4000-8000-000000000670",
+          text: "Working.",
+          usage: {
+            input_tokens: 12,
+            output_tokens: 34,
+            cache_creation_input_tokens: 1_500,
+            cache_read_input_tokens: 8_000,
+          },
+        }),
+      );
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeResultFrame({
+          uuid: "00000000-0000-4000-8000-000000000671",
+          result: "Done.",
+          totalCostUsd: 0.4217,
+        }),
+      );
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.status, "completed");
+      const usages = harness.events.flatMap((event) =>
+        event.type === "provider_turn.updated" && event.providerTurn.tokenUsage
+          ? [event.providerTurn.tokenUsage]
+          : [],
+      );
+      const live = {
+        cacheWriteInputTokens: 1_500,
+        lastInputTokens: 12,
+        lastCachedInputTokens: 8_000,
+        lastCacheWriteInputTokens: 1_500,
+        lastOutputTokens: 34,
+      };
+      assert.deepEqual(usages[0]?.extended, live);
+      assert.deepEqual(usages.at(-1)?.extended, {
+        ...live,
+        costUsd: 0.4217,
+        costKind: "reported",
+      });
+      assert.equal(usages.at(-1)?.usedTokens, 12 + 1_500 + 8_000 + 34);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect("keeps the measured context when a usage limit ends the turn", () =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarness;
@@ -3641,7 +3720,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ? [event.providerTurn.tokenUsage.usedTokens]
           : [],
       );
-      assert.deepEqual(reportedContext, [2]);
+      // The final update re-sends the last measured context with the reported cost.
+      assert.deepEqual([...new Set(reportedContext)], [2]);
     }).pipe(
       Effect.provide(
         Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

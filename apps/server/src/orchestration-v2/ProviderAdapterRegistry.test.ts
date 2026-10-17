@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
@@ -26,6 +26,7 @@ import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
 } from "@t3tools/provider-core/server/adapterDriver";
+import { CommandCenterProviderAdmissionError } from "../provider/security/CommandCenterProviderIsolation.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -83,8 +84,9 @@ it.effect("routes two configured instances of the same driver independently", ()
   Effect.gen(function* () {
     const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
 
-    assert.strictEqual(yield* registry.get(personalId), personalAdapter);
-    assert.strictEqual(yield* registry.get(workId), workAdapter);
+    // Adapters come back behind the Command Center admission gate, so compare identity.
+    assert.strictEqual((yield* registry.get(personalId)).instanceId, personalAdapter.instanceId);
+    assert.strictEqual((yield* registry.get(workId)).instanceId, workAdapter.instanceId);
     assert.deepEqual(yield* registry.list(), [personalId, workId]);
   }).pipe(Effect.provide(layerTest)),
 );
@@ -211,7 +213,10 @@ it.effect("keeps a successfully-created adapter scope open until normal release"
           configMap: lifecycleConfigMap,
         });
 
-        assert.strictEqual(yield* registry.get(lifecycleInstanceId), lifecycleAdapter);
+        assert.strictEqual(
+          (yield* registry.get(lifecycleInstanceId)).instanceId,
+          lifecycleAdapter.instanceId,
+        );
         assert.strictEqual(yield* Ref.get(releases), 0);
       }),
     );
@@ -334,3 +339,96 @@ it.effect("interrupts admitted session startup when a shared peer signs out", ()
     assert.isTrue(Exit.isFailure(yield* Fiber.await(startup)));
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+const isAdmissionError = Schema.is(CommandCenterProviderAdmissionError);
+
+describe("Command Center admission gate", () => {
+  const openInput = (threadId: string, runtimeMode: "full-access" | "approval-required") =>
+    ({
+      threadId: ThreadId.make(threadId),
+      providerSessionId: ProviderSessionId.make(`session:${threadId}`),
+      modelSelection: { instanceId: personalId, model: "gpt-test" },
+      runtimePolicy: { runtimeMode, interactionMode: "default", cwd: "/workspace" },
+    }) as unknown as ProviderAdapter.ProviderAdapterV2OpenSessionInput;
+  const openingAdapter = (kind: string, opened: Array<string>) =>
+    ({
+      ...makeAdapter(personalId),
+      driver: ProviderDriverKind.make(kind),
+      openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+        Effect.sync(() => {
+          opened.push(String(input.threadId));
+        }).pipe(Effect.andThen(Effect.die("opened"))),
+    }) as unknown as ProviderAdapter.ProviderAdapterV2["Service"];
+  const refusal = (
+    adapter: ProviderAdapter.ProviderAdapterV2["Service"],
+    threadId: string,
+    mode: "full-access" | "approval-required",
+  ) =>
+    Effect.scoped(adapter.openSession(openInput(threadId, mode))).pipe(
+      Effect.flip,
+      Effect.map((failure) => {
+        assert.strictEqual(failure._tag, "ProviderAdapterOpenSessionError");
+        const cause: unknown = "cause" in failure ? failure.cause : undefined;
+        assert.isTrue(isAdmissionError(cause));
+        return cause as CommandCenterProviderAdmissionError;
+      }),
+    );
+  const fromAdapters = (adapters: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]>) =>
+    ProviderAdapterRegistry.layerFromAdapters(adapters);
+
+  it.effect("refuses a Command Center thread on a provider without an isolation profile", () => {
+    const opened: Array<string> = [];
+    return Effect.gen(function* () {
+      const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+      const cause = yield* refusal(
+        yield* registry.get(personalId),
+        "cc:interactive:acme",
+        "approval-required",
+      );
+      assert.strictEqual(cause._tag, "CommandCenterProviderAdmissionError");
+      assert.match(cause.issue, /require Codex/);
+      assert.deepEqual(opened, []);
+    }).pipe(Effect.provide(fromAdapters([openingAdapter("claudeAgent", opened)])));
+  });
+
+  it.effect("refuses a full-access Command Center thread on Codex before spawning", () => {
+    const opened: Array<string> = [];
+    return Effect.gen(function* () {
+      const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+      const cause = yield* refusal(
+        yield* registry.get(personalId),
+        "cc:automation:acme",
+        "full-access",
+      );
+      assert.strictEqual(cause._tag, "CommandCenterProviderAdmissionError");
+      assert.match(cause.issue, /full-access/);
+      assert.deepEqual(opened, []);
+    }).pipe(Effect.provide(fromAdapters([openingAdapter("codex", opened)])));
+  });
+
+  it.effect("leaves ordinary threads, including full-access Codex, to the adapter", () => {
+    const opened: Array<string> = [];
+    return Effect.gen(function* () {
+      const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+      const adapter = yield* registry.get(personalId);
+      const exit = yield* Effect.exit(
+        Effect.scoped(adapter.openSession(openInput("thread-acme", "full-access"))),
+      );
+      // The adapter ran (and died on purpose), so the gate let it through untouched.
+      assert.isTrue(Exit.isFailure(exit));
+      assert.deepEqual(opened, ["thread-acme"]);
+    }).pipe(Effect.provide(fromAdapters([openingAdapter("codex", opened)])));
+  });
+
+  it.effect("gates the production instance-registry facade too", () =>
+    Effect.gen(function* () {
+      const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+      const cause = yield* refusal(
+        yield* registry.get(personalId),
+        "cc:interactive:acme",
+        "full-access",
+      );
+      assert.strictEqual(cause._tag, "CommandCenterProviderAdmissionError");
+    }).pipe(Effect.provide(layerTest)),
+  );
+});

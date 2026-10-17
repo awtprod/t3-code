@@ -23,15 +23,11 @@ import type { ProviderRequestKind } from "@t3tools/contracts";
 /**
  * Kind carried to the client for a prompted sandbox escalation.
  *
- * Fixed rather than derived per request: `ProviderRuntimeIngestion` maps the
- * kind from the canonical request type alone, so a kind that varied per request
- * would disagree between the opened and resolved activities. `file-change` is
- * the conservative choice — any escalation that reaches a prompt can grant
- * writes — and both web and mobile already render it, so the prompt stays
- * answerable without widening `ProviderRequestKind` across every client fold.
+ * `file-change` is the conservative choice for anything beyond plain reads —
+ * any escalation that reaches a prompt can grant writes — and both web and
+ * mobile already render it, so the prompt stays answerable. The v2 Codex
+ * adapter uses `file-read` only for requests that ask for reads alone.
  */
-// V2PORT: the v1 Codex adapter and runtime ingestion mapped permission requests
-// through this kind; the v2 Codex adapter does not use it yet (S1).
 export const CODEX_PERMISSION_REQUEST_KIND: ProviderRequestKind = "file-change";
 
 type PermissionParams = EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams;

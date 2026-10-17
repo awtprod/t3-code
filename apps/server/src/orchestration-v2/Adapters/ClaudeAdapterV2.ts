@@ -1,5 +1,10 @@
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import {
+  type ClaudeSdkHooks,
+  makeClaudeModelGuardrailHooks,
+  mergeClaudeSdkHooks,
+} from "./ClaudeModelGuardrail.ts";
+import {
   dynamicToolTitle,
   formatReadToolLabel,
   formatSearchToolLabel,
@@ -69,6 +74,8 @@ import {
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
+  type OrchestrationV2ProviderTurnTokenUsage,
+  type OrchestrationV2ProviderTurnTokenUsageExtended,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2UserInputQuestion,
   type OrchestrationV2Subagent,
@@ -216,6 +223,8 @@ export function claudeProviderTurnTokenUsage(
     (usage.cache_read_input_tokens ?? 0);
   const outputTokens = usage.output_tokens;
   const promptCacheTtlMs = claudePromptCacheTtlMs(usage.cache_creation);
+  // The latest request's own split, which the summed fields above lose.
+  const extended = claudeExtendedTurnTokenUsage(usage);
   return {
     usedTokens: inputTokens + outputTokens,
     maxTokens: claudeContextWindow(modelSelection),
@@ -225,6 +234,53 @@ export function claudeProviderTurnTokenUsage(
     reasoningOutputTokens: 0,
     ...(promptCacheTtlMs === undefined ? {} : { promptCacheTtlMs }),
     updatedAt,
+    ...(Object.keys(extended).length === 0 ? {} : { extended }),
+  };
+}
+
+const usageCount = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+
+/** Cache-write tokens and the last request's split, from one SDK usage payload. */
+function claudeExtendedTurnTokenUsage(usage: {
+  readonly input_tokens: number;
+  readonly cache_creation_input_tokens?: number | null;
+  readonly cache_read_input_tokens?: number | null;
+  readonly output_tokens: number;
+}): OrchestrationV2ProviderTurnTokenUsageExtended {
+  const cacheWrite = usageCount(usage.cache_creation_input_tokens ?? 0);
+  const input = usageCount(usage.input_tokens);
+  const cached = usageCount(usage.cache_read_input_tokens ?? 0);
+  const output = usageCount(usage.output_tokens);
+  return {
+    ...(cacheWrite === undefined ? {} : { cacheWriteInputTokens: cacheWrite }),
+    ...(input === undefined ? {} : { lastInputTokens: input }),
+    ...(cached === undefined ? {} : { lastCachedInputTokens: cached }),
+    ...(cacheWrite === undefined ? {} : { lastCacheWriteInputTokens: cacheWrite }),
+    ...(output === undefined ? {} : { lastOutputTokens: output }),
+  };
+}
+
+/**
+ * The turn's last live usage with the cost the CLI reported in its result.
+ * `undefined` when there is no usage to attach it to or no valid cost.
+ */
+function claudeFinalTurnTokenUsage(
+  lastTokenUsage: OrchestrationV2ProviderTurnTokenUsage | undefined,
+  result: SDKResultMessage | undefined,
+): OrchestrationV2ProviderTurnTokenUsage | undefined {
+  const cost: unknown = result?.total_cost_usd;
+  if (
+    lastTokenUsage === undefined ||
+    typeof cost !== "number" ||
+    !Number.isFinite(cost) ||
+    cost < 0
+  ) {
+    return undefined;
+  }
+  return {
+    ...lastTokenUsage,
+    extended: { ...lastTokenUsage.extended, costUsd: cost, costKind: "reported" },
   };
 }
 export const CLAUDE_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(CLAUDE_PROVIDER);
@@ -1108,6 +1164,8 @@ export function makeClaudeQueryOptions(input: {
   readonly onUserDialog?: ClaudeQueryOptions["onUserDialog"];
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
   readonly allowDangerouslySkipPermissions?: boolean;
+  /** SDK lifecycle hooks, passed through unchanged (see ClaudeModelGuardrail). */
+  readonly hooks?: ClaudeQueryOptions["hooks"];
 }): ClaudeAgentSdkQueryOptions {
   const compiledSelection = compileClaudeModelSelection(input.modelSelection);
   const {
@@ -1161,6 +1219,9 @@ export function makeClaudeQueryOptions(input: {
     ...(input.allowedTools === undefined ? {} : { allowedTools: [...input.allowedTools] }),
     ...(input.disallowedTools === undefined ? {} : { disallowedTools: [...input.disallowedTools] }),
     ...(input.canUseTool === undefined ? {} : { canUseTool: input.canUseTool }),
+    ...(input.hooks === undefined || Object.keys(input.hooks).length === 0
+      ? {}
+      : { hooks: input.hooks }),
     ...(input.allowDangerouslySkipPermissions === true
       ? { allowDangerouslySkipPermissions: true }
       : {}),
@@ -3077,6 +3138,8 @@ interface ActiveClaudeTurnContext {
   // Usage of the results that steers ended, oldest first. The final result's
   // usage covers only its own segment, so the turn bills these as well.
   readonly steeredSegmentUsage: Array<SDKResultMessage["usage"]>;
+  // Latest live context usage, re-sent with the reported cost on the final update.
+  lastTokenUsage?: OrchestrationV2ProviderTurnTokenUsage;
   readonly subagentsByTaskId: Map<string, ActiveClaudeSubagent>;
   readonly subagentsByToolUseId: Map<string, ActiveClaudeSubagent>;
   readonly subagentNodesByTaskId: Map<string, OrchestrationV2ExecutionNode["id"]>;
@@ -3486,6 +3549,14 @@ export interface ClaudeAdapterV2Options {
       request: ProviderContinuationRequests.ProviderContinuationRequest,
     ) => Effect.Effect<void>;
   };
+  /**
+   * Extra SDK hooks per opened query (for example a `PostToolUse` tool-result
+   * filter). Merged after the model guardrail, which always runs.
+   */
+  readonly sdkHooks?: (context: {
+    readonly threadId: ThreadId;
+    readonly sessionModel: () => string;
+  }) => ClaudeSdkHooks | undefined;
 }
 
 export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
@@ -6088,6 +6159,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     input.status,
                     input.context.steeredSegmentUsage,
                   ),
+                  ...(() => {
+                    const tokenUsage = claudeFinalTurnTokenUsage(
+                      input.context.lastTokenUsage,
+                      input.result,
+                    );
+                    return tokenUsage === undefined ? {} : { tokenUsage };
+                  })(),
                 },
               }),
               // Surface this native thread's roster before the root turn
@@ -7227,6 +7305,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               message.message.usage !== undefined &&
               message.message.model !== "<synthetic>"
             ) {
+              const tokenUsage = claudeProviderTurnTokenUsage(
+                message.message.usage,
+                context.input.modelSelection,
+                DateTime.formatIso(now),
+              );
+              context.lastTokenUsage = tokenUsage;
               yield* emitProviderEvent({
                 type: "provider_turn.updated",
                 driver: CLAUDE_PROVIDER,
@@ -7245,11 +7329,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   status: "running",
                   startedAt: context.startedAt,
                   completedAt: null,
-                  tokenUsage: claudeProviderTurnTokenUsage(
-                    message.message.usage,
-                    context.input.modelSelection,
-                    DateTime.formatIso(now),
-                  ),
+                  tokenUsage,
                 },
               });
             }
@@ -8572,6 +8652,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             turnInput.nativeThreadHasTurns ?? turnInput.providerTurnOrdinal > 1;
           const shouldResume =
             resumeSessionAt !== undefined || openedWithResume || hasPersistedProviderTurn;
+          // Read at hook time: a live model switch updates the opened context.
+          let openedContext: ClaudeLiveQueryContext | undefined;
+          const sessionModel = () =>
+            openedContext?.selection.apiModelId ?? compiledSelection.apiModelId;
           const queryOptions = makeClaudeQueryOptions({
             modelSelection: turnInput.modelSelection,
             nativeThreadId,
@@ -8597,6 +8681,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             canUseTool,
             onUserDialog,
             supportedDialogKinds: ["resume_return"],
+            hooks: mergeClaudeSdkHooks(
+              makeClaudeModelGuardrailHooks({ sessionModel, catalog: subagentModelCatalog }),
+              adapterOptions.sdkHooks?.({ threadId: turnInput.threadId, sessionModel }),
+            ),
           });
           const querySession = yield* queryRunner
             .open({
@@ -8660,6 +8748,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ),
             ),
           };
+          openedContext = context;
           yield* Ref.set(queryContext, context);
           yield* querySession.messages.pipe(
             Stream.runForEach((message) =>

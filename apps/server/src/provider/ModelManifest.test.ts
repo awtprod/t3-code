@@ -1,6 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ProviderDriverKind } from "@t3tools/contracts";
+import {
+  DEFAULT_MODEL_BY_PROVIDER,
+  MODEL_SLUG_ALIASES_BY_PROVIDER,
+  ProviderDriverKind,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -11,6 +15,8 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ModelManifest from "./ModelManifest.ts";
+
+type ProviderCatalog = NonNullable<ReturnType<typeof ModelManifest.resolveProviderCatalog>>;
 
 /**
  * Test policy: this file covers manifest machinery, not manifest contents.
@@ -545,4 +551,115 @@ it.effect("caches valid compatibility policies and keeps them after a malformed 
       }),
     ),
   );
+});
+
+/**
+ * Deliberate exception to the test policy above: these pin cross-file
+ * invariants between the bundled manifest and the contracts tables, which
+ * have drifted before (legacy default chat model, divergent aliases).
+ */
+describe("bundled model manifest invariants", () => {
+  const codexKind = ProviderDriverKind.make("codex");
+  const claudeKind = ProviderDriverKind.make("claudeAgent");
+
+  const resolveClaude = (): ProviderCatalog => {
+    const catalog = ModelManifest.resolveProviderCatalog(
+      ModelManifest.BUNDLED_MODEL_MANIFEST,
+      claudeKind,
+    );
+    assert.isNotNull(catalog);
+    return catalog!;
+  };
+
+  it("promotes codex catalog models listed in currentModels to current", () => {
+    const catalog = ModelManifest.resolveProviderCatalog(
+      ModelManifest.BUNDLED_MODEL_MANIFEST,
+      codexKind,
+    );
+    assert.isNotNull(catalog);
+    for (const slug of ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+      const status = catalog!.models.find((entry) => entry.slug === slug)?.status;
+      assert.equal(status, "current", `${slug} status`);
+    }
+  });
+
+  it("keeps the catalog status for models not listed in currentModels", () => {
+    const catalog = ModelManifest.resolveProviderCatalog(
+      ModelManifest.BUNDLED_MODEL_MANIFEST,
+      codexKind,
+    );
+    assert.isNotNull(catalog);
+    assert.notInclude(ModelManifest.BUNDLED_MODEL_MANIFEST.currentModels.codex ?? [], "gpt-5.5");
+    const model = catalog!.models.find((entry) => entry.slug === "gpt-5.5");
+    assert.isDefined(model);
+    assert.equal(model?.status, "legacy");
+  });
+
+  it("makes the claudeAgent default chat model current, not legacy", () => {
+    const catalog = resolveClaude();
+    assert.isDefined(catalog.defaultChatModel);
+    const model = catalog.models.find((entry) => entry.slug === catalog.defaultChatModel);
+    assert.isDefined(model);
+    assert.equal(model?.status, "current");
+  });
+
+  it("gives the sonnet alias to claude-sonnet-5 and not to claude-sonnet-5-5", () => {
+    const catalog = resolveClaude();
+    const sonnet5 = catalog.models.find((entry) => entry.slug === "claude-sonnet-5");
+    const sonnet55 = catalog.models.find((entry) => entry.slug === "claude-sonnet-5-5");
+    assert.equal(sonnet5?.status, "current");
+    assert.include(sonnet5?.aliases ?? [], "sonnet");
+    assert.isDefined(sonnet55);
+    assert.notInclude(sonnet55?.aliases ?? [], "sonnet");
+  });
+
+  it("agrees with the contracts claudeAgent alias table in both directions", () => {
+    const catalog = resolveClaude();
+    const contractsAliases = MODEL_SLUG_ALIASES_BY_PROVIDER[claudeKind] ?? {};
+
+    // Manifest -> contracts: every manifest alias resolves to its own model.
+    const slugsByAlias = new Map<string, Set<string>>();
+    for (const model of catalog.models) {
+      for (const alias of model.aliases ?? []) {
+        assert.equal(
+          contractsAliases[alias],
+          model.slug,
+          `contracts alias "${alias}" should resolve to manifest model ${model.slug}`,
+        );
+        const slugs = slugsByAlias.get(alias) ?? new Set<string>();
+        slugs.add(model.slug);
+        slugsByAlias.set(alias, slugs);
+      }
+    }
+    for (const [alias, slugs] of slugsByAlias) {
+      assert.equal(slugs.size, 1, `manifest alias "${alias}" resolves to ${[...slugs].join(", ")}`);
+    }
+
+    // Contracts -> manifest: an alias targeting a catalog model is listed by
+    // that model, unless no manifest model lists it at all.
+    const slugs = new Set(catalog.models.map((model) => model.slug));
+    for (const [alias, target] of Object.entries(contractsAliases)) {
+      if (!slugs.has(target)) continue;
+      const listedBy = catalog.models.filter((model) => model.aliases?.includes(alias));
+      if (listedBy.length === 0) continue;
+      assert.deepEqual(
+        listedBy.map((model) => model.slug),
+        [target],
+        `manifest lists alias "${alias}" under a different slug than contracts (${target})`,
+      );
+    }
+  });
+
+  it("pins the haiku and sonnet aliases and the default model across both tables", () => {
+    const catalog = resolveClaude();
+    const contractsAliases = MODEL_SLUG_ALIASES_BY_PROVIDER[claudeKind] ?? {};
+    const manifestSlugFor = (alias: string) =>
+      catalog.models.find((model) => model.aliases?.includes(alias))?.slug;
+
+    assert.equal(contractsAliases.haiku, "claude-haiku-5-5");
+    assert.equal(manifestSlugFor("haiku"), "claude-haiku-5-5");
+    assert.equal(contractsAliases.sonnet, "claude-sonnet-5");
+    assert.equal(manifestSlugFor("sonnet"), "claude-sonnet-5");
+    assert.equal(DEFAULT_MODEL_BY_PROVIDER[claudeKind], catalog.defaultChatModel);
+  });
 });

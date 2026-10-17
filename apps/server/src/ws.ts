@@ -105,6 +105,7 @@ import {
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
+  type WorktreeCleanupNotice,
   WS_METHODS,
   WsCoreRpcGroup,
   WsRpcGroup,
@@ -577,7 +578,7 @@ export function shouldUseBoundedThreadSnapshot(input: {
 // Optional client identity announced on the /ws upgrade URL next to wsTicket.
 // Lenient by design: absent or malformed values degrade to {} so a connection
 // never fails over attribution metadata.
-function readClientConnectionOrigin(
+export function readClientConnectionOrigin(
   request: HttpServerRequest.HttpServerRequest,
 ): OrchestrationClientOrigin {
   const url = HttpServerRequest.toURL(request);
@@ -593,6 +594,19 @@ function readClientConnectionOrigin(
       : {}),
   };
 }
+
+/**
+ * Notices for the initial server config snapshot. `noticeChanges` only streams
+ * later changes, so a client that connects after a notice was raised would
+ * otherwise see none until the next change.
+ */
+export const currentWorktreeCleanupNotices = (
+  worktreeCleanup: Option.Option<WorktreeCleanup.WorktreeCleanup["Service"]>,
+): Effect.Effect<ReadonlyArray<WorktreeCleanupNotice>> =>
+  Option.match(worktreeCleanup, {
+    onNone: () => Effect.succeed([]),
+    onSome: (cleanup) => cleanup.notices,
+  });
 
 // Client telemetry stays in this socket's RPC layer. It must not become a
 // server-global "current client" because several client types can connect at once.
@@ -1717,6 +1731,7 @@ const layerWsRpc = (
             threadSnapshotPagination: true,
             threadFind: true,
             threadFindProgressive: true,
+            worktreeCleanupNotices: yield* currentWorktreeCleanupNotices(worktreeCleanup),
             ...Option.match(scratchWorkspaceRoot, {
               onNone: () => ({}),
               onSome: (root) => ({ scratchWorkspaceRoot: root }),
@@ -3337,7 +3352,7 @@ export const layer = Layer.unwrap(
           ),
         );
         return yield* Effect.acquireUseRelease(
-          sessions.markConnected(session.sessionId),
+          sessions.markConnected(session.sessionId, clientOrigin),
           () =>
             Effect.raceFirst(
               rpcWebSocketHttpEffect,

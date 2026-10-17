@@ -5,6 +5,7 @@ import {
   ThreadId,
   type OrchestrationV2StoredEvent,
   type OrchestrationProjectShell,
+  type WorktreeCleanupNotice,
   type ServerConfig,
   type ServerConfigStreamEvent,
 } from "@t3tools/contracts";
@@ -16,11 +17,13 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { HttpServerRequest } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -31,8 +34,11 @@ import * as SqlitePersistence from "./persistence/Sqlite.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ProjectEnrichment from "./project/ProjectEnrichmentService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
+import * as WorktreeCleanup from "./worktreeCleanup.ts";
 import {
+  currentWorktreeCleanupNotices,
   hasCompatibleOrchestrationProtocol,
+  readClientConnectionOrigin,
   resolveAvailableEditorsForConfig,
   shouldUseBoundedThreadSnapshot,
   subscribeOrchestrationV2Shell,
@@ -364,3 +370,47 @@ it.live.each(["thread", "shell"] as const)(
       );
     }).pipe(Effect.scoped, Effect.provide(ReplayTestLayer)),
 );
+
+it.effect("returns the worktree cleanup service notices, or none when the service is absent", () =>
+  Effect.gen(function* () {
+    const notice: WorktreeCleanupNotice = {
+      id: "acme-notice-1",
+      worktreePath: "/tmp/acme/worktree",
+      projectTitle: "Acme",
+      branch: "acme/feature",
+      reason: "local-changes",
+      createdAt: "2026-10-16T00:00:00.000Z",
+    };
+    const service = {
+      notices: Effect.succeed([notice]),
+    } as unknown as WorktreeCleanup.WorktreeCleanup["Service"];
+
+    assert.deepEqual(yield* currentWorktreeCleanupNotices(Option.some(service)), [notice]);
+    assert.deepEqual(yield* currentWorktreeCleanupNotices(Option.none()), []);
+  }),
+);
+
+it("reads valid client origin query params from the websocket upgrade request", () => {
+  const request = HttpServerRequest.fromWeb(
+    new Request("http://host.test/ws?clientSurface=desktop&clientAppVersion=1.2.3"),
+  );
+  assert.deepEqual(readClientConnectionOrigin(request), {
+    surface: "desktop",
+    appVersion: "1.2.3",
+  });
+});
+
+it("drops invalid client origin query params instead of failing", () => {
+  const garbageSurface = HttpServerRequest.fromWeb(
+    new Request("http://host.test/ws?clientSurface=toaster&clientAppVersion=%20%20"),
+  );
+  assert.deepEqual(readClientConnectionOrigin(garbageSurface), {});
+
+  const overlongVersion = HttpServerRequest.fromWeb(
+    new Request(`http://host.test/ws?clientSurface=nope&clientAppVersion=${"9".repeat(500)}`),
+  );
+  assert.deepEqual(readClientConnectionOrigin(overlongVersion), {});
+
+  const missing = HttpServerRequest.fromWeb(new Request("http://host.test/ws"));
+  assert.deepEqual(readClientConnectionOrigin(missing), {});
+});

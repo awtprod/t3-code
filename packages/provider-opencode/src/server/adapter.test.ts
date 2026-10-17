@@ -104,6 +104,30 @@ function asyncEventStream() {
   };
 }
 
+/** A stream that has already ended, like a dropped OpenCode SSE connection that delivered nothing. */
+function endedEventStream() {
+  const events = asyncEventStream();
+  events.close();
+  return events;
+}
+
+// Real (live-clock) wait so pending subscribe promises settle between TestClock steps.
+const settleAsyncWork = TestClock.withLive(Effect.sleep("5 millis"));
+
+/**
+ * Drives the adapter's reconnect backoff (250 ms .. 5 s, `Effect.sleep` on the
+ * TestClock): lets the pending subscribe promises settle, then advances the
+ * clock past the longest possible backoff, until `done` holds.
+ */
+const advanceReconnectsUntil = Effect.fnUntraced(function* (done: () => boolean) {
+  for (let step = 0; step < 40; step += 1) {
+    yield* settleAsyncWork;
+    if (done()) return;
+    yield* TestClock.adjust("5 seconds");
+  }
+  yield* settleAsyncWork;
+});
+
 const OPENCODE_TEST_SETTINGS = Schema.decodeUnknownSync(OpenCodeSettings)({});
 
 function runtimePolicy(
@@ -471,6 +495,8 @@ describe("OpenCodeAdapterV2", () => {
       const scope = yield* Scope.make();
       const nativeEvents = asyncEventStream();
       const calls: string[] = [];
+      // The event pump subscribes from a forked fiber, so wait until it has.
+      const subscribed = promiseGate<void>();
       yield* makeOpenCodeRuntimeHarness("release", "root", {
         event: {
           subscribe: async (_input: unknown, options: { signal: AbortSignal }) => {
@@ -478,6 +504,7 @@ describe("OpenCodeAdapterV2", () => {
               calls.push("stream.close");
               nativeEvents.close();
             });
+            subscribed.resolve();
             return { stream: nativeEvents.stream };
           },
         },
@@ -493,6 +520,7 @@ describe("OpenCodeAdapterV2", () => {
           },
         },
       }).pipe(Effect.provideService(Scope.Scope, scope));
+      yield* Effect.promise(() => subscribed.promise);
       yield* Scope.close(scope, Exit.void);
       assert.deepEqual(calls, [
         "abort:root",
@@ -1949,46 +1977,205 @@ describe("OpenCodeAdapterV2", () => {
     ),
   );
 
-  it.effect("fails an active turn when the OpenCode event stream ends cleanly", () =>
-    Effect.gen(function* () {
-      const nativeEvents = asyncEventStream();
-      const harness = yield* makeOpenCodeRuntimeHarness(
-        "clean-event-eof",
-        "native-opencode-clean-event-eof",
-        {
-          event: {
-            subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
-              options.signal?.addEventListener("abort", () => nativeEvents.close(), { once: true });
-              return { stream: nativeEvents.stream };
+  it.effect(
+    "fails an active turn when the OpenCode event stream keeps ending cleanly past the reconnect budget",
+    () =>
+      Effect.gen(function* () {
+        const nativeEvents = asyncEventStream();
+        let subscribeCalls = 0;
+        const harness = yield* makeOpenCodeRuntimeHarness(
+          "clean-event-eof",
+          "native-opencode-clean-event-eof",
+          {
+            event: {
+              subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
+                subscribeCalls += 1;
+                // The first connection is healthy until it ends; every reconnect ends at once.
+                if (subscribeCalls > 1) return { stream: endedEventStream().stream };
+                options.signal?.addEventListener("abort", () => nativeEvents.close(), {
+                  once: true,
+                });
+                return { stream: nativeEvents.stream };
+              },
+            },
+            session: {
+              create: async () => ({
+                data: { id: "native-opencode-clean-event-eof", time: { created: 1, updated: 1 } },
+              }),
+              promptAsync: async () => ({ data: true }),
+              status: async () => ({
+                data: { "native-opencode-clean-event-eof": { type: "busy" } },
+              }),
             },
           },
-          session: {
-            create: async () => ({
-              data: { id: "native-opencode-clean-event-eof", time: { created: 1, updated: 1 } },
-            }),
-            promptAsync: async () => ({ data: true }),
+        );
+        yield* harness.startTurn();
+        const terminalEvents = yield* harness.runtime.events.pipe(
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+
+        nativeEvents.close();
+        // One clean EOF no longer fails the turn: the adapter resubscribes.
+        yield* advanceReconnectsUntil(() => terminalEvents.pollUnsafe() !== undefined);
+        assert.equal(subscribeCalls, 6);
+        const received = Array.from(yield* Fiber.join(terminalEvents));
+        assert.isTrue(
+          received.some(
+            (event) =>
+              event.type === "provider_session.updated" && event.providerSession.status === "error",
+          ),
+        );
+        const terminal = received.find((event) => event.type === "turn.terminal");
+        assert.equal(terminal?.status, "failed");
+        assert.equal(terminal?.failure?.class, "transport_error");
+        assert.equal(terminal?.threadDisposition, "broken");
+        assert.equal((yield* Effect.exit(harness.startTurn()))._tag, "Failure");
+      }).pipe(
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+        Effect.scoped,
+      ),
+  );
+
+  it.effect("resubscribes after the event stream drops and keeps the turn running", () =>
+    Effect.gen(function* () {
+      const first = asyncEventStream();
+      const second = asyncEventStream();
+      const subscriptions = [first, second];
+      let subscribeCalls = 0;
+      let promptId = "";
+      const harness = yield* makeOpenCodeRuntimeHarness("event-resubscribe", "root", {
+        event: {
+          subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
+            const subscription = subscriptions[subscribeCalls++] ?? endedEventStream();
+            options.signal?.addEventListener("abort", () => subscription.close(), { once: true });
+            return { stream: subscription.stream };
           },
         },
-      );
+        session: {
+          create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+          promptAsync: async (input: { messageID: string }) => {
+            promptId = input.messageID;
+            return { data: true };
+          },
+          // The server is still working on the turn after the stream comes back.
+          status: async () => ({ data: { root: { type: "busy" } } }),
+        },
+      });
       yield* harness.startTurn();
-      const terminalEvents = yield* harness.runtime.events.pipe(
+      const received = yield* harness.runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
         Stream.runCollect,
         Effect.forkScoped,
       );
+      yield* Effect.promise(() =>
+        first.push({
+          type: "message.updated",
+          properties: {
+            sessionID: "root",
+            info: { id: promptId, role: "user", time: { created: 1 } },
+          },
+        }),
+      );
+      yield* Effect.promise(() =>
+        first.push({
+          type: "session.status",
+          properties: { sessionID: "root", status: { type: "busy" } },
+        }),
+      );
+      first.close();
 
-      nativeEvents.close();
-      const received = Array.from(yield* Fiber.join(terminalEvents));
-      assert.isTrue(
-        received.some(
+      yield* advanceReconnectsUntil(() => subscribeCalls >= 2);
+      assert.equal(subscribeCalls, 2);
+      assert.isUndefined(received.pollUnsafe());
+
+      yield* Effect.promise(() =>
+        second.push({ type: "session.idle", properties: { sessionID: "root" } }),
+      );
+      const events = Array.from(yield* Fiber.join(received));
+      const terminals = events.filter((event) => event.type === "turn.terminal");
+      assert.lengthOf(terminals, 1);
+      assert.equal(terminals[0]?.status, "completed");
+      assert.isNull(terminals[0]?.failure ?? null);
+      assert.isFalse(
+        events.some(
           (event) =>
-            event.type === "provider_session.updated" && event.providerSession.status === "error",
+            (event.type === "turn.terminal" && event.failure?.class === "transport_error") ||
+            (event.type === "provider_session.updated" && event.providerSession.status === "error"),
         ),
       );
-      const terminal = received.find((event) => event.type === "turn.terminal");
-      assert.equal(terminal?.status, "failed");
-      assert.equal(terminal?.failure?.class, "transport_error");
-      assert.equal(terminal?.threadDisposition, "broken");
-      assert.equal((yield* Effect.exit(harness.startTurn()))._tag, "Failure");
+      assert.equal(subscribeCalls, 2);
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect("completes a turn whose idle was missed while the stream was down", () =>
+    Effect.gen(function* () {
+      const first = asyncEventStream();
+      const second = asyncEventStream();
+      const subscriptions = [first, second];
+      let subscribeCalls = 0;
+      let statusCalls = 0;
+      let promptId = "";
+      const harness = yield* makeOpenCodeRuntimeHarness("event-missed-idle", "root", {
+        event: {
+          subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
+            const subscription = subscriptions[subscribeCalls++] ?? endedEventStream();
+            options.signal?.addEventListener("abort", () => subscription.close(), { once: true });
+            return { stream: subscription.stream };
+          },
+        },
+        session: {
+          create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+          promptAsync: async (input: { messageID: string }) => {
+            promptId = input.messageID;
+            return { data: true };
+          },
+          // The session went idle while the stream was down; the new stream never repeats it.
+          status: async () => {
+            statusCalls += 1;
+            return { data: { root: { type: "idle" } } };
+          },
+        },
+      });
+      yield* harness.startTurn();
+      const received = yield* harness.runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* Effect.promise(() =>
+        first.push({
+          type: "message.updated",
+          properties: {
+            sessionID: "root",
+            info: { id: promptId, role: "user", time: { created: 1 } },
+          },
+        }),
+      );
+      yield* Effect.promise(() =>
+        first.push({
+          type: "session.status",
+          properties: { sessionID: "root", status: { type: "busy" } },
+        }),
+      );
+      yield* settleAsyncWork;
+      // The very first subscribe is not reconciled, and the turn is still running.
+      assert.equal(subscribeCalls, 1);
+      assert.equal(statusCalls, 0);
+      assert.isUndefined(received.pollUnsafe());
+      first.close();
+
+      yield* advanceReconnectsUntil(() => received.pollUnsafe() !== undefined);
+      const events = Array.from(yield* Fiber.join(received));
+      const terminals = events.filter((event) => event.type === "turn.terminal");
+      assert.lengthOf(terminals, 1);
+      assert.equal(terminals[0]?.status, "completed");
+      assert.isNull(terminals[0]?.failure ?? null);
+      assert.equal(subscribeCalls, 2);
+      assert.equal(statusCalls, 1);
     }).pipe(
       Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
       Effect.scoped,
@@ -1998,6 +2185,7 @@ describe("OpenCodeAdapterV2", () => {
   it.effect("fails compaction when its response races stream termination", () =>
     Effect.gen(function* () {
       const nativeEvents = asyncEventStream();
+      let subscribeCalls = 0;
       const summarizeStarted = promiseGate<void>();
       const summarizeResult = promiseGate<{ data: boolean }>();
       const baseClock = yield* Clock.Clock;
@@ -2019,10 +2207,21 @@ describe("OpenCodeAdapterV2", () => {
         "compaction-eof-race",
         "native-opencode-compaction-eof-race",
         {
-          event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+          event: {
+            subscribe: async () => {
+              subscribeCalls += 1;
+              // Every reconnect ends at once, so the stream only fails after the budget.
+              return {
+                stream: subscribeCalls === 1 ? nativeEvents.stream : endedEventStream().stream,
+              };
+            },
+          },
           session: {
             create: async () => ({
               data: { id: "native-opencode-compaction-eof-race", time: { created: 1, updated: 1 } },
+            }),
+            status: async () => ({
+              data: { "native-opencode-compaction-eof-race": { type: "busy" } },
             }),
             summarize: () => {
               summarizeStarted.resolve();
@@ -2036,7 +2235,10 @@ describe("OpenCodeAdapterV2", () => {
       yield* Effect.promise(() => summarizeStarted.promise);
       blockNextClockRead = true;
       nativeEvents.close();
+      // The terminal failure (and its clock read) only happens once the reconnect budget is spent.
+      yield* advanceReconnectsUntil(() => Deferred.isDoneUnsafe(eofClockRead));
       yield* Deferred.await(eofClockRead);
+      assert.equal(subscribeCalls, 6);
       summarizeResult.resolve({ data: true });
       yield* Fiber.join(start);
       yield* Deferred.succeed(releaseEofClockRead, undefined);
@@ -2063,12 +2265,16 @@ describe("OpenCodeAdapterV2", () => {
     Effect.gen(function* () {
       const nativeEvents = asyncEventStream();
       let promptCalls = 0;
+      let subscribeCalls = 0;
       const harness = yield* makeOpenCodeRuntimeHarness(
         "event-eof-start-race",
         "native-opencode-event-eof-start-race",
         {
           event: {
             subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
+              subscribeCalls += 1;
+              // Reconnects end at once; only the first connection is closed by the test.
+              if (subscribeCalls > 1) return { stream: endedEventStream().stream };
               options.signal?.addEventListener("abort", () => nativeEvents.close(), { once: true });
               return { stream: nativeEvents.stream };
             },
@@ -2109,6 +2315,9 @@ describe("OpenCodeAdapterV2", () => {
 
       const events = yield* harness.runtime.events.pipe(Stream.runCollect, Effect.forkScoped);
       nativeEvents.close();
+      // The events queue only ends once the reconnect budget is exhausted.
+      yield* advanceReconnectsUntil(() => events.pollUnsafe() !== undefined);
+      assert.equal(subscribeCalls, 6);
       yield* Fiber.join(events);
       yield* Deferred.succeed(releaseStartClockRead, undefined);
 

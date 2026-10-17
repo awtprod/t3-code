@@ -3,31 +3,13 @@ import * as Schema from "effect/Schema";
 import type * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 const NullableMcpElicitationString = Schema.NullOr(Schema.String);
+// Only the persistence hints are read from `_meta`. App names in `_meta` (and
+// the message text) are request-controlled, so the prompt names the app by the
+// trusted `serverName` instead.
 const McpElicitationMetadata = Schema.Struct({
-  app: Schema.optionalKey(NullableMcpElicitationString),
-  app_name: Schema.optionalKey(NullableMcpElicitationString),
-  appName: Schema.optionalKey(NullableMcpElicitationString),
-  connector_name: Schema.optionalKey(NullableMcpElicitationString),
-  connectorName: Schema.optionalKey(NullableMcpElicitationString),
   allowPersistentApproval: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   persist: Schema.optionalKey(
     Schema.NullOr(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
-  ),
-  target: Schema.optionalKey(
-    Schema.NullOr(
-      Schema.Struct({
-        app: Schema.optionalKey(NullableMcpElicitationString),
-        name: Schema.optionalKey(NullableMcpElicitationString),
-      }),
-    ),
-  ),
-  tool_params: Schema.optionalKey(
-    Schema.NullOr(
-      Schema.Struct({
-        app: Schema.optionalKey(NullableMcpElicitationString),
-        app_name: Schema.optionalKey(NullableMcpElicitationString),
-      }),
-    ),
   ),
 });
 const McpElicitationFormField = Schema.Struct({
@@ -93,16 +75,29 @@ function mcpElicitationFieldOptions(field: typeof McpElicitationFormField.Type) 
   }));
 }
 
-function isMcpElicitationPersistenceField(
+/**
+ * The persistence scope a boolean consent field grants when checked. A
+ * "this session" checkbox stays session-scoped; only always/persist fields
+ * mean "always".
+ */
+function mcpElicitationBooleanPersistenceDecision(
   key: string,
   field: typeof McpElicitationFormField.Type,
-): boolean {
+): McpElicitationPersistenceDecision | null {
   return (
-    mcpElicitationPersistenceDecision(key) !== null ||
-    key.toLowerCase() === "persist" ||
-    mcpElicitationPersistenceDecision(field.title ?? "") !== null ||
-    mcpElicitationPersistenceDecision(field.description ?? "") !== null
+    mcpElicitationPersistenceDecision(key) ??
+    (key.toLowerCase() === "persist" ? "acceptAlways" : null) ??
+    mcpElicitationPersistenceDecision(field.title ?? "") ??
+    mcpElicitationPersistenceDecision(field.description ?? "")
   );
+}
+
+/**
+ * Whole-value match, so `allow_admin`, `disallow` or `approve_all` are never
+ * picked as the one-time approval.
+ */
+function isMcpElicitationOneTimeApprovalValue(value: string): boolean {
+  return /^(?:once|accept|approve|allow)(?:[_ -]?once)?$/i.test(value.trim());
 }
 
 /** Returns the app and approval choices advertised by an MCP elicitation. */
@@ -110,18 +105,7 @@ export function describeMcpElicitation(
   payload: EffectCodexSchema.McpServerElicitationRequestParams,
 ): { readonly appName: string; readonly options: ReadonlyArray<ProviderApprovalOption> } {
   const metadata = isMcpElicitationMetadata(payload._meta) ? payload._meta : undefined;
-  const appName =
-    metadata?.app_name ??
-    metadata?.appName ??
-    metadata?.app ??
-    metadata?.target?.app ??
-    metadata?.target?.name ??
-    metadata?.tool_params?.app_name ??
-    metadata?.tool_params?.app ??
-    payload.message.match(/^Allow ChatGPT to use (.+?)\?$/i)?.[1] ??
-    metadata?.connector_name ??
-    metadata?.connectorName ??
-    payload.serverName;
+  const appName = payload.serverName;
   const persistenceOptions = new Map<McpElicitationPersistenceDecision, string>();
   const persist = metadata?.persist;
   for (const value of typeof persist === "string" ? [persist] : (persist ?? [])) {
@@ -138,8 +122,10 @@ export function describeMcpElicitation(
       const decision = mcpElicitationPersistenceDecision(option.value);
       if (decision) persistenceOptions.set(decision, option.label ?? "");
     }
-    if (field.type === "boolean" && isMcpElicitationPersistenceField(key, field)) {
-      persistenceOptions.set("acceptAlways", field.title ?? "");
+    const booleanDecision =
+      field.type === "boolean" ? mcpElicitationBooleanPersistenceDecision(key, field) : null;
+    if (booleanDecision) {
+      persistenceOptions.set(booleanDecision, field.title ?? "");
     }
   }
 
@@ -198,13 +184,15 @@ export function toMcpElicitationResponse(
     const chosenOption = options.find((option) =>
       persist
         ? mcpElicitationPersistenceDecision(option.value) === decision
-        : /once|accept|approve|allow/i.test(option.value) &&
-          mcpElicitationPersistenceDecision(option.value) === null,
+        : isMcpElicitationOneTimeApprovalValue(option.value),
     );
+    const booleanDecision =
+      field.type === "boolean" ? mcpElicitationBooleanPersistenceDecision(key, field) : null;
     if (chosenOption) {
       content[key] = chosenOption.value;
-    } else if (field.type === "boolean" && isMcpElicitationPersistenceField(key, field)) {
-      content[key] = decision === "acceptAlways";
+    } else if (booleanDecision) {
+      // Checked only for the scope it grants: "this session" is not "always".
+      content[key] = decision === booleanDecision;
     } else if (field.default !== undefined && field.default !== null) {
       content[key] = field.default;
     }

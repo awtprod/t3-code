@@ -15,12 +15,52 @@ import * as Scope from "effect/Scope";
 
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import {
+  CommandCenterProviderAdmissionError,
+  commandCenterProviderIsolationIssue,
+} from "../provider/security/CommandCenterProviderIsolation.ts";
+import {
   ProviderAdapterDriverCreateError,
   type AnyProviderAdapterDriver,
 } from "@t3tools/provider-core/server/adapterDriver";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const isProviderSetupError = Schema.is(ProviderSetupError);
+
+/**
+ * The authoritative Command Center admission gate. Every orchestration session
+ * opens through a registry `get`, so wrapping `openSession` here refuses a
+ * `cc:` thread on a provider without an isolation profile (anything but Codex)
+ * or in full-access mode before the adapter spawns anything. The `cc:`
+ * identity comes from the server-assigned thread id in the open request.
+ * Adapter errors pass through unchanged.
+ */
+function withCommandCenterAdmission(
+  adapter: ProviderAdapter.ProviderAdapterV2["Service"],
+): ProviderAdapter.ProviderAdapterV2["Service"] {
+  return {
+    ...adapter,
+    openSession: (input) => {
+      const issue = commandCenterProviderIsolationIssue({
+        threadId: input.threadId,
+        provider: adapter.driver,
+        runtimeMode: input.runtimePolicy.runtimeMode,
+      });
+      return issue === undefined
+        ? adapter.openSession(input)
+        : Effect.fail(
+            new ProviderAdapter.ProviderAdapterOpenSessionError({
+              driver: adapter.driver,
+              providerSessionId: input.providerSessionId,
+              cause: new CommandCenterProviderAdmissionError({
+                threadId: String(input.threadId),
+                provider: String(adapter.driver),
+                issue,
+              }),
+            }),
+          );
+    },
+  };
+}
 
 export class ProviderAdapterRegistryLookupError extends Schema.TaggedError<ProviderAdapterRegistryLookupError>()(
   "ProviderAdapterRegistryLookupError",
@@ -87,54 +127,57 @@ export const layerFromProviderInstanceRegistry: Layer.Layer<
               return new ProviderAdapterRegistryLookupError({ instanceId });
             const adapter = instance.orchestrationAdapter;
             const auth = instance.auth;
-            if (!auth) return Effect.succeed(adapter);
-            return Effect.succeed({
-              ...adapter,
-              openSession: (input) => {
-                const open = Effect.gen(function* () {
-                  const binding = auth.credentialBinding;
-                  const related = binding
-                    ? (yield* instances.listInstances).filter(
-                        (instance) =>
-                          instance.auth?.credentialBinding?.key === binding.key &&
-                          instance.auth.credentialBinding.owner === binding.owner,
+            if (!auth) return Effect.succeed(withCommandCenterAdmission(adapter));
+            return Effect.succeed(
+              withCommandCenterAdmission({
+                ...adapter,
+                openSession: (input) => {
+                  const open = Effect.gen(function* () {
+                    const binding = auth.credentialBinding;
+                    const related = binding
+                      ? (yield* instances.listInstances).filter(
+                          (instance) =>
+                            instance.auth?.credentialBinding?.key === binding.key &&
+                            instance.auth.credentialBinding.owner === binding.owner,
+                        )
+                      : [instance];
+                    for (const instance of related) {
+                      if (
+                        instance.auth?.isChangingCredentials &&
+                        (yield* instance.auth.isChangingCredentials)
                       )
-                    : [instance];
-                  for (const instance of related) {
-                    if (
-                      instance.auth?.isChangingCredentials &&
-                      (yield* instance.auth.isChangingCredentials)
-                    )
-                      return yield* new ProviderSetupError({
-                        instanceId,
-                        operation: "session",
-                        detail: "This provider's sign-in is changing. Try again after it finishes.",
-                      });
-                  }
-                  let admitted: Effect.Effect<
-                    ProviderAdapter.ProviderAdapterV2SessionRuntime,
-                    ProviderAdapter.ProviderAdapterV2Error | ProviderSetupError,
-                    Scope.Scope
-                  > = adapter.openSession(input);
-                  // Shared credential changes must interrupt a peer's startup too.
-                  for (const peer of related) {
-                    if (peer.auth?.withAccess) admitted = peer.auth.withAccess(admitted);
-                  }
-                  return yield* admitted;
-                });
-                return open.pipe(
-                  Effect.mapError((cause) =>
-                    isProviderSetupError(cause)
-                      ? new ProviderAdapter.ProviderAdapterOpenSessionError({
-                          driver: adapter.driver,
-                          providerSessionId: input.providerSessionId,
-                          cause,
-                        })
-                      : cause,
-                  ),
-                );
-              },
-            } satisfies ProviderAdapter.ProviderAdapterV2["Service"]);
+                        return yield* new ProviderSetupError({
+                          instanceId,
+                          operation: "session",
+                          detail:
+                            "This provider's sign-in is changing. Try again after it finishes.",
+                        });
+                    }
+                    let admitted: Effect.Effect<
+                      ProviderAdapter.ProviderAdapterV2SessionRuntime,
+                      ProviderAdapter.ProviderAdapterV2Error | ProviderSetupError,
+                      Scope.Scope
+                    > = adapter.openSession(input);
+                    // Shared credential changes must interrupt a peer's startup too.
+                    for (const peer of related) {
+                      if (peer.auth?.withAccess) admitted = peer.auth.withAccess(admitted);
+                    }
+                    return yield* admitted;
+                  });
+                  return open.pipe(
+                    Effect.mapError((cause) =>
+                      isProviderSetupError(cause)
+                        ? new ProviderAdapter.ProviderAdapterOpenSessionError({
+                            driver: adapter.driver,
+                            providerSessionId: input.providerSessionId,
+                            cause,
+                          })
+                        : cause,
+                    ),
+                  );
+                },
+              } satisfies ProviderAdapter.ProviderAdapterV2["Service"]),
+            );
           }),
         ),
       list: () =>
@@ -178,7 +221,7 @@ function makeRegistry(
         if (!adapter) {
           return yield* new ProviderAdapterRegistryLookupError({ instanceId });
         }
-        return adapter;
+        return withCommandCenterAdmission(adapter);
       }),
     list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
   };
@@ -361,7 +404,7 @@ const layerFromProviderAdapter: Layer.Layer<
     return ProviderAdapterRegistryV2.of({
       get: (instanceId) =>
         adapter.instanceId === instanceId
-          ? Effect.succeed(adapter)
+          ? Effect.succeed(withCommandCenterAdmission(adapter))
           : Effect.fail(new ProviderAdapterRegistryLookupError({ instanceId })),
       list: () => Effect.succeed([adapter.instanceId]),
     } satisfies ProviderAdapterRegistryV2Shape);

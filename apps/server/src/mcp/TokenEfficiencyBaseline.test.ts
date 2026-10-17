@@ -41,7 +41,9 @@ it("records the committed static-context baseline", () => {
     // "\n\n" (tools now ride turn additionalContext; baseline measures both).
     // 2026-10: +887 bytes from upstream v0.1.0's developer instructions (re-platform
     // onto orchestration v2); Command Center's own additions are unchanged.
-    collaborationInstructions: { defaultBytes: 3_050, planBytes: 11_187 },
+    // 2026-10: +14 bytes: the collaborative-browser block names Command Center
+    // instead of T3 Code again (two mentions).
+    collaborationInstructions: { defaultBytes: 3_064, planBytes: 11_201 },
     // 2026-09: +1,938 bytes for the optional `database` selector on the nine
     // Supabase tools (multi-database projects).
     // 2026-09: +76 bytes for the `prospect.evaluate`/`prospect.notify`

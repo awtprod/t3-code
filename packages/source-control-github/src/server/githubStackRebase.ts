@@ -4,6 +4,8 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Base64 from "effect/encoding/Base64";
 
+import { commandCenterGitIdentityEnvironment } from "@t3tools/shared/commandCenterGitIdentity";
+
 import * as GitHubApi from "./GitHubApi.ts";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 
@@ -75,18 +77,19 @@ export const cascadeRebaseStack = Effect.fn("cascadeRebaseStack")(function* (inp
     ),
   );
   // The token rides in a header for this process only: never in the URL, argv, or git config.
+  // The host validates it as the header for exactly this https remote; a non-https remote
+  // (a local path in tests) needs no token. The committer identity is Command Center's.
   const remote = input.remote ?? remoteUrl(input.host, input.repository);
-  const authorization = `AUTHORIZATION: basic ${Base64.encode(`x-access-token:${Redacted.value(token)}`)}`;
-  const env = {
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_CONFIG_COUNT: "3",
-    GIT_CONFIG_KEY_0: `http.${remote}.extraheader`,
-    GIT_CONFIG_VALUE_0: authorization,
-    GIT_CONFIG_KEY_1: "user.name",
-    GIT_CONFIG_VALUE_1: "T3 Code",
-    GIT_CONFIG_KEY_2: "user.email",
-    GIT_CONFIG_VALUE_2: "noreply@t3.codes",
-  };
+  const trustedConfig = remote.startsWith("https://")
+    ? {
+        remoteUrl: remote,
+        key: `http.${remote}.extraheader`,
+        value: Redacted.make(
+          `AUTHORIZATION: basic ${Base64.encode(`x-access-token:${Redacted.value(token)}`)}`,
+        ),
+      }
+    : undefined;
+  const env = { GIT_TERMINAL_PROMPT: "0", ...commandCenterGitIdentityEnvironment() };
   const git = (args: ReadonlyArray<string>, allowNonZeroExit = false) =>
     process.run({
       operation: "cascadeRebaseStack",
@@ -94,6 +97,7 @@ export const cascadeRebaseStack = Effect.fn("cascadeRebaseStack")(function* (inp
       args,
       cwd: directory,
       env,
+      ...(trustedConfig === undefined ? {} : { trustedConfig }),
       timeoutMs: 120_000,
       ...(allowNonZeroExit ? { allowNonZeroExit: true } : {}),
     });

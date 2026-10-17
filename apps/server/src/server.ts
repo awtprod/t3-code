@@ -6,6 +6,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
+import * as StalledRunWatchdog from "./orchestration-v2/StalledRunWatchdog.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
@@ -955,6 +956,13 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       yield* service.start();
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
+  // Stops runs wedged behind a live but silent provider session (10 min / 60 s sweep).
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const service = yield* StalledRunWatchdog.StalledRunWatchdog;
+      yield* service.start();
+    }),
+  ).pipe(Layer.provide(StalledRunWatchdog.layer), Layer.provide(ProjectionStoreV2.layer)),
   // Subscribes to `account.rate-limits.updated` so usage bars track live
   // telemetry instead of waiting for the next status probe.
   ProviderUsageLimitsIngestion.layer,

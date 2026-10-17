@@ -12,6 +12,7 @@
  *
  * @module source-control-core/server/SourceControlHost
  */
+import type * as Redacted from "effect/Redacted";
 import type {
   GitCommandError,
   ServerSettings,
@@ -35,6 +36,16 @@ export interface SourceControlProcessInput {
   readonly stdin?: string;
   readonly onStdoutChunk?: (chunk: Uint8Array) => void;
   readonly env?: NodeJS.ProcessEnv;
+  /**
+   * Authorization header for the exact https remote a `git` command uses. The
+   * host validates it; any other Git config is refused, and `GIT_CONFIG_*`
+   * in `env` is dropped.
+   */
+  readonly trustedConfig?: {
+    readonly remoteUrl: string;
+    readonly key: string;
+    readonly value: Redacted.Redacted<string>;
+  };
   readonly allowNonZeroExit?: boolean;
   readonly timeoutMs?: number;
   readonly maxOutputBytes?: number;

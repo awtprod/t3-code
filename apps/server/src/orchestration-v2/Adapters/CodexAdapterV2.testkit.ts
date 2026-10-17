@@ -1,4 +1,5 @@
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import { rebrandRecordedCodexClientInfo } from "../testkit/ReplayRuntimeInstructions.ts";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { type ProviderReplayTranscript } from "@t3tools/contracts";
@@ -190,7 +191,7 @@ export function layer(input: {
 }) {
   const layerReplay =
     input.driver === undefined
-      ? CodexReplay.layerReplay(input.transcript)
+      ? CodexReplay.layerReplay(rebrandRecordedCodexClientInfo(input.transcript))
       : CodexReplay.layerReplayWithDriver(input.driver);
   const layerReplayClientFactory = Layer.succeed(CodexAdapterV2.CodexAppServerClientFactory, {
     open: (openInput) =>
@@ -247,6 +248,7 @@ export const CodexOrchestratorReplayHarness: OrchestratorV2ProviderReplayHarness
   driver: CodexAdapterV2.CODEX_DRIVER_KIND,
   decodeTranscript: (transcript) =>
     decodeCodexAppServerReplayTranscript(transcript).pipe(
+      Effect.map(rebrandRecordedCodexClientInfo),
       Effect.mapError(
         (cause) =>
           new CodexReplayTranscriptDecodeError({
@@ -266,7 +268,7 @@ export const CodexOrchestratorReplayHarness: OrchestratorV2ProviderReplayHarness
           yield* Effect.addFinalizer(() => Effect.sync(() => replayGate.releaseAll()));
         }
         const driver = yield* CodexReplay.makeReplayDriver(
-          transcript,
+          rebrandRecordedCodexClientInfo(transcript),
           replayGate === undefined
             ? {}
             : {

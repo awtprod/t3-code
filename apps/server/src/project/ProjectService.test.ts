@@ -56,10 +56,11 @@ const layerTestFor = (
     | ProjectFaviconResolver.ProjectFaviconResolver
     | RepositoryIdentityResolver.RepositoryIdentityResolver
   >,
+  workspacePathsLayer: Layer.Layer<WorkspacePaths.WorkspacePaths> = layerWorkspacePaths,
 ) =>
   RuntimeLayer.layerProjectService.pipe(
     Layer.provideMerge(ProjectEnrichmentService.layer),
-    Layer.provideMerge(layerWorkspacePaths),
+    Layer.provideMerge(workspacePathsLayer),
     Layer.provideMerge(projectMetadataLayer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(ServerSettings.layerTest()),
@@ -805,3 +806,64 @@ it.effect("rejects an update that waited on the lock while its project was delet
     );
   }).pipe(Effect.provide(layerProjectServiceDependencies)),
 );
+
+it.effect("verifies a workspace root is usable when a project commits to it", () => {
+  const verified: Array<string> = [];
+  const looked: Array<string> = [];
+  const layerVerifyingWorkspacePaths = Layer.succeed(WorkspacePaths.WorkspacePaths, {
+    normalizeWorkspaceRoot: (workspaceRoot, options) => {
+      const normalized = workspaceRoot.replace(/\/$/, "");
+      (options?.verifyUsable === true ? verified : looked).push(normalized);
+      return options?.verifyUsable === true && normalized === "/work/unreadable"
+        ? Effect.fail(
+            new WorkspacePaths.WorkspaceRootUnusableError({
+              workspaceRoot,
+              normalizedWorkspaceRoot: normalized,
+              reason: "not-readable",
+              detail: "The directory cannot be read by this process (PermissionDenied).",
+              serverUid: 1000,
+              ownerUid: 0,
+            }),
+          )
+        : Effect.succeed(normalized);
+    },
+    resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>
+      Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
+  });
+  return Effect.gen(function* () {
+    const service = yield* ProjectService.ProjectService;
+    const rejected = yield* service
+      .create({
+        commandId: CommandId.make("command:project:unreadable"),
+        projectId: ProjectId.make("project:unreadable"),
+        title: "Unreadable",
+        workspaceRoot: "/work/unreadable",
+      })
+      .pipe(Effect.flip);
+    assert.equal(rejected._tag, "ProjectOperationError");
+    assert.isTrue(Option.isNone(yield* service.getById(ProjectId.make("project:unreadable"))));
+
+    yield* service.create({
+      commandId: CommandId.make("command:project:usable"),
+      projectId: ProjectId.make("project:usable"),
+      title: "Usable",
+      workspaceRoot: "/work/usable",
+    });
+    const moved = yield* service
+      .update({
+        commandId: CommandId.make("command:project:move-unreadable"),
+        projectId: ProjectId.make("project:usable"),
+        workspaceRoot: "/work/unreadable",
+      })
+      .pipe(Effect.flip);
+    assert.equal(moved._tag, "ProjectOperationError");
+    assert.equal(
+      Option.getOrThrow(yield* service.getById(ProjectId.make("project:usable"))).workspaceRoot,
+      "/work/usable",
+    );
+    // Create and update verify; a plain lookup stays a bare normalisation.
+    assert.deepEqual(verified, ["/work/unreadable", "/work/usable", "/work/unreadable"]);
+    yield* service.getByWorkspaceRoot("/work/usable");
+    assert.include(looked, "/work/usable");
+  }).pipe(Effect.provide(layerTestFor(layerMetadata, layerVerifyingWorkspacePaths)));
+});

@@ -82,11 +82,7 @@ const setup = Effect.gen(function* () {
 });
 
 it.layer(layer)("cascadeRebaseStack", (it) => {
-  // V2PORT: S1. Hardened host git (VcsProcess env allowlist) drops the GIT_CONFIG_*
-  // entries this feature passes (auth header, committer identity), so the rebase
-  // fails without an identity and reports a conflict. `fails` keeps the assertion
-  // live: the test turns red as soon as S1 lets trusted callers supply them.
-  it.effect.fails("moves each layer's own commits onto the rebased layer below it", () =>
+  it.effect("moves each layer's own commits onto the rebased layer below it", () =>
     Effect.gen(function* () {
       const repo = yield* setup;
       const completed = yield* cascadeRebaseStack({
@@ -110,8 +106,7 @@ it.layer(layer)("cascadeRebaseStack", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  // V2PORT: S1 (same cause as above).
-  it.effect.fails("refuses to overwrite a layer pushed after it was reviewed", () =>
+  it.effect("refuses to overwrite a layer pushed after it was reviewed", () =>
     Effect.gen(function* () {
       const repo = yield* setup;
       const stale = [

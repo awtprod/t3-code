@@ -200,10 +200,13 @@ export const make = Effect.gen(function* () {
     readonly projectId?: ProjectId;
     readonly workspaceRoot: string;
     readonly createIfMissing?: boolean;
+    /** Create and update commit to a root, so they also prove it is usable. */
+    readonly verifyUsable?: boolean;
   }) =>
     workspacePaths
       .normalizeWorkspaceRoot(input.workspaceRoot, {
         createIfMissing: input.createIfMissing ?? false,
+        verifyUsable: input.verifyUsable ?? false,
       })
       .pipe(
         Effect.mapError(
@@ -342,6 +345,7 @@ export const make = Effect.gen(function* () {
         projectId: input.projectId,
         workspaceRoot: input.workspaceRoot,
         createIfMissing: input.createWorkspaceRootIfMissing ?? false,
+        verifyUsable: true,
       });
       yield* commit({
         type: "project.create",
@@ -369,6 +373,7 @@ export const make = Effect.gen(function* () {
           : yield* normalizeWorkspaceRoot({
               projectId: input.projectId,
               workspaceRoot: input.workspaceRoot,
+              verifyUsable: true,
             });
       yield* commit({
         type: "project.meta.update",

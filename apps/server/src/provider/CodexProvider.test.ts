@@ -1,6 +1,27 @@
 import { assert, it } from "@effect/vitest";
 
-import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
+import {
+  applyPreferredCodexDefaultModel,
+  buildCodexInitializeParams,
+  codexAppServerEnvironment,
+  mapCodexModelCapabilities,
+} from "./CodexProvider.ts";
+
+it("identifies Codex app-server sessions as Command Center", () => {
+  const { clientInfo } = buildCodexInitializeParams();
+  assert.strictEqual(clientInfo.name, "Command Center");
+  assert.strictEqual(clientInfo.title, "Command Center");
+  assert.strictEqual(
+    codexAppServerEnvironment({}).CODEX_INTERNAL_ORIGINATOR_OVERRIDE,
+    "Command Center",
+  );
+  // A value the user set explicitly still wins.
+  assert.strictEqual(
+    codexAppServerEnvironment({ CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "acme" })
+      .CODEX_INTERNAL_ORIGINATOR_OVERRIDE,
+    "acme",
+  );
+});
 
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities({

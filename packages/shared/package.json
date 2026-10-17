@@ -491,6 +491,10 @@
       "types": "./src/atomicWrite.ts",
       "import": "./src/atomicWrite.ts"
     },
+    "./commandCenterGitIdentity": {
+      "types": "./src/commandCenterGitIdentity.ts",
+      "import": "./src/commandCenterGitIdentity.ts"
+    },
     "./mcpResponsePayloads": {
       "types": "./src/mcpResponsePayloads.ts",
       "import": "./src/mcpResponsePayloads.ts"

@@ -137,45 +137,56 @@ export class GitWorkflowService extends Context.Service<
   }
 >()("@awtprod/command-center/git/GitWorkflowService") {}
 
+/**
+ * The ref a new worktree starts from. With "start from origin", an existing
+ * origin is fetched and its copy of the base branch used when it has one. A
+ * failed fetch (offline, auth) falls back to the local base branch with a
+ * warning instead of failing the launch; a repo without origin, or whose
+ * origin lacks the branch, uses the local base silently. Other git failures
+ * still fail.
+ */
 export const resolveWorktreeBaseRef = Effect.fn("GitWorkflowService.resolveWorktreeBaseRef")(
   function* (
     git: Pick<
       GitWorkflowService["Service"],
-      "remoteExists" | "fetchRemote" | "resolveRemoteTrackingCommit"
+      "remoteExists" | "fetchRemote" | "remoteBranchExists" | "resolveRemoteTrackingCommit"
     >,
     input: {
       readonly projectCwd: string;
-      readonly baseBranch: string;
-      readonly startFromOrigin?: boolean | undefined;
+      readonly baseRef: string;
+      readonly startFromOrigin: boolean;
     },
-  ) {
-    if (!input.startFromOrigin) return input.baseBranch;
-
-    return yield* Effect.gen(function* () {
-      const hasOrigin = yield* git.remoteExists({
-        cwd: input.projectCwd,
-        remoteName: "origin",
-      });
-      if (!hasOrigin) return input.baseBranch;
-      yield* git.fetchRemote({ cwd: input.projectCwd, remoteName: "origin" });
-      const remoteBase = yield* git.resolveRemoteTrackingCommit({
-        cwd: input.projectCwd,
-        refName: input.baseBranch,
-        fallbackRemoteName: "origin",
-      });
-      return remoteBase.commitSha;
-    }).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning(
-          "failed to refresh origin while preparing worktree; using local base branch",
-          {
-            cwd: input.projectCwd,
-            baseBranch: input.baseBranch,
-            detail: error.message,
-          },
-        ).pipe(Effect.as(input.baseBranch)),
-      ),
-    );
+  ): Effect.fn.Return<
+    { readonly ref: string; readonly fetch: "skipped" | "done" | "warning" },
+    GitCommandError
+  > {
+    if (!input.startFromOrigin) return { ref: input.baseRef, fetch: "skipped" };
+    const hasOrigin = yield* git.remoteExists({ cwd: input.projectCwd, remoteName: "origin" });
+    if (!hasOrigin) return { ref: input.baseRef, fetch: "skipped" };
+    const fetched = yield* git
+      .fetchRemote({ cwd: input.projectCwd, remoteName: "origin", refName: input.baseRef })
+      .pipe(
+        Effect.as(true),
+        Effect.catch((error) =>
+          Effect.logWarning(
+            "Could not fetch origin while preparing a worktree; using the local base branch.",
+            { cwd: input.projectCwd, baseRef: input.baseRef, detail: error.message },
+          ).pipe(Effect.as(false)),
+        ),
+      );
+    if (!fetched) return { ref: input.baseRef, fetch: "warning" };
+    const remoteBaseExists = yield* git.remoteBranchExists({
+      cwd: input.projectCwd,
+      refName: input.baseRef,
+      remoteName: "origin",
+    });
+    if (!remoteBaseExists) return { ref: input.baseRef, fetch: "done" };
+    const resolved = yield* git.resolveRemoteTrackingCommit({
+      cwd: input.projectCwd,
+      refName: input.baseRef,
+      fallbackRemoteName: "origin",
+    });
+    return { ref: resolved.commitSha, fetch: "done" };
   },
 );
 
