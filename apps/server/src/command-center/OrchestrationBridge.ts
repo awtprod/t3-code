@@ -255,8 +255,9 @@ const dispatchError =
  * The Command Center admission gate for one `cc:` thread command. Non-`cc:`
  * threads (ordinary threads, Space agent threads) pass. A `cc:` thread is
  * refused on any provider the fork's isolation rule refuses (non-Codex,
- * full-access, unknown instance) and, until S1 wires isolation into the V2
- * Codex adapter, on Codex as well.
+ * full-access, unknown instance). This is the early, pre-launch refusal; the
+ * provider adapter registry's gate and the isolated Codex launch stay
+ * authoritative underneath it.
  */
 export const admitCommandCenterThread = (input: {
   readonly threadId: string;
@@ -286,13 +287,11 @@ export const admitCommandCenterThread = (input: {
     runtimeMode: input.runtimeMode,
   });
   if (issue !== undefined) return refuse(issue);
-  // V2PORT: S1 13-17. The Codex isolation layer (isolated CODEX_HOME, locked
-  // app-server args, env scrubbing, permission profile, live isolation probe)
-  // is not wired into the V2 Codex adapter yet. This is the single seam S1
-  // replaces with the isolated launch; until then every `cc:` thread is refused.
-  return refuse(
-    "Command Center runs are paused: Codex isolation is not wired on orchestration v2 yet.",
-  );
+  // Codex outside full-access is admitted here. The isolated launch (private
+  // CODEX_HOME, locked app-server args, scrubbed env, permission profile, live
+  // probe) and the registry's admission gate refuse the session again, fail
+  // closed, if isolation cannot be established.
+  return Effect.void;
 };
 
 /** Inline images go through the same persistence as the WS attachment RPC. */

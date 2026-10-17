@@ -36,7 +36,9 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { CodexCommandCenterIsolationProbeError } from "../orchestration-v2/Adapters/CodexCommandCenterIsolation.ts";
+import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as OrchestrationBridge from "./OrchestrationBridge.ts";
 
 const projectId = ProjectId.make("project:bridge-test");
@@ -82,10 +84,16 @@ const ONE_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 const ONE_PIXEL_PNG_BYTES = Buffer.from(ONE_PIXEL_PNG, "base64").byteLength;
 
-function makeHarness() {
+function makeHarness(
+  options: {
+    readonly codexOpenSession?: ProviderAdapter.ProviderAdapterV2["Service"]["openSession"];
+  } = {},
+) {
   const layerDatabase = SqlitePersistence.layerMemory;
   const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
-    adapter("codex", "codex"),
+    options.codexOpenSession === undefined
+      ? adapter("codex", "codex")
+      : { ...adapter("codex", "codex"), openSession: options.codexOpenSession },
     adapter("claudeAgent", "claudeAgent"),
   ]);
   const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
@@ -198,6 +206,7 @@ function makeHarness() {
     layer: Layer.mergeAll(
       layerBridge,
       layerThreadManagement,
+      layerOrchestrator,
       layerServerConfig,
       layerDatabase,
       NodeServices.layer,
@@ -429,12 +438,6 @@ it.effect(
 
 it.effect.each([
   {
-    name: "Codex until the v2 isolation layer exists",
-    modelSelection: codexSelection,
-    runtimeMode: "auto-accept-edits" as const,
-    reason: "Codex isolation is not wired on orchestration v2",
-  },
-  {
     name: "a provider without a host-filesystem isolation profile",
     modelSelection: claudeSelection,
     runtimeMode: "auto-accept-edits" as const,
@@ -482,6 +485,64 @@ it.effect.each([
     }).pipe(Effect.provide(harness.layer));
   },
 );
+
+it.effect("admits a cc: thread on Codex outside full-access", () =>
+  OrchestrationBridge.admitCommandCenterThread({
+    threadId: "cc:automation:run-example",
+    modelSelection: codexSelection,
+    runtimeMode: "auto-accept-edits",
+    providers: [{ instanceId: "codex", driver: "codex" }],
+  }),
+);
+
+it.effect("fails the run closed when the isolated Codex launch cannot prove isolation", () => {
+  const probeIssue =
+    "Command Center blocked the Codex session because its live filesystem, process, or environment isolation probe failed.";
+  const opened: Array<string> = [];
+  const harness = makeHarness({
+    // What the real CodexAdapterV2 returns when its live isolation probe fails.
+    codexOpenSession: (input) =>
+      Effect.sync(() => {
+        opened.push(String(input.threadId));
+      }).pipe(
+        Effect.andThen(
+          Effect.fail(
+            new ProviderAdapter.ProviderAdapterOpenSessionError({
+              driver: ProviderDriverKind.make("codex"),
+              providerSessionId: input.providerSessionId,
+              cause: new CodexCommandCenterIsolationProbeError({ issue: probeIssue, exitCode: 70 }),
+            }),
+          ),
+        ),
+      ),
+  });
+  return Effect.gen(function* () {
+    const bridge = yield* OrchestrationBridge.OrchestrationBridge;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+    const threadId = ThreadId.make("cc:interactive:run-isolation");
+    // The bridge admits it: Codex, not full-access.
+    yield* bridge.dispatchCommand(
+      firstTurn({
+        threadId,
+        command: "cc:run:isolation:turn",
+        text: "Do the task",
+        modelSelection: codexSelection,
+        runtimeMode: "auto-accept-edits",
+      }),
+    );
+    // Preparation releases the run on its own fiber; drain until the open was tried.
+    for (let attempt = 0; attempt < 200 && opened.length === 0; attempt += 1) {
+      yield* worker.drain();
+      yield* Effect.yieldNow;
+    }
+    // The session open is attempted and refused; nothing ever runs a turn.
+    assert.deepEqual(opened.slice(0, 1), [String(threadId)]);
+    const projection = yield* threads.getThreadProjection(threadId);
+    assert.notEqual(projection.runs.at(-1)?.status, "running");
+    assert.lengthOf(projection.providerTurns, 0);
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect("admits threads outside Command Center Runs without consulting providers", () =>
   OrchestrationBridge.admitCommandCenterThread({
