@@ -118,6 +118,8 @@ import Migration0099 from "./Migrations/099_McpAppModelContext.ts";
 import Migration0100 from "./Migrations/100_ThreadSnapshotWindowIndexes.ts";
 import Migration0101 from "./Migrations/101_PullRequestReviewGuides.ts";
 import Migration0102 from "./Migrations/102_ThreadFailureLookupIndex.ts";
+// Fork-owned migrations after the renumbered upstream block (never renumber).
+import Migration0103 from "./Migrations/103_EfficiencyRoutingSideChannel.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -234,6 +236,7 @@ export const migrationEntries = [
   [100, "ThreadSnapshotWindowIndexes", Migration0100],
   [101, "PullRequestReviewGuides", Migration0101],
   [102, "ThreadFailureLookupIndex", Migration0102],
+  [103, "EfficiencyRoutingSideChannel", Migration0103],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
