@@ -601,6 +601,8 @@ const bootstrapWithUndefinedFields = {
   approvals: [],
 };
 
+const isJson = Schema.is(Schema.Json);
+
 const callListTool = (name: "cc_items_list" | "cc_runs_list") =>
   Effect.gen(function* () {
     const toolkit = yield* CommandCenterToolkit;
@@ -654,7 +656,7 @@ describe("Command Center MCP list results", () => {
         const outputs = yield* callListTool(name);
         expect(outputs.map((output) => output.isFailure)).toEqual([false]);
         const structuredContent = outputs[0]!.encodedResult;
-        expect(Schema.is(Schema.Json)(structuredContent)).toBe(true);
+        expect(isJson(structuredContent)).toBe(true);
         // effect's MCP server builds exactly this; it throws on non-JSON content.
         const result = new McpSchema.CallToolResult({
           content: [{ type: "text", text: JSON.stringify(structuredContent) }],
