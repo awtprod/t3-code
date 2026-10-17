@@ -25,8 +25,10 @@ import {
   type CodexRateLimitSnapshot,
 } from "../../provider/codexUsageLimits.ts";
 import {
+  CODEX_WORKER_FALLBACK_MODEL,
   CodexSettings,
   defaultInstanceIdForDriver,
+  isCodexManagerModelSlug,
   isOrchestrationV2WorkActive,
   OrchestrationV2ProviderGoal,
   ProviderDriverKind,
@@ -1371,6 +1373,11 @@ export function codexThreadRuntimeParams(input: {
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      // Manager/worker guardrail: Codex subagents inherit the parent model, so an
+      // Astra-rooted thread would fan out Astra workers; point them at the worker model.
+      ...(isCodexManagerModelSlug(input.modelSelection?.model)
+        ? { "agents.default_subagent_model": CODEX_WORKER_FALLBACK_MODEL }
+        : {}),
       ...(mcpSession === undefined
         ? {}
         : {

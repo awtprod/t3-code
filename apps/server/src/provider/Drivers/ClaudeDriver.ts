@@ -33,6 +33,7 @@ import {
   createClaudeAdapterV2,
   type ClaudeAdapterV2DriverEnv,
 } from "../../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
+import { ClaudeToolResultSieve } from "../../efficiency/ClaudeToolResultSieve.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { claudeUsageReader } from "./claudeUsage.ts";
 import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
@@ -178,6 +179,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       });
 
       const scopedLimitNames = yield* makeClaudeScopedLimitNames;
+      // Efficiency tool-result sieve (PostToolUse): no hook while sieve.mode is
+      // off. The server always provides it; harnesses without it get no sieve.
+      const toolResultSieve = yield* Effect.serviceOption(ClaudeToolResultSieve);
       const orchestrationAdapter = yield* createClaudeAdapterV2(
         {
           instanceId,
@@ -187,7 +191,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           enabled,
           config,
         },
-        { scopedLimitNames, onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
+        {
+          scopedLimitNames,
+          onUsageLimits: (update) => snapshot.applyUsageLimits(update),
+          ...(toolResultSieve._tag === "Some" ? { sdkHooks: toolResultSieve.value.sdkHooks } : {}),
+        },
       ).pipe(
         Effect.mapError(
           (cause) =>

@@ -1,4 +1,5 @@
-import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { AuthOrchestrationOperateScope, type EfficiencyThreadRouting } from "@t3tools/contracts";
+import * as Option from "effect/Option";
 import { readEnvironmentScope } from "./session";
 import type { ComposerTextPaste } from "../native/T3ComposerEditor.types";
 import { useAtomValue } from "@effect/atom-react";
@@ -114,6 +115,11 @@ import { enqueueThreadOutboxMessage } from "./thread-outbox";
 import { dispatchingQueuedMessageIdAtom, useThreadOutboxMessages } from "./use-thread-outbox";
 import { threadEnvironment } from "./threads";
 import { useAtomCommand } from "./use-atom-command";
+import { mobileEfficiency } from "./efficiency";
+
+const NO_THREAD_ROUTING = Atom.make(
+  AsyncResult.initial<EfficiencyThreadRouting, never>(false),
+).pipe(Atom.withLabel("mobile:efficiency:thread-routing:none"));
 
 const EMPTY_QUEUE_WORKFLOW_ATOM = Atom.make<null>(null).pipe(
   Atom.withLabel("mobile-thread-queue-workflow:empty"),
@@ -354,10 +360,29 @@ export function useThreadComposerState() {
         selectedDraft?.interactionMode ?? selectedThread.interactionMode,
       )
     : null;
-  // V2PORT: v2 thread shells carry no routingMode/efficiencyTier, so the
-  // routing choice lives only in the composer draft (see use-thread-outbox-drain).
-  const routingMode: ThreadRoutingMode = selectedDraft?.routingMode ?? "manual";
-  const efficiencyTier: EfficiencyTier = selectedDraft?.efficiencyTier ?? "economy";
+  // Efficiency routing lives in the server's side channel, not on the V2 thread
+  // shell: a draft choice wins, else the thread's stored routing. Nothing is
+  // read while routing is off. The outbox drain saves the queued choice.
+  const efficiencySettings = selectedEnvironmentRuntime?.serverConfig?.settings?.efficiency;
+  const storedThreadRoutingResult = useAtomValue(
+    efficiencySettings?.enabled === true && selectedThreadShell
+      ? mobileEfficiency.threadRouting({
+          environmentId: selectedThreadShell.environmentId,
+          input: { threadId: selectedThreadShell.id },
+        })
+      : NO_THREAD_ROUTING,
+  );
+  const storedThreadRouting = Option.getOrNull(AsyncResult.value(storedThreadRoutingResult));
+  const routingMode: ThreadRoutingMode =
+    efficiencySettings?.enabled === true
+      ? (selectedDraft?.routingMode ??
+        (storedThreadRouting?.stored === true ? storedThreadRouting.routingMode : "manual"))
+      : "manual";
+  const efficiencyTier: EfficiencyTier =
+    selectedDraft?.efficiencyTier ??
+    storedThreadRouting?.efficiencyTier ??
+    efficiencySettings?.defaultTier ??
+    "economy";
   // Whether the model picker may leave this thread's provider. Derived here
   // because the projection already drives this hook; the composer only needs
   // the answer, not a subscription to every projection update.
@@ -734,8 +759,9 @@ export function useThreadComposerState() {
           provider,
           draft.interactionMode ?? thread.interactionMode,
         ),
-        routingMode: draft.routingMode ?? "manual",
-        ...(draft.efficiencyTier === undefined ? {} : { efficiencyTier: draft.efficiencyTier }),
+        // The routing the composer shows (draft choice, else the stored one).
+        routingMode,
+        efficiencyTier,
         ...(followUpDispatchMode === null ? {} : { dispatchMode: followUpDispatchMode }),
         createdAt: metadata.createdAt,
       });
@@ -764,7 +790,9 @@ export function useThreadComposerState() {
     [
       activeThreadBusy,
       canSteerActiveTurn,
+      efficiencyTier,
       followUpBehavior,
+      routingMode,
       saveQueuedRunEdit,
       selectedEnvironmentRuntime?.connectionState,
       selectedEnvironmentRuntime?.serverConfig,

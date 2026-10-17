@@ -10,9 +10,10 @@
  * are gone; the table stays on disk unread.
  *
  * Not available from v2 turn usage (reported as null or a fixed bucket): tool
- * use counts, provider-reported cost, per-subagent components, and the
- * efficiency tier / rule / source / fallback / experiment columns (efficiency
- * routing is not re-hooked into v2 yet).
+ * use counts, provider-reported cost and per-subagent components. The
+ * efficiency tier / rule / source / fallback / experiment columns come from
+ * the fork's per-run routing decision (`efficiency_run_decisions`, migration
+ * 103) and stay null for unrouted runs.
  */
 import {
   NonNegativeInt,
@@ -31,6 +32,7 @@ import {
   type UsageTimeSeriesBucket,
   type UsageQueryTokenTotals,
   type UsageTurnRow,
+  EfficiencyDecision,
   EfficiencyTier,
 } from "@t3tools/contracts";
 import { RouteSelectionSource } from "@command-center/core";
@@ -290,10 +292,14 @@ const ProviderTurnUsageDbRow = Schema.Struct({
   turnTokenUsage: Schema.NullOr(Schema.String),
   startedAt: Schema.NullOr(Schema.String),
   completedAt: Schema.String,
+  efficiencyDecision: Schema.NullOr(Schema.String),
 });
 type ProviderTurnUsageDbRow = typeof ProviderTurnUsageDbRow.Type;
 
 const decodeTurnTokenUsage = Schema.decodeUnknownOption(Schema.fromJsonString(TurnTokenUsage));
+const decodeEfficiencyDecision = Schema.decodeUnknownOption(
+  Schema.fromJsonString(EfficiencyDecision),
+);
 
 function nonNegative(value: number): number {
   return Math.max(0, value);
@@ -351,10 +357,12 @@ const make = Effect.gen(function* () {
         json_extract(r.payload_json, '$.modelSelection.model') AS "model",
         json_extract(pt.payload_json, '$.turnTokenUsage') AS "turnTokenUsage",
         pt.started_at AS "startedAt",
-        pt.completed_at AS "completedAt"
+        pt.completed_at AS "completedAt",
+        ed.decision_json AS "efficiencyDecision"
       FROM orchestration_v2_projection_provider_turns pt
       JOIN orchestration_v2_projection_run_attempts a ON a.attempt_id = pt.run_attempt_id
       JOIN orchestration_v2_projection_runs r ON r.run_id = a.run_id
+      LEFT JOIN efficiency_run_decisions ed ON ed.run_id = r.run_id
       LEFT JOIN orchestration_v2_projection_threads th ON th.thread_id = pt.thread_id
       LEFT JOIN orchestration_v2_projection_provider_threads ptr
         ON ptr.provider_thread_id = pt.provider_thread_id
@@ -374,9 +382,6 @@ const make = Effect.gen(function* () {
   const usageRows = Effect.fn("ProjectionTurnUsageRepository.usageRows")(function* (
     input: Parameters<ProjectionTurnUsageRepositoryShape["query"]>[0],
   ) {
-    // Efficiency routing is not re-hooked into v2 yet, so no turn carries a
-    // tier: a tier filter matches nothing rather than everything.
-    if (input.tier !== undefined) return [] as ReadonlyArray<UsageDbRow>;
     const turns = yield* selectProviderTurns({
       from: input.from,
       to: input.to,
@@ -394,6 +399,12 @@ const make = Effect.gen(function* () {
       const quality = usage.value.usageStatus === "complete" ? "reported" : "partial";
       if (input.workload !== undefined && input.workload !== workload) return [];
       if (input.quality !== undefined && input.quality !== quality) return [];
+      // An unrouted run has no decision, so a tier filter never matches it.
+      const decision =
+        turn.efficiencyDecision === null
+          ? undefined
+          : Option.getOrUndefined(decodeEfficiencyDecision(turn.efficiencyDecision));
+      if (input.tier !== undefined && decision?.tier !== input.tier) return [];
       const tokens =
         usage.value.usageStatus === "unavailable"
           ? {
@@ -425,11 +436,11 @@ const make = Effect.gen(function* () {
           cacheSavingsMicroUsd: priced.cacheSavingsMicroUsd,
           rateProvenance: priced.rateProvenance,
           completedAt: turn.completedAt,
-          tier: null,
-          efficiencySource: null,
-          efficiencyRuleId: null,
-          fallbackReason: null,
-          experimentArm: null,
+          tier: decision?.tier ?? null,
+          efficiencySource: decision?.source ?? null,
+          efficiencyRuleId: decision?.matchedRuleId ?? null,
+          fallbackReason: decision?.fallbackReason ?? null,
+          experimentArm: decision?.experimentArm ?? null,
         },
       ];
     });

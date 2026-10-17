@@ -32,9 +32,9 @@ type RoutingMode = "manual" | "auto";
 /**
  * The turn-start fields efficiency routing reads and rewrites. Routing used to
  * run on the V1 `thread.turn.start` command, whose schema was deleted with the
- * V1 engine. S4 re-hooks routing into V2 turn start (ProviderTurnStartService)
- * behind the existing off switch; until then only the settings preview RPC
- * calls this, with a synthetic command.
+ * V1 engine. On V2 the client-turn router (`ClientTurnRouting.ts`) and the
+ * settings preview RPC build this shape from a V2 `message.dispatch` or launch
+ * plus the thread's side-channel routing state.
  */
 export interface TurnStartCommand {
   readonly type: "thread.turn.start";
@@ -492,4 +492,43 @@ export function resolveInteractiveEfficiency(
   };
 
   return withDecision(input.command, decision);
+}
+
+/**
+ * Whether a routed selection is one the thread's bound provider should not
+ * serve in place: a different provider driver, or a model change on a
+ * provider that needs a new thread for one. Such a turn runs in a routed child
+ * thread instead (see `ClientTurnRouting.ts`). A thread not yet bound to a
+ * provider thread switches in place, and unknown instances return false and
+ * keep the dispatch path's own error.
+ *
+ * V2 itself can hand a thread across drivers (`create_with_handoff`); the
+ * child keeps the parent bound to the provider the user chose for it.
+ */
+export function routedSelectionNeedsSubagent(input: {
+  readonly thread: {
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly modelSelection: ModelSelection;
+    /** The thread already has a provider thread (V1: a bound session). */
+    readonly bound: boolean;
+  };
+  readonly selection: ModelSelection;
+  readonly providers: ReadonlyArray<ServerProvider>;
+}): boolean {
+  if (!input.thread.bound) return false;
+  const boundInstanceId = input.thread.providerInstanceId;
+  const bound = input.providers.find((provider) => provider.instanceId === boundInstanceId);
+  const routed = input.providers.find(
+    (provider) => provider.instanceId === input.selection.instanceId,
+  );
+  if (bound === undefined || routed === undefined) return false;
+  if (bound.driver !== routed.driver) return true;
+  const modelChanges =
+    boundInstanceId !== input.selection.instanceId ||
+    input.thread.modelSelection.model !== input.selection.model;
+  return (
+    modelChanges &&
+    (bound.requiresNewThreadForModelChange === true ||
+      routed.requiresNewThreadForModelChange === true)
+  );
 }

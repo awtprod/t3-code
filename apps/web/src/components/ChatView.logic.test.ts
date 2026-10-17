@@ -78,7 +78,10 @@ import {
   reconcileMountedTerminalThreadIds,
   resolveDraftPromotionNavigationTarget,
   resolveEffectiveInteractionMode,
+  resolveComposerEfficiencyRouting,
   resolveThreadMetadataUpdateForNextTurn,
+  shouldPersistEfficiencyRoutingBeforeSend,
+  shouldSwitchToManualRoutingOnModelPick,
   resolveSendEnvMode,
   startNewThreadForProject,
   shouldShowBranchMismatchBanner,
@@ -264,6 +267,149 @@ describe("resolveThreadMetadataUpdateForNextTurn", () => {
         nextBranch: "feature/current",
       }),
     ).toBeNull();
+  });
+});
+
+describe("shouldSwitchToManualRoutingOnModelPick (PR #150)", () => {
+  const opus = { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-opus-5-5" };
+  const fable = { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-fable" };
+
+  it("switches an auto thread to manual when the user picks a different model", () => {
+    expect(
+      shouldSwitchToManualRoutingOnModelPick({
+        routingMode: "auto",
+        currentModelSelection: opus,
+        nextModelSelection: fable,
+      }),
+    ).toBe(true);
+  });
+
+  it("switches when the same model name moves to another provider instance", () => {
+    expect(
+      shouldSwitchToManualRoutingOnModelPick({
+        routingMode: "auto",
+        currentModelSelection: opus,
+        nextModelSelection: { ...opus, instanceId: ProviderInstanceId.make("claudeWork") },
+      }),
+    ).toBe(true);
+  });
+
+  it("switches when there is no current selection to compare against", () => {
+    expect(
+      shouldSwitchToManualRoutingOnModelPick({
+        routingMode: "auto",
+        currentModelSelection: undefined,
+        nextModelSelection: fable,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps auto routing when the pick re-selects the current model", () => {
+    expect(
+      shouldSwitchToManualRoutingOnModelPick({
+        routingMode: "auto",
+        currentModelSelection: opus,
+        nextModelSelection: { ...opus },
+      }),
+    ).toBe(false);
+  });
+
+  it("never changes a thread that is already manual", () => {
+    expect(
+      shouldSwitchToManualRoutingOnModelPick({
+        routingMode: "manual",
+        currentModelSelection: opus,
+        nextModelSelection: fable,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("composer efficiency routing", () => {
+  const stored = (routingMode: "manual" | "auto", efficiencyTier: "quality" | null) => ({
+    routingMode,
+    efficiencyTier,
+    stored: true,
+  });
+
+  it("is manual at the default tier while efficiency routing is off", () => {
+    expect(
+      resolveComposerEfficiencyRouting({
+        efficiencyEnabled: false,
+        defaultTier: "economy",
+        isLocalDraftThread: true,
+        override: { mode: "auto", tier: "quality" },
+        stored: stored("auto", "quality"),
+      }),
+    ).toEqual({ mode: "manual", tier: "economy" });
+  });
+
+  it("starts new drafts in auto and leaves unrouted server threads manual", () => {
+    const base = {
+      efficiencyEnabled: true,
+      defaultTier: "economy" as const,
+      override: null,
+      stored: null,
+    };
+    expect(resolveComposerEfficiencyRouting({ ...base, isLocalDraftThread: true }).mode).toBe(
+      "auto",
+    );
+    expect(resolveComposerEfficiencyRouting({ ...base, isLocalDraftThread: false }).mode).toBe(
+      "manual",
+    );
+  });
+
+  it("shows the thread's stored routing, and a choice made here over it", () => {
+    const input = {
+      efficiencyEnabled: true,
+      defaultTier: "economy" as const,
+      isLocalDraftThread: false,
+      override: null,
+      stored: stored("auto", "quality"),
+    };
+    expect(resolveComposerEfficiencyRouting(input)).toEqual({ mode: "auto", tier: "quality" });
+    expect(
+      resolveComposerEfficiencyRouting({ ...input, override: { mode: "manual", tier: "quality" } }),
+    ).toEqual({ mode: "manual", tier: "quality" });
+  });
+
+  it("saves routing before a send only when efficiency is on and it differs", () => {
+    const auto = { mode: "auto" as const, tier: "quality" as const };
+    expect(
+      shouldPersistEfficiencyRoutingBeforeSend({
+        efficiencyEnabled: false,
+        composer: auto,
+        stored: null,
+      }),
+    ).toBe(false);
+    expect(
+      shouldPersistEfficiencyRoutingBeforeSend({
+        efficiencyEnabled: true,
+        composer: auto,
+        stored: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldPersistEfficiencyRoutingBeforeSend({
+        efficiencyEnabled: true,
+        composer: { mode: "manual", tier: "economy" },
+        stored: null,
+      }),
+    ).toBe(false);
+    expect(
+      shouldPersistEfficiencyRoutingBeforeSend({
+        efficiencyEnabled: true,
+        composer: auto,
+        stored: stored("auto", "quality"),
+      }),
+    ).toBe(false);
+    expect(
+      shouldPersistEfficiencyRoutingBeforeSend({
+        efficiencyEnabled: true,
+        composer: { mode: "manual", tier: "quality" },
+        stored: stored("auto", "quality"),
+      }),
+    ).toBe(true);
   });
 });
 
@@ -728,7 +874,7 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     ).toBe(true);
   });
 
-  it("acknowledges a message the server handed to a subagent thread", () => {
+  it("acknowledges a message efficiency routing ran in a routed child thread", () => {
     const localDispatch = createLocalDispatchSnapshot(
       makeThread({ latestRun: completedTurn, runtime: readySession }),
     );
@@ -736,7 +882,8 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
       localDispatch,
       phase: "ready" as const,
       latestRun: completedTurn,
-      latestUserMessageId: MessageId.make("message-delegated"),
+      // On V2 the parent never records the routed message.
+      latestUserMessageId: null,
       runtime: readySession,
       hasPendingApproval: false,
       hasPendingUserInput: false,
@@ -746,9 +893,7 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     // Neither the run nor the runtime moves on a delegated send; only the
     // delegation marks it received.
     expect(hasServerAcknowledgedLocalDispatch(input)).toBe(false);
-    expect(hasServerAcknowledgedLocalDispatch({ ...input, latestUserMessageDelegated: true })).toBe(
-      true,
-    );
+    expect(hasServerAcknowledgedLocalDispatch({ ...input, sentMessageDelegated: true })).toBe(true);
   });
 
   it("acknowledges pending user interaction and errors immediately", () => {

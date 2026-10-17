@@ -82,6 +82,7 @@ vi.mock("./threads", async () => {
 });
 vi.mock("./use-atom-command", () => ({ useAtomCommand: <A>(command: A) => command }));
 vi.mock("./git", () => ({ gitEnvironment: { preparePullRequestThread: state.checkout } }));
+vi.mock("./efficiency", () => ({ mobileEfficiency: { setThreadRouting: vi.fn() } }));
 vi.mock("../lib/modelOptions", () => ({ isModelSelectionUnavailable: () => false }));
 vi.mock("../lib/uuid", () => ({ uuidv4: () => "uuid", randomHex: () => "abcd" }));
 vi.mock("../lib/attachmentUpload", () => ({ prepareTurnAttachments: state.prepare }));
@@ -145,6 +146,7 @@ vi.mock("./use-composer-drafts", async () => {
 });
 
 import { appAtomRegistry } from "./atom-registry";
+import { mobileEfficiency } from "./efficiency";
 import { dispatchingQueuedMessageIdAtom } from "./use-thread-outbox";
 import { useThreadOutboxDrain } from "./use-thread-outbox-drain";
 
@@ -432,4 +434,44 @@ describe("queued task operation access", () => {
       expect(remaining()).toEqual([queued]);
     },
   );
+});
+
+describe("queued task efficiency routing", () => {
+  const setThreadRouting = vi.mocked(
+    mobileEfficiency.setThreadRouting as unknown as (input: unknown) => Promise<unknown>,
+  );
+  beforeEach(() => {
+    setThreadRouting.mockReset().mockResolvedValue(AsyncResult.success(undefined));
+  });
+
+  it("issues no routing RPC and an unchanged start-turn input while efficiency is off", async () => {
+    state.grantedEnvironments.add("secondary");
+    await state.manager.enqueue(message({ routingMode: "auto", efficiencyTier: "quality" }));
+    await runDrain();
+    expect(setThreadRouting).not.toHaveBeenCalled();
+    expect(state.start).toHaveBeenCalledOnce();
+    const input = state.start.mock.calls[0]?.[0].input;
+    expect(input).not.toHaveProperty("routingMode");
+    expect(input).not.toHaveProperty("efficiencyTier");
+    expect(input.threadId).toBe("thread");
+  });
+
+  it("saves the queued routing for the thread before its turn when efficiency is on", async () => {
+    state.grantedEnvironments.add("secondary");
+    const config = state.config as typeof state.config & { settings?: unknown };
+    config.settings = { efficiency: { enabled: true } };
+    try {
+      await state.manager.enqueue(message({ routingMode: "auto", efficiencyTier: "quality" }));
+      await runDrain();
+    } finally {
+      delete config.settings;
+    }
+    expect(setThreadRouting).toHaveBeenCalledWith({
+      environmentId: "secondary",
+      input: { threadId: "thread", routingMode: "auto", efficiencyTier: "quality" },
+    });
+    expect(setThreadRouting.mock.invocationCallOrder[0]).toBeLessThan(
+      state.start.mock.invocationCallOrder[0]!,
+    );
+  });
 });
