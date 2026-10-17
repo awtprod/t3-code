@@ -55,7 +55,9 @@ export function isNonRetryableProviderTurnControlFailure(
     return false;
   }
   return (
-    /is not active/i.test(errorText) ||
+    // "is not the active turn" is Claude's stale-target refusal (fork parity:
+    // a Stop whose turn was already replaced is settled, not a failure).
+    /is not (?:the )?active/i.test(errorText) ||
     /hard teardown is already in progress/i.test(errorText) ||
     /treating as already interrupted/i.test(errorText) ||
     /treating as already stopped/i.test(errorText)

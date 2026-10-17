@@ -175,6 +175,20 @@ it("does not retry pure interrupt races where the turn is already gone", () => {
       "Provider session provider-session:x is not active.",
     ),
   );
+  // Claude words its stale-target refusal differently. The fork treated a Stop
+  // whose turn had already been replaced as settled; retrying it only delays.
+  assert.isTrue(
+    EffectWorker.isNonRetryableProviderTurnControlFailure(
+      "provider-turn.interrupt",
+      "ProviderAdapterProtocolError: Claude provider turn provider-turn:x is not the active turn.",
+    ),
+  );
+  assert.isFalse(
+    EffectWorker.isNonRetryableProviderTurnControlFailure(
+      "provider-turn.restart",
+      "ProviderAdapterProtocolError: Claude provider turn provider-turn:x is not the active turn.",
+    ),
+  );
   // Restart is compound (interrupt + detach + start). Do not swallow start failures.
   assert.isFalse(
     EffectWorker.isNonRetryableProviderTurnControlFailure(
