@@ -83,6 +83,7 @@ vi.mock("./use-thread-detail", () => ({
   useSelectedThreadPendingRequests: () => state.pendingRequests,
 }));
 vi.mock("./use-atom-command", () => ({ useAtomCommand: <A>(command: A) => command }));
+vi.mock("./efficiency", () => ({ mobileEfficiency: { threadRouting: () => null } }));
 vi.mock("./threads", async () => {
   const { Atom } = await import("effect/reactivity");
   return {

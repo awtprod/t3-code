@@ -1,4 +1,5 @@
-import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { AuthOrchestrationOperateScope, type EfficiencyThreadRouting } from "@t3tools/contracts";
+import * as Option from "effect/Option";
 import { readEnvironmentScope } from "./session";
 import type { ComposerTextPaste } from "../native/T3ComposerEditor.types";
 import { useAtomValue } from "@effect/atom-react";
@@ -114,8 +115,11 @@ import { enqueueThreadOutboxMessage } from "./thread-outbox";
 import { dispatchingQueuedMessageIdAtom, useThreadOutboxMessages } from "./use-thread-outbox";
 import { threadEnvironment } from "./threads";
 import { useAtomCommand } from "./use-atom-command";
-import { useEnvironmentQuery } from "./query";
 import { mobileEfficiency } from "./efficiency";
+
+const NO_THREAD_ROUTING = Atom.make(
+  AsyncResult.initial<EfficiencyThreadRouting, never>(false),
+).pipe(Atom.withLabel("mobile:efficiency:thread-routing:none"));
 
 const EMPTY_QUEUE_WORKFLOW_ATOM = Atom.make<null>(null).pipe(
   Atom.withLabel("mobile-thread-queue-workflow:empty"),
@@ -360,14 +364,15 @@ export function useThreadComposerState() {
   // shell: a draft choice wins, else the thread's stored routing. Nothing is
   // read while routing is off. The outbox drain saves the queued choice.
   const efficiencySettings = selectedEnvironmentRuntime?.serverConfig?.settings?.efficiency;
-  const storedThreadRouting = useEnvironmentQuery(
+  const storedThreadRoutingResult = useAtomValue(
     efficiencySettings?.enabled === true && selectedThreadShell
       ? mobileEfficiency.threadRouting({
           environmentId: selectedThreadShell.environmentId,
           input: { threadId: selectedThreadShell.id },
         })
-      : null,
-  ).data;
+      : NO_THREAD_ROUTING,
+  );
+  const storedThreadRouting = Option.getOrNull(AsyncResult.value(storedThreadRoutingResult));
   const routingMode: ThreadRoutingMode =
     efficiencySettings?.enabled === true
       ? (selectedDraft?.routingMode ??
