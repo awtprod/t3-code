@@ -20,6 +20,9 @@ concurrency:
 jobs:
   mirror:
     name: Mirror Play APK
+    # Upstream-only: the Play listing and the Blacksmith pool belong to the
+    # upstream repository, so forks skip the hourly schedule instead of queueing.
+    if: github.repository == 'pingdotgg/t3code'
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
