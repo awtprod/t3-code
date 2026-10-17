@@ -681,6 +681,18 @@ describe("CodexAdapterV2 process spawning", () => {
     );
   });
 
+  it("points subagents of a manager-model (Astra) thread at the worker model", () => {
+    const params = (model: string) =>
+      CodexAdapterV2.codexThreadRuntimeParams({ mcpSession: undefined, modelSelection: { model } })
+        .config;
+    assert.strictEqual(params("gpt-6-astra")["agents.default_subagent_model"], "gpt-6-sol");
+    assert.notProperty(params("gpt-6-sol"), "agents.default_subagent_model");
+    assert.notProperty(
+      CodexAdapterV2.codexThreadRuntimeParams({ mcpSession: undefined }).config,
+      "agents.default_subagent_model",
+    );
+  });
+
   it.effect("resolves Windows command shims through the shared spawn policy", () =>
     Effect.gen(function* () {
       const command = yield* CodexAdapterV2.makeCodexAppServerSpawnCommand({
