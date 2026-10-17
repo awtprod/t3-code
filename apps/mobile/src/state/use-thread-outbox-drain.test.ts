@@ -89,6 +89,7 @@ vi.mock("./server", async () => {
 });
 
 vi.mock("./git", () => ({ gitEnvironment: {} }));
+vi.mock("./efficiency", () => ({ mobileEfficiency: { setThreadRouting: {} } }));
 
 vi.mock("./threads", () => ({
   threadEnvironment: {},
