@@ -167,6 +167,7 @@ import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAcco
 import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as ClaudeToolResultSieveLive from "./efficiency/ClaudeToolResultSieveLive.ts";
 import * as ClientTurnRouting from "./efficiency/ClientTurnRouting.ts";
 import * as Judge from "./efficiency/Judge.ts";
 import * as ThreadRouting from "./efficiency/ThreadRouting.ts";
@@ -1009,8 +1010,10 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;
   // hydration adds their default instances to `providerInstances` on boot.
   Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
-  // The efficiency judge: tier judgment for routing and the Claude driver's
-  // tool-result sieve. Disabled (`transport: "off"`) unless configured.
+  // The Claude driver's tool-result sieve hook (none while sieve.mode is off),
+  // then the efficiency judge it and tier judgment use. The judge is disabled
+  // (`transport: "off"`) unless configured.
+  Layer.provideMerge(ClaudeToolResultSieveLive.layer.pipe(Layer.provide(layerServerSettings))),
   Layer.provideMerge(Judge.layer.pipe(Layer.provide(layerServerSettings))),
   Layer.provideMerge(
     Layer.mergeAll(
