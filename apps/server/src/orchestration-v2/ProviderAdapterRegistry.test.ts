@@ -422,55 +422,103 @@ describe("Command Center admission gate", () => {
 
   // Isolation is decided at open from the opening thread, so the session must
   // stay that thread's: a cc: thread may not run in a session another thread
-  // opened (its launch is unisolated), and nothing may join a cc: session.
-  const sessionAdapter = (calls: Array<string>) =>
-    ({
+  // opened (its launch is unisolated), and nothing may join a cc: session. The
+  // Space agent thread (cc-space-agent-*) is an ordinary thread here.
+  const sessionAdapter = (calls: Array<string>) => {
+    const record = (operation: string, threadId: unknown) =>
+      Effect.sync(() => {
+        calls.push(`${operation}:${String(threadId)}`);
+        return {} as never;
+      });
+    return {
       ...makeAdapter(personalId),
       openSession: () =>
         Effect.succeed({
           ensureThread: (input: { readonly threadId: ThreadId }) =>
-            Effect.sync(() => {
-              calls.push(`ensure:${input.threadId}`);
-              return {} as never;
-            }),
+            record("ensure", input.threadId),
+          resumeThread: (input: { readonly threadId?: ThreadId }) =>
+            record("resume", input.threadId),
+          startTurn: (input: { readonly threadId: ThreadId }) => record("start", input.threadId),
+          forkThread: (input: { readonly targetThreadId: ThreadId }) =>
+            record("fork", input.targetThreadId),
         } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime),
-    }) as unknown as ProviderAdapter.ProviderAdapterV2["Service"];
-  const ensureIn = (runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime, threadId: string) =>
-    runtime.ensureThread({
-      threadId: ThreadId.make(threadId),
-      modelSelection: { instanceId: personalId, model: "gpt-test" },
-      runtimePolicy: {
-        runtimeMode: "approval-required",
-        interactionMode: "default",
-        cwd: "/workspace",
-      },
-    } as ProviderAdapter.ProviderAdapterV2EnsureThreadInput);
+    } as unknown as ProviderAdapter.ProviderAdapterV2["Service"];
+  };
+  const providerThread = (appThreadId: string) => ({
+    id: `provider-thread:${appThreadId}`,
+    providerSessionId: null,
+    appThreadId,
+  });
+  const operations = {
+    ensure: (runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime, threadId: string) =>
+      runtime.ensureThread({
+        threadId: ThreadId.make(threadId),
+      } as unknown as ProviderAdapter.ProviderAdapterV2EnsureThreadInput),
+    resume: (runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime, threadId: string) =>
+      runtime.resumeThread({
+        threadId: ThreadId.make(threadId),
+        providerThread: providerThread(threadId),
+      } as unknown as Parameters<
+        ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeThread"]
+      >[0]),
+    start: (runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime, threadId: string) =>
+      runtime.startTurn({
+        threadId: ThreadId.make(threadId),
+        runId: `run:${threadId}`,
+        providerThread: providerThread(threadId),
+      } as unknown as ProviderAdapter.ProviderAdapterV2TurnInput),
+    fork: (runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime, threadId: string) =>
+      runtime.forkThread({
+        targetThreadId: ThreadId.make(threadId),
+        sourceProviderThread: providerThread("source"),
+      } as unknown as ProviderAdapter.ProviderAdapterV2ForkThreadInput),
+  } as const;
+  const expectedTag = {
+    ensure: "ProviderAdapterEnsureThreadError",
+    resume: "ProviderAdapterResumeThreadError",
+    start: "ProviderAdapterTurnStartError",
+    fork: "ProviderAdapterForkThreadError",
+  } as const;
+  const cases = [
+    { owner: "cc:interactive:acme", other: "thread-acme" },
+    { owner: "thread-acme", other: "cc:interactive:acme" },
+    { owner: "cc:automation:acme", other: "cc-space-agent-acme-lab" },
+    { owner: "cc-space-agent-acme-lab", other: "cc:automation:acme" },
+    { owner: "cc:interactive:acme", other: "cc:interactive:acme-other" },
+  ] as const;
 
-  it.effect("keeps a cc: thread out of a session another thread opened, and vice versa", () => {
+  for (const { owner, other } of cases) {
+    for (const operation of ["ensure", "resume", "start", "fork"] as const) {
+      it.effect(`refuses ${operation} for ${other} in a session ${owner} opened`, () => {
+        const calls: Array<string> = [];
+        return Effect.scoped(
+          Effect.gen(function* () {
+            const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+            const adapter = yield* registry.get(personalId);
+            const session = yield* adapter.openSession(openInput(owner, "approval-required"));
+            const refused = yield* operations[operation](session, other).pipe(Effect.flip);
+            assert.strictEqual(refused._tag, expectedTag[operation]);
+            assert.isTrue(isAdmissionError("cause" in refused ? refused.cause : undefined));
+            // The opening thread itself is served, and the refusal never reached the adapter.
+            yield* operations[operation](session, owner);
+            assert.deepEqual(calls, [`${operation}:${owner}`]);
+          }),
+        ).pipe(Effect.provide(fromAdapters([sessionAdapter(calls)])));
+      });
+    }
+  }
+
+  it.effect("lets ordinary threads, the Space agent included, share an ordinary session", () => {
     const calls: Array<string> = [];
     return Effect.scoped(
       Effect.gen(function* () {
         const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
         const adapter = yield* registry.get(personalId);
-        const shared = yield* adapter.openSession(openInput("thread-acme", "approval-required"));
-        const intruder = yield* ensureIn(shared, "cc:interactive:acme").pipe(Effect.flip);
-        assert.strictEqual(intruder._tag, "ProviderAdapterEnsureThreadError");
-        assert.isTrue(isAdmissionError("cause" in intruder ? intruder.cause : undefined));
-        yield* ensureIn(shared, "thread-acme");
-        yield* ensureIn(shared, "thread-acme-peer");
-
-        const isolated = yield* adapter.openSession(
-          openInput("cc:interactive:acme", "approval-required"),
-        );
-        const joiner = yield* ensureIn(isolated, "thread-acme-peer").pipe(Effect.flip);
-        assert.isTrue(isAdmissionError("cause" in joiner ? joiner.cause : undefined));
-        yield* ensureIn(isolated, "cc:interactive:acme");
-        // The refused calls never reached the adapter.
-        assert.deepEqual(calls, [
-          "ensure:thread-acme",
-          "ensure:thread-acme-peer",
-          "ensure:cc:interactive:acme",
-        ]);
+        const session = yield* adapter.openSession(openInput("thread-acme", "approval-required"));
+        for (const operation of ["ensure", "resume", "start", "fork"] as const) {
+          yield* operations[operation](session, "cc-space-agent-acme-lab");
+        }
+        assert.lengthOf(calls, 4);
       }),
     ).pipe(Effect.provide(fromAdapters([sessionAdapter(calls)])));
   });

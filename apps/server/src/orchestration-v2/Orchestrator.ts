@@ -886,8 +886,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   }) =>
     input.adapter.getCapabilities().pipe(
       Effect.flatMap((capabilities) =>
-        // Fork: a Command Center thread is launched isolated in a session of its
-        // own; sharing would hand it whichever launch opened the shared session.
+        // FORK: security. A Command Center (cc:) thread is launched isolated in a
+        // session of its own; a shared session carries whichever launch opened it.
         capabilities.sessions.supportsMultipleProviderThreadsPerSession &&
         !isCommandCenterThreadId(input.threadId)
           ? Effect.succeed(

@@ -131,6 +131,7 @@ function bindSessionToOpeningThread(
                 driver,
                 threadId: input.threadId,
                 providerThreadId: input.providerThread.id,
+                runId: input.runId,
                 cause: refusal(input.threadId),
               }),
             )
