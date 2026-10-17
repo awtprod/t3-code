@@ -22,6 +22,15 @@ The first account on an environment requires a Desktop OAuth client JSON upload.
 that document to `gog auth credentials` over stdin and stores it only below the runtime credential
 directory.
 
+The editor's consent always passes `--readonly` and `--gmail-scope readonly`. It requests the
+Calendar service (`--services gmail,calendar`) when the user ticks "Also read Google Calendar" or
+when an enabled connection of the same Space, for the same account, already declares
+`calendar.read`. With `--readonly`, gog v0.15.0 maps Calendar to
+`https://www.googleapis.com/auth/calendar.readonly`; without it, gog would request the read-write
+`https://www.googleapis.com/auth/calendar` scope (`internal/googleauth/service.go` at the v0.15.0
+tag). The runtime read allowlist below never enables a Calendar write command either way. Draft
+creation adds only `--extra-scopes https://www.googleapis.com/auth/gmail.compose`.
+
 The editor can also remove an app-created binding from its Space. Removal intentionally leaves the
 underlying `gog` authorization intact because one authorized account can back bindings in multiple
 Spaces. Connections declared in private configuration remain owner-managed and cannot be removed

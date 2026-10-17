@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Space } from "@command-center/core";
+import { Connection, Space } from "@command-center/core";
 import { expect, it } from "@effect/vitest";
+import { CommandCenterError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -11,6 +12,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import {
+  buildGoogleAuthReplayArgs,
   googleSetupFailureMessage,
   GoogleConnectionSetup,
   layer as googleConnectionSetupLayer,
@@ -212,4 +214,162 @@ it.effect("runs split remote OAuth and stores only the runtime account binding",
       );
     }
   }).pipe(Effect.provide(testLayer));
+});
+
+it("requests read-only scopes, adding Calendar and the compose scope only when asked", () => {
+  const compose = "https://www.googleapis.com/auth/gmail.compose";
+  const base = ["auth", "add", "person@example.com"];
+  expect(buildGoogleAuthReplayArgs("person@example.com", ["gmail.read"])).toEqual([
+    ...base,
+    "--services",
+    "gmail",
+    "--gmail-scope",
+    "readonly",
+    "--readonly",
+    "--force-consent",
+  ]);
+  expect(buildGoogleAuthReplayArgs("person@example.com", ["gmail.read", "calendar.read"])).toEqual([
+    ...base,
+    "--services",
+    "gmail,calendar",
+    "--gmail-scope",
+    "readonly",
+    "--readonly",
+    "--force-consent",
+  ]);
+  expect(
+    buildGoogleAuthReplayArgs("person@example.com", [
+      "gmail.read",
+      "gmail.drafts.create",
+      "calendar.read",
+    ]),
+  ).toEqual([
+    ...base,
+    "--services",
+    "gmail,calendar",
+    "--gmail-scope",
+    "readonly",
+    "--readonly",
+    "--extra-scopes",
+    compose,
+    "--force-consent",
+  ]);
+});
+
+const setupHarness = (input: {
+  readonly connections: LoadedCommandCenterConfig["connections"];
+  readonly accountAliasFor: (connectionId: string) => string | undefined;
+}) => {
+  const invocations: ProcessRunner.ProcessRunInput[] = [];
+  const stored: Array<ReadonlyArray<string>> = [];
+  const processLayer = Layer.succeed(
+    ProcessRunner.ProcessRunner,
+    ProcessRunner.ProcessRunner.of({
+      run: (run) =>
+        Effect.sync(() => {
+          invocations.push(run);
+          if (run.args.includes("--version")) return output("gog version 0.15.0");
+          if (run.args.includes("list")) return output('{"clients":[{"client":"default"}]}');
+          if (run.args.includes("--step") && run.args.includes("1")) {
+            return output(
+              '{"auth_url":"https://accounts.google.test/auth?redirect_uri=http%3A%2F%2F127.0.0.1%3A43123%2Foauth2%2Fcallback&state=state","state_reused":false}',
+            );
+          }
+          return output(
+            '{"stored":true,"email":"person@example.com","services":["gmail","calendar"],"client":"default"}',
+          );
+        }),
+    }),
+  );
+  const configLayer = Layer.succeed(
+    CommandCenterConfig,
+    CommandCenterConfig.of({
+      configDirectory: "/private/config",
+      load: Effect.succeed({ ...loadedConfig, connections: input.connections }),
+      resolveGoogleAccount: ({ connectionId }) => {
+        const accountAlias = input.accountAliasFor(connectionId);
+        return accountAlias === undefined
+          ? Effect.fail(new CommandCenterError({ reason: "config", message: "not enabled" }))
+          : Effect.succeed({ accountAlias, label: accountAlias });
+      },
+      upsertRuntimeGoogleConnection: (upsert) =>
+        Effect.sync(() => {
+          stored.push(upsert.capabilities);
+          return { connectionId: "google-primary" };
+        }),
+    }),
+  );
+  const layer = googleConnectionSetupLayer.pipe(
+    Layer.provide(processLayer),
+    Layer.provide(configLayer),
+    Layer.provide(ServerSecretStore.layer),
+    Layer.provideMerge(
+      ServerConfig.ServerConfig.layerTest(process.cwd(), {
+        prefix: "command-center-google-setup-calendar-test-",
+      }),
+    ),
+    Layer.provideMerge(NodeServices.layer),
+  );
+  const connectOnce = Effect.gen(function* () {
+    const setup = yield* GoogleConnectionSetup;
+    const begun = yield* setup.begin({
+      spaceId: space.id,
+      email: "Person@Example.com",
+      capabilities: ["gmail.read"],
+    });
+    yield* setup.complete({
+      sessionId: begun.sessionId,
+      redirectUrl: "http://127.0.0.1:43123/oauth2/callback?code=code&state=state",
+    });
+    return invocations.find((entry) => entry.args.includes("1"))?.args ?? [];
+  }).pipe(Effect.provide(layer));
+  return { connectOnce, stored };
+};
+
+const decodeConnection = Schema.decodeUnknownSync(Connection);
+const declaredConnection = (id: string, capabilities: ReadonlyArray<string>) =>
+  decodeConnection({
+    id,
+    spaceId: space.id,
+    kind: "google",
+    label: "Primary account",
+    capabilities,
+    health: "disconnected",
+  });
+
+it.effect("grants Calendar read when the Space's connection for that account declares it", () => {
+  const harness = setupHarness({
+    connections: [
+      declaredConnection("google-primary", [
+        "cc.connections.google.gmail.read",
+        "cc.connections.google.calendar.read",
+      ]),
+    ],
+    accountAliasFor: (connectionId) =>
+      connectionId === "google-primary" ? "person@example.com" : undefined,
+  });
+  return Effect.gen(function* () {
+    const beginArgs = yield* harness.connectOnce;
+    expect(beginArgs).toEqual(
+      expect.arrayContaining(["--services", "gmail,calendar", "--readonly"]),
+    );
+    expect(harness.stored).toEqual([["gmail.read", "calendar.read"]]);
+  });
+});
+
+it.effect("keeps Gmail-only consent when the declaring connection is another account", () => {
+  const harness = setupHarness({
+    connections: [
+      declaredConnection("google-other", ["cc.connections.google.calendar.read"]),
+      declaredConnection("google-unresolvable", ["cc.connections.google.calendar.read"]),
+    ],
+    accountAliasFor: (connectionId) =>
+      connectionId === "google-other" ? "other@example.com" : undefined,
+  });
+  return Effect.gen(function* () {
+    const beginArgs = yield* harness.connectOnce;
+    expect(beginArgs).toEqual(expect.arrayContaining(["--services", "gmail", "--readonly"]));
+    expect(beginArgs).not.toContain("gmail,calendar");
+    expect(harness.stored).toEqual([["gmail.read"]]);
+  });
 });

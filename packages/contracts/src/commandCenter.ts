@@ -567,6 +567,7 @@ export type CommandCenterConnectionRefreshInput = typeof CommandCenterConnection
 export const CommandCenterGoogleConnectionSetupCapability = Schema.Literals([
   "gmail.read",
   "gmail.drafts.create",
+  "calendar.read",
 ]);
 export type CommandCenterGoogleConnectionSetupCapability =
   typeof CommandCenterGoogleConnectionSetupCapability.Type;
