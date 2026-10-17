@@ -1222,7 +1222,7 @@ function GuidedNodeFields({
   }
 }
 
-type GoogleSetupCapability = "gmail.read" | "gmail.drafts.create";
+type GoogleSetupCapability = "gmail.read" | "gmail.drafts.create" | "calendar.read";
 
 function googleSetupErrorMessage(cause: unknown, fallback: string): string {
   if (cause instanceof Error && cause.message.trim().length > 0) return cause.message;
@@ -1262,6 +1262,7 @@ function GoogleConnectionSetupDialog({
   const [redirectUrl, setRedirectUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>();
+  const [readCalendar, setReadCalendar] = useState(capabilities.includes("calendar.read"));
 
   const begin = async () => {
     if (!email.trim()) return;
@@ -1271,7 +1272,10 @@ function GoogleConnectionSetupDialog({
       setSession(
         await onBegin({
           email: email.trim(),
-          capabilities: [...capabilities],
+          capabilities: [
+            ...capabilities.filter((capability) => capability !== "calendar.read"),
+            ...(readCalendar ? (["calendar.read"] as const) : []),
+          ],
           ...(oauthClientJson === undefined ? {} : { oauthClientJson }),
         }),
       );
@@ -1339,7 +1343,23 @@ function GoogleConnectionSetupDialog({
                 {capabilities.includes("gmail.drafts.create") ? (
                   <li>Create Gmail drafts; sending remains blocked</li>
                 ) : null}
+                {readCalendar ? <li>Read access to Google Calendar</li> : null}
               </ul>
+              <label className="mt-3 flex items-start gap-2">
+                <input
+                  checked={readCalendar}
+                  disabled={busy}
+                  onChange={(event) => setReadCalendar(event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                <span>
+                  <span className="font-medium">Also read Google Calendar</span>
+                  <span className="mt-0.5 block text-muted-foreground">
+                    Events become readable in this Space, including by its agent. Calendar changes
+                    stay unavailable.
+                  </span>
+                </span>
+              </label>
             </div>
             <details className="rounded-xl border p-3 text-xs">
               <summary className="cursor-pointer font-medium">

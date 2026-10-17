@@ -675,6 +675,8 @@ const handlers = {
         });
       }
       const activity = yield* SpaceActivity.SpaceActivity;
+      // `recent` leaves out mail and calendar rows: this tool needs only
+      // `cc.items.read`, not a Google read capability.
       return {
         activity: yield* activity.recent({
           spaceId: scope.spaceId,
