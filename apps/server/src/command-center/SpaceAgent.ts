@@ -30,6 +30,7 @@ import * as ServerConfig from "../config.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as OrchestrationCommandDispatcher from "../orchestration/CommandDispatcher.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { GoogleActivityBrief } from "./GoogleActivity.ts";
 import { isManagedRepositoryWorkspacePath } from "./RepositoryProvisioningPolicy.ts";
 import {
   commandCenterModelSelection,
@@ -158,6 +159,7 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   const sql = yield* SqlClient.SqlClient;
+  const googleBrief = yield* GoogleActivityBrief;
   // One writer at a time, so concurrent wakes cannot both create the thread.
   const threadLock = yield* Semaphore.make(1);
 
@@ -235,7 +237,10 @@ const make = Effect.gen(function* () {
       return yield* agentError("conflict", "The Space agent is already working on a turn.");
     }
     const threadId = ThreadId.make(spaceAgentThreadId(space.id));
-    const { brief } = yield* service.spaceBrief({ spaceId: space.id });
+    // The agent's own scope is the Space policy, which `section` checks, so
+    // the server-injected brief is where mail and calendar reach the agent.
+    const mailCalendar = yield* googleBrief.section(space);
+    const { brief } = yield* service.spaceBrief({ spaceId: space.id, mailCalendar });
     const now = DateTime.formatIso(yield* DateTime.now);
     const nonce = yield* crypto.randomUUIDv4.pipe(
       Effect.mapError((cause) => agentError("persistence", "Could not mint a turn id.", cause)),

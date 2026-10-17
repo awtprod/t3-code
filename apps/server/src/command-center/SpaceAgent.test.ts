@@ -18,9 +18,11 @@ import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSn
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import * as ConnectionHealth from "./ConnectionHealth.ts";
+import { GoogleActivityBrief } from "./GoogleActivity.ts";
 import { layer as commandCenterServiceLayer } from "./Service.ts";
 import * as SpaceAgent from "./SpaceAgent.ts";
 import * as SpaceAgentWaker from "./SpaceAgentWaker.ts";
+import type { SpaceBriefMailCalendar } from "./SpaceBrief.ts";
 
 const decodeSpace = Schema.decodeUnknownSync(Space);
 const fixtureTimestamp = "2026-01-01T00:00:00.000Z";
@@ -68,12 +70,26 @@ const makeHarness = (
     makeSpace("agent-space", { enabled: true }),
     makeSpace("quiet-space"),
   ]),
+  mailCalendar?: SpaceBriefMailCalendar,
 ) => {
   const dispatched: Array<ClientOrchestrationCommand> = [];
   const threads = new Map<string, OrchestrationThreadShell>();
+  const briefSections: Array<string> = [];
   const layer = SpaceAgentWaker.layer.pipe(
     Layer.provideMerge(SpaceAgent.layer),
     Layer.provideMerge(commandCenterServiceLayer),
+    Layer.provide(
+      Layer.succeed(
+        GoogleActivityBrief,
+        GoogleActivityBrief.of({
+          section: (space) =>
+            Effect.sync(() => {
+              briefSections.push(space.id);
+              return mailCalendar;
+            }),
+        }),
+      ),
+    ),
     Layer.provide(
       Layer.succeed(
         CommandCenterConfig,
@@ -117,7 +133,7 @@ const makeHarness = (
       ...overrides,
     } as OrchestrationThreadShell);
   };
-  return { layer, dispatched, seedThread };
+  return { layer, dispatched, seedThread, briefSections };
 };
 
 describe("Space agent", () => {
@@ -152,6 +168,39 @@ describe("Space agent", () => {
       }).pipe(Effect.provide(harness.layer));
     },
   );
+
+  it.effect("puts the Space's mail and calendar into the injected brief", () => {
+    const harness = makeHarness(undefined, {
+      nowMs: Date.parse("2026-10-17T12:00:00.000Z"),
+      timezone: "UTC",
+      mail: {
+        status: "ok",
+        entries: [
+          {
+            from: "Pat Example <pat@example.com>",
+            subject: "Contract draft",
+            receivedAtMs: Date.parse("2026-10-17T10:00:00.000Z"),
+            messageCount: 1,
+          },
+        ],
+      },
+      calendar: { status: "unavailable", reason: "the Google read failed" },
+    });
+    harness.seedThread();
+    return Effect.gen(function* () {
+      const spaceAgent = yield* SpaceAgent.SpaceAgent;
+      yield* spaceAgent.sendTurn("agent-space", { text: "Wake.", reason: "wake" });
+
+      expect(harness.briefSections).toEqual(["agent-space"]);
+      const turn = harness.dispatched[0];
+      if (turn?.type !== "thread.turn.start") throw new Error("Expected a turn start.");
+      expect(turn.message.text).toContain("Mail + calendar (untrusted reference");
+      expect(turn.message.text).toContain(
+        "- 2 h ago · Pat Example <pat@example.com> · Contract draft",
+      );
+      expect(turn.message.text).toContain("Calendar unavailable: the Google read failed");
+    }).pipe(Effect.provide(harness.layer));
+  });
 
   it.effect("sends later turns to the existing thread and keeps its runtime mode", () => {
     const harness = makeHarness();
