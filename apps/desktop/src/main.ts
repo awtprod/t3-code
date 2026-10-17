@@ -107,9 +107,10 @@ const layerDesktopEnvironment = Layer.unwrap(
   }),
 );
 
-// The remote runs the exact release this app is on, from its self-contained
-// archive, so it needs neither Node nor npm. Development points the remote at
-// a source checkout instead so the two sides can be iterated together.
+// The remote runs the Command Center CLI package for this app's release (or
+// its update channel) through npx/npm, so it needs Node on the remote host.
+// Development points the remote at a source checkout instead so the two sides
+// can be iterated together.
 const resolveDesktopSshCliRunner = (
   environment: DesktopEnvironment.DesktopEnvironment["Service"],
   settings: DesktopAppSettings.DesktopSettings,
