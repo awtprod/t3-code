@@ -2229,7 +2229,6 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         enableProviderUpdateChecks: false,
       });
       const firstRaw = yield* fileSystem.readFileString(serverConfig.settingsPath);
-      // @effect-diagnostics-next-line preferSchemaOverJson:off
       const firstPersisted = JSON.parse(firstRaw);
       assert.equal(firstPersisted.defaultTheme, "ocean");
       assert.isFalse(firstPersisted.enableProviderUpdateChecks);
@@ -2239,7 +2238,6 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       yield* serverSettings.updateSettings({ addProjectBaseDirectory: "~/Development" });
       yield* runCli(["theme", "clear", "--base-dir", serverConfig.baseDir]);
       const secondRaw = yield* fileSystem.readFileString(serverConfig.settingsPath);
-      // @effect-diagnostics-next-line preferSchemaOverJson:off
       const secondPersisted = JSON.parse(secondRaw);
       assert.equal(secondPersisted.addProjectBaseDirectory, "~/Development");
       assert.isFalse(secondPersisted.enableProviderUpdateChecks);

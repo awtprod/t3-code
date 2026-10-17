@@ -25,8 +25,10 @@ describe("maybeDowngradeSubagentModel", () => {
 
   // The spawn tool was renamed `Task` -> `Agent` across SDK versions; the guard
   // must cover every name, so run the core scenarios against each.
-  for (const spawnTool of ["Agent", "Task"] as const) {
-    it(`downgrades an inheriting ${spawnTool} spawn from a Fable manager to the worker fallback`, () => {
+  const SPAWN_TOOLS = ["Agent", "Task"] as const;
+  it.each(SPAWN_TOOLS)(
+    `downgrades an inheriting %s spawn from a Fable manager to the worker fallback`,
+    (spawnTool) => {
       const result = maybeDowngradeSubagentModel(
         spawnTool,
         taskInput(),
@@ -34,9 +36,12 @@ describe("maybeDowngradeSubagentModel", () => {
         catalog,
       );
       assert.equal(modelOf(result), "claude-opus-5-5");
-    });
+    },
+  );
 
-    it(`downgrades an explicit Fable ${spawnTool} subagent (including via alias) to the worker fallback`, () => {
+  it.each(SPAWN_TOOLS)(
+    `downgrades an explicit Fable %s subagent (including via alias) to the worker fallback`,
+    (spawnTool) => {
       assert.equal(
         modelOf(
           maybeDowngradeSubagentModel(
@@ -55,18 +60,24 @@ describe("maybeDowngradeSubagentModel", () => {
         ),
         "claude-opus-5-5",
       );
-    });
+    },
+  );
 
-    it(`respects an explicit non-manager worker model chosen under a Fable manager (${spawnTool})`, () => {
+  it.each(SPAWN_TOOLS)(
+    `respects an explicit non-manager worker model chosen under a Fable manager (%s)`,
+    (spawnTool) => {
       assert.equal(
         modelOf(
           maybeDowngradeSubagentModel(spawnTool, taskInput("sonnet"), "claude-fable-5-1", catalog),
         ),
         "sonnet",
       );
-    });
+    },
+  );
 
-    it(`leaves inheriting ${spawnTool} spawns untouched when the session model is not a manager`, () => {
+  it.each(SPAWN_TOOLS)(
+    `leaves inheriting %s spawns untouched when the session model is not a manager`,
+    (spawnTool) => {
       const input = taskInput();
       assert.strictEqual(
         maybeDowngradeSubagentModel(spawnTool, input, "claude-opus-5", catalog),
@@ -76,9 +87,12 @@ describe("maybeDowngradeSubagentModel", () => {
         maybeDowngradeSubagentModel(spawnTool, input, "claude-sonnet-5", catalog),
         input,
       );
-    });
+    },
+  );
 
-    it(`downgrades an explicit Fable ${spawnTool} subagent even under a non-manager session`, () => {
+  it.each(SPAWN_TOOLS)(
+    `downgrades an explicit Fable %s subagent even under a non-manager session`,
+    (spawnTool) => {
       assert.equal(
         modelOf(
           maybeDowngradeSubagentModel(spawnTool, taskInput("fable"), "claude-opus-5-5", catalog),
@@ -91,8 +105,8 @@ describe("maybeDowngradeSubagentModel", () => {
         ),
         "claude-opus-5-5",
       );
-    });
-  }
+    },
+  );
 
   it("ignores non-spawn tools and unknown session models", () => {
     const input = taskInput();

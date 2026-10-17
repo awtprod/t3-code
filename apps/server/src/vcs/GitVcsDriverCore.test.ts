@@ -1562,7 +1562,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
     // Deterministic and offline: a real local fetch whose source objects are
     // unreadable makes git itself print `error: ...: Permission denied`. (A fake
     // GIT_SSH_COMMAND cannot inject the text: hardened git forces the host ssh.)
-    it.effect.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32" || process.getuid?.() === 0)(
       "does not read a filesystem permission error as an ssh refusal",
       () =>
         Effect.gen(function* () {
