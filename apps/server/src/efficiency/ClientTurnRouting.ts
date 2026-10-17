@@ -288,11 +288,12 @@ const make = Effect.gen(function* () {
       )
       .pipe(
         Effect.map((result) => tierJudgmentFromAnswers(result.answers, result.model)),
-        Effect.catchTag("JudgeError", (error) =>
-          Effect.logDebug("tier judgment skipped", { reason: error.reason }).pipe(
-            Effect.as(undefined),
-          ),
-        ),
+        Effect.catchTags({
+          JudgeError: (error) =>
+            Effect.logDebug("tier judgment skipped", { reason: error.reason }).pipe(
+              Effect.as(undefined),
+            ),
+        }),
       );
 
   /**
