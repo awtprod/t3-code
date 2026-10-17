@@ -617,7 +617,11 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         });
         assert.deepStrictEqual(updated.usageLimitSources, saved.usageLimitSources);
         const persisted = yield* readPersisted;
-        assert.deepStrictEqual(persisted.usagePriceOverrides, { "example-model": prices });
+        // The Command Center seeds stay alongside the custom price.
+        assert.deepStrictEqual(persisted.usagePriceOverrides, {
+          ...DEFAULT_SERVER_SETTINGS.usagePriceOverrides,
+          "example-model": prices,
+        });
         assert.deepStrictEqual(persisted.usageModelAliases, usageModelAliases);
         assert.deepStrictEqual(persisted.usageLimitSources, usageLimitSources);
         assert.equal(persisted.storageCleanup.worktreeSettledAfterDays, 0);
@@ -625,7 +629,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
         yield* serverSettings.updateSettings({ usagePriceOverrides: { "example-model": null } });
         const restored = yield* readPersisted;
-        assert.deepStrictEqual(restored.usagePriceOverrides, {});
+        assert.deepStrictEqual(
+          restored.usagePriceOverrides,
+          DEFAULT_SERVER_SETTINGS.usagePriceOverrides,
+        );
       }),
     ).pipe(Effect.provide(layerServerSettings())),
   );

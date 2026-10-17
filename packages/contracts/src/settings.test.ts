@@ -8,6 +8,7 @@ import {
   ClientSettingsPatch,
   ClaudeSettings,
   DEFAULT_SERVER_SETTINGS,
+  DEFAULT_USAGE_PRICE_OVERRIDES,
   requiredScopesForProjectMutation,
   resolveProjectProviderInstanceEnabled,
   resolveProviderInstanceEnabled,
@@ -208,8 +209,8 @@ describe("ServerSettings default permissions", () => {
 describe("ServerSettings usage price overrides", () => {
   const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };
 
-  it("defaults to automatic pricing and round-trips arbitrary model IDs", () => {
-    expect(decodeServerSettings({}).usagePriceOverrides).toEqual({});
+  it("defaults to the Command Center seeds and round-trips arbitrary model IDs", () => {
+    expect(decodeServerSettings({}).usagePriceOverrides).toEqual(DEFAULT_USAGE_PRICE_OVERRIDES);
     const settings = decodeServerSettings({
       usagePriceOverrides: { "  vendor/example-model  ": prices },
     });
