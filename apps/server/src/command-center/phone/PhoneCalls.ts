@@ -88,7 +88,7 @@ const THIRD_PARTY_CALL_STATUSES = [PhoneCallStatus.callingThirdParty];
 
 export const phoneStartSourceId = (conversationId: string) => `phone-start:${conversationId}`;
 export const phoneEndSourceId = (conversationId: string) => `phone-end:${conversationId}`;
-export const phoneUncertainSourceId = (kind: PhoneCallKind, spaceId: string, attemptId: string) =>
+const phoneUncertainSourceId = (kind: PhoneCallKind, spaceId: string, attemptId: string) =>
   `phone-uncertain:${kind}:${spaceId}:${attemptId}`;
 
 const START_TITLE_PREFIX = "Phone: calling ";

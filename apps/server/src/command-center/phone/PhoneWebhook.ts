@@ -9,10 +9,12 @@
  *
  *   ElevenLabs-Signature: t=<unix seconds>,v0=<hex HMAC-SHA256(secret, "<t>.<raw body>")>
  *
- * The digest is compared in constant time before the body is parsed, and the
- * timestamp must be within the same five-minute window as the automation
- * webhooks (the SDK allows 30 minutes in the past only). Bodies are capped at
- * 1 MiB while streaming.
+ * The digest is compared in constant time before the body is parsed. The
+ * timestamp may be up to 30 minutes old, the SDKs' tolerance, so retried
+ * post-call deliveries (30 s, 2 m, 8 m, then 30 m apart) are not dropped after
+ * five minutes; it may be at most five minutes in the future (clock skew, as
+ * for the automation webhooks). Rows are keyed by conversation id, so a replay inside that window
+ * writes nothing new. Bodies are capped at 1 MiB while streaming.
  *
  * Handled event types (https://elevenlabs.io/docs/eleven-agents/workflows/post-call-webhooks):
  * - `post_call_transcription`: "Phone: ended …" activity row with the summary
@@ -43,6 +45,9 @@ import { CommandCenterReadinessGate } from "../ReadinessGate.ts";
 import * as SpaceActivity from "../SpaceActivity.ts";
 import { recordSpaceAgentReply } from "../SpaceAgentReplies.ts";
 import { COMMAND_CENTER_WEBHOOK_TIMESTAMP_SKEW_MS } from "../WebhookAdmission.ts";
+
+/** How old a signed delivery may be: the SDKs' tolerance, which covers ElevenLabs' retries. */
+const ELEVENLABS_WEBHOOK_MAX_AGE_MS = 30 * 60 * 1_000;
 import { collectBoundedWebhookBody, webhookErrorResponse } from "../WebhookHttp.ts";
 import { ElevenLabsConversationId } from "./ElevenLabsClient.ts";
 import { makePhoneConnectionStore } from "./PhoneConnection.ts";
@@ -138,7 +143,8 @@ export const verifyElevenLabsSignature = (input: {
   }
   if (parsed === undefined || !matched) return "unauthorized";
   const timestampMs = Number(parsed.timestamp) * 1000;
-  return Math.abs(input.nowMs - timestampMs) > COMMAND_CENTER_WEBHOOK_TIMESTAMP_SKEW_MS
+  return input.nowMs - timestampMs > ELEVENLABS_WEBHOOK_MAX_AGE_MS ||
+    timestampMs - input.nowMs > COMMAND_CENTER_WEBHOOK_TIMESTAMP_SKEW_MS
     ? "stale"
     : "valid";
 };

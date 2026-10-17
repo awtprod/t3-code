@@ -28,7 +28,7 @@ calls and SMS are not supported.
 | Calls to third parties        | 5 per Space per local day, only after approval                  |
 | Brief read to the voice agent | 1,500 characters                                                |
 | Outbound request timeout      | 15 s                                                            |
-| Webhook body                  | 1 MiB, signature within 5 minutes                               |
+| Webhook body                  | 1 MiB; signed at most 30 minutes ago, 5 minutes ahead           |
 
 The day and quiet hours use one timezone: `agent.quietHours.timezone`, then
 `agent.checkIns.timezone`, then `America/New_York`. Counts come from the activity rows (phone rows
@@ -105,7 +105,8 @@ transcription events (and call initiation failures). Do not send audio webhooks;
 exceeds the 1 MiB body limit. Copy the webhook's shared secret into `webhookSecret` below.
 
 The endpoint authenticates only by the `ElevenLabs-Signature` header (HMAC-SHA-256 over
-`<timestamp>.<body>`, as in the ElevenLabs SDKs) and rejects deliveries older than five minutes.
+`<timestamp>.<body>`, as in the ElevenLabs SDKs) and rejects deliveries signed more than 30 minutes
+ago (the SDKs' tolerance, so retried deliveries are kept) or more than five minutes ahead.
 The Command Center server is Tailscale-only by default, so ElevenLabs cannot reach it until this one
 path is published (for example through Tailscale Funnel or a reverse proxy that forwards only
 `/api/command-center/phone/webhook`). ElevenLabs documents static egress IPs if the proxy can

@@ -961,7 +961,7 @@ describe("PhoneWebhook", () => {
       for (const delivery of [
         { signatureHeader: undefined, body: encoder.encode(body) },
         { ...signedDelivery(body, nowMs), body: encoder.encode(body.replace("yes", "no")) },
-        signedDelivery(body, nowMs - 10 * 60 * 1000),
+        signedDelivery(body, nowMs - 31 * 60 * 1000),
         signedDelivery(`{"pad":"${"x".repeat(1024 * 1024)}"}`, nowMs),
         signedDelivery("{not json", nowMs),
       ]) {

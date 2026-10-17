@@ -47,9 +47,12 @@ describe("verifyElevenLabsSignature", () => {
     }
   });
 
-  it("rejects a valid signature outside the five-minute window in either direction", () => {
+  it("accepts retries up to 30 minutes old and at most five minutes of future skew", () => {
     expect(verify(sign(body, nowSeconds - 4 * 60))).toBe("valid");
-    expect(verify(sign(body, nowSeconds - 6 * 60))).toBe("stale");
+    // ElevenLabs retries post-call deliveries 30 s, 2 m, 8 m, and 30 m apart.
+    expect(verify(sign(body, nowSeconds - 29 * 60))).toBe("valid");
+    expect(verify(sign(body, nowSeconds - 31 * 60))).toBe("stale");
+    expect(verify(sign(body, nowSeconds + 4 * 60))).toBe("valid");
     expect(verify(sign(body, nowSeconds + 6 * 60))).toBe("stale");
   });
 });
