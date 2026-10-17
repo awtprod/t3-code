@@ -24,11 +24,15 @@ const legacyReaderFiles: Record<string, string> = {
   "command-center/EventStream.ts": "V2PORT S2: Run transcript excerpts from V1 messages",
   "command-center/RunDispatcher.ts": "V2PORT S2: Run outcome text from V1 messages",
   "persistence/Layers/ProjectionTurnUsage.ts": "V2PORT S3: usage rows joined to V1 turns",
-  "persistence/Layers/ProviderRestartRecovery.ts": "V2PORT S1: v1 restart recovery, no v2 caller",
-  "persistence/Layers/ProviderTurnSendClaims.ts": "V2PORT S1: v1 send claims, no v2 caller",
 };
 const retiredPaths = [
   "orchestration",
+  // v1 restart recovery and send claims: v2 has ProviderRuntimeRecoveryService /
+  // RestartContinuation and the durable effect outbox. Their migrations stay.
+  "persistence/Layers/ProviderRestartRecovery.ts",
+  "persistence/Services/ProviderRestartRecovery.ts",
+  "persistence/Layers/ProviderTurnSendClaims.ts",
+  "persistence/Services/ProviderTurnSendClaims.ts",
   "orchestration/Layers/ProviderCommandReactor.ts",
   "orchestration/Layers/ProviderRuntimeIngestion.ts",
   "orchestration/Services/ProviderCommandReactor.ts",

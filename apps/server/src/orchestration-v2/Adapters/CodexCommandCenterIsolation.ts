@@ -130,17 +130,6 @@ export function commandCenterPermissionProfileMismatch(
     : undefined;
 }
 
-export function isCommandCenterPermissionProfile(
-  permissionProfile: string | undefined,
-): permissionProfile is
-  | typeof COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE
-  | typeof COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE {
-  return (
-    permissionProfile === COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE ||
-    permissionProfile === COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE
-  );
-}
-
 interface CodexIsolationProbeClient {
   readonly request: (
     method: "command/exec",

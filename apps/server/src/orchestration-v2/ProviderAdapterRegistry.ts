@@ -34,7 +34,7 @@ const isProviderSetupError = Schema.is(ProviderSetupError);
  * identity comes from the server-assigned thread id in the open request.
  * Adapter errors pass through unchanged.
  */
-export function withCommandCenterAdmission(
+function withCommandCenterAdmission(
   adapter: ProviderAdapter.ProviderAdapterV2["Service"],
 ): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {

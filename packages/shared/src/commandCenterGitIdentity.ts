@@ -6,7 +6,7 @@
  * user's global config. `example.com` is reserved (RFC 2606): it receives no
  * mail and cannot be verified by, so attributed to, any GitHub account.
  */
-export const COMMAND_CENTER_GIT_IDENTITY = {
+const COMMAND_CENTER_GIT_IDENTITY = {
   name: "Command Center",
   email: "command-center@example.com",
 } as const;
