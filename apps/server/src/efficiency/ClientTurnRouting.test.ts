@@ -391,6 +391,21 @@ describe("auto routing on V2 client turns", () => {
     ),
   );
 
+  it.effect("leaves provider slash commands on the thread's own model", () =>
+    Effect.gen(function* () {
+      yield* setRouting(parentId, "auto", "quality");
+      const router = yield* ClientTurnRouter;
+      assert.deepStrictEqual(yield* router.planDispatch(messageDispatch({ text: "/compact" })), {
+        type: "unrouted",
+        reason: "slash-command",
+      });
+      assert.strictEqual(
+        (yield* router.planDispatch(messageDispatch({ text: "/src/app.ts is broken" }))).type,
+        "delegated",
+      );
+    }).pipe(Effect.provide(makeLayer({ settings: efficiencyOn, threads: threads(boundParent) }))),
+  );
+
   it.effect("consumes a retry-one-tier-higher marker once", () =>
     Effect.gen(function* () {
       yield* setRouting(parentId, "auto", "economy", TurnId.make("run:acme-parent:1"));

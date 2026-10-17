@@ -79,6 +79,9 @@ export const DELEGATION_BOUNDS = {
   childTitleChars: 80,
 } as const;
 
+/** A message that is a provider slash command such as `/compact` or `/review base`. */
+const PROVIDER_SLASH_COMMAND = /^\s*\/[A-Za-z][\w:-]*(?:\s|$)/u;
+
 /** Routing decisions read for sticky routing and the route's task message. */
 const ROUTE_CONTEXT_DECISIONS = 50;
 
@@ -468,6 +471,8 @@ const make = Effect.gen(function* () {
       ) {
         return unrouted("continuation");
       }
+      // A provider slash command (`/compact`) belongs to the thread's own session.
+      if (PROVIDER_SLASH_COMMAND.test(command.text)) return unrouted("slash-command");
       const gate = yield* routingGate(command.threadId);
       if ("skip" in gate) return unrouted(gate.skip);
       const snapshot = yield* reads.thread(command.threadId);
