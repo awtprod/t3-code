@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -9,13 +10,133 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 
 import { makeCommandCenterAuditLog } from "./command-center/AuditLog.ts";
 import * as ServerConfig from "./config.ts";
+import { layerMemory as SqlitePersistenceMemory } from "./persistence/Sqlite.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+
+const commandCenterAuditStartupLayer = Layer.mergeAll(SqlitePersistenceMemory, NodeServices.layer);
+
+it.effect("verifies every configured Google connection before command readiness", () =>
+  Effect.gen(function* () {
+    const verified = yield* Ref.make<ReadonlyArray<string>>([]);
+
+    yield* ServerRuntimeStartup.verifyConfiguredGoogleConnections(
+      {
+        queryConnections: () =>
+          Effect.succeed({
+            connections: [
+              { id: "google-a", spaceId: "space-a", kind: "google" },
+              { id: "google-b", spaceId: "space-b", kind: "google" },
+              { id: "github-a", spaceId: "space-a", kind: "github" },
+            ] as never,
+          }),
+      },
+      {
+        verify: ({ connectionId }) =>
+          Ref.update(verified, (current) => [...current, connectionId]).pipe(
+            Effect.flatMap(() =>
+              connectionId === "google-b"
+                ? Effect.fail({ reason: "process" } as never)
+                : Effect.void,
+            ),
+          ),
+      },
+    );
+
+    // Both Google connections are checked (one failure does not stop the
+    // other) and non-Google connections are not.
+    assert.deepStrictEqual([...(yield* Ref.get(verified))].sort(), ["google-a", "google-b"]);
+  }),
+);
+
+it.effect("starts Command Center workers only after valid audit history is verified", () =>
+  Effect.gen(function* () {
+    const auditLog = yield* makeCommandCenterAuditLog;
+    const startedWorkers = yield* Ref.make<ReadonlyArray<string>>([]);
+    yield* auditLog.append({
+      eventId: "startup-valid",
+      actorKind: "system",
+      action: "fixture.startup.valid",
+      payload: { valid: true },
+      occurredAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    yield* ServerRuntimeStartup.startCommandCenterWorkersAfterAuditVerification(
+      auditLog.verify,
+      Ref.set(startedWorkers, ["schedule", "automation-recovery", "run-recovery"]),
+    );
+
+    assert.deepStrictEqual(yield* Ref.get(startedWorkers), [
+      "schedule",
+      "automation-recovery",
+      "run-recovery",
+    ]);
+  }).pipe(Effect.provide(commandCenterAuditStartupLayer)),
+);
+
+it.effect("runs projection-writing connector startup only after audit verification", () =>
+  Effect.gen(function* () {
+    const order = yield* Ref.make<ReadonlyArray<string>>([]);
+
+    yield* ServerRuntimeStartup.startCommandCenterWorkersAfterAuditVerification(
+      Ref.update(order, (current) => [...current, "audit"]).pipe(
+        Effect.as({
+          valid: true,
+          eventCount: 0,
+          headSequence: null,
+          headHash: null,
+        }),
+      ),
+      Effect.gen(function* () {
+        yield* Ref.update(order, (current) => [...current, "google-health"]);
+        yield* Ref.update(order, (current) => [...current, "workers"]);
+      }),
+    );
+
+    assert.deepStrictEqual(yield* Ref.get(order), ["audit", "google-health", "workers"]);
+  }),
+);
+
+it.effect("fails closed before Command Center workers start when audit history is tampered", () =>
+  Effect.gen(function* () {
+    const auditLog = yield* makeCommandCenterAuditLog;
+    const sql = yield* SqlClient.SqlClient;
+    const startedWorkers = yield* Ref.make(0);
+    yield* auditLog.append({
+      eventId: "startup-tampered",
+      actorKind: "system",
+      action: "fixture.startup.tampered",
+      payload: { valid: true },
+      occurredAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    // Simulate historical storage corruption that bypassed the normal
+    // append-only database protections.
+    yield* sql`DROP TRIGGER command_center_audit_events_no_update`;
+    yield* sql`
+      UPDATE command_center_audit_events
+      SET payload_json = '{"valid":false}'
+      WHERE event_id = 'startup-tampered'
+    `;
+
+    const error = yield* ServerRuntimeStartup.startCommandCenterWorkersAfterAuditVerification(
+      auditLog.verify,
+      Ref.update(startedWorkers, (count) => count + 1),
+    ).pipe(Effect.flip);
+
+    assert.instanceOf(error, ServerRuntimeStartup.CommandCenterAuditIntegrityError);
+    assert.equal(error.reason, "event-hash");
+    assert.equal(error.invalidSequence, 1);
+    assert.equal(yield* Ref.get(startedWorkers), 0);
+  }).pipe(Effect.provide(commandCenterAuditStartupLayer)),
+);
 
 it("uses the canonical Codex model for auto-bootstrap", () => {
   assert.deepEqual(ServerRuntimeStartup.getAutoBootstrapThreadModelSelection(), {

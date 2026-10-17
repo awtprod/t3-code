@@ -943,6 +943,9 @@ export const make = Effect.gen(function* () {
           ({
             authenticated: true,
             auth: descriptor,
+            // Inbox review drafts are stored under this scope, so they survive a
+            // reload and stay separate per session (or per DPoP key and subject).
+            draftScopeId: draftScopeIdForAuthenticatedSession(session),
             ...authScopeResponse(session.scopes),
             sessionMethod: session.method,
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),

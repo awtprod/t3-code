@@ -72,7 +72,7 @@ interface LegacyTurnStartView {
 }
 
 const asTurnStart = (
-  command: OrchestrationBridge.LegacyOrchestrationCommand | undefined,
+  command: OrchestrationBridge.CommandCenterOrchestrationCommand | undefined,
 ): LegacyTurnStartView => {
   if (command?.type !== "thread.turn.start") throw new Error("Expected a turn start.");
   return command as unknown as LegacyTurnStartView;
@@ -84,7 +84,7 @@ const makeHarness = (
     makeSpace("quiet-space"),
   ]),
 ) => {
-  const dispatched: Array<OrchestrationBridge.LegacyOrchestrationCommand> = [];
+  const dispatched: Array<OrchestrationBridge.CommandCenterOrchestrationCommand> = [];
   const threads = new Map<string, OrchestrationV2ThreadShell>();
   const layer = SpaceAgentWaker.layer.pipe(
     Layer.provideMerge(SpaceAgent.layer),

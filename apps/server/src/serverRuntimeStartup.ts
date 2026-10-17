@@ -51,6 +51,7 @@ import * as WorktreeCleanup from "./worktreeCleanup.ts";
 import * as HostUsage from "./resourceTelemetry/HostUsage.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
+import * as SpaceActivityReactor from "./command-center/SpaceActivityReactor.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import {
   type CommandCenterAuditChainVerification,
@@ -510,6 +511,7 @@ const make = (options?: StartupOptions) =>
     const hostUsage = yield* HostUsage.HostUsage;
     const automationScheduleRunner = yield* AutomationScheduleRunner.AutomationScheduleRunner;
     const spaceAgentWaker = yield* SpaceAgentWaker.SpaceAgentWaker;
+    const spaceActivityReactor = yield* SpaceActivityReactor.SpaceActivityReactor;
     const automationRecoveryCoordinator =
       yield* AutomationRecoveryCoordinator.AutomationRecoveryCoordinator;
     const runRecoveryCoordinator = yield* RunRecoveryCoordinator.RunRecoveryCoordinator;
@@ -600,6 +602,7 @@ const make = (options?: StartupOptions) =>
               yield* forkParked(
                 spaceAgentWaker.start().pipe(Scope.provide(commandCenterWorkerScope)),
               );
+              yield* spaceActivityReactor.start().pipe(Scope.provide(commandCenterWorkerScope));
               yield* forkParked(
                 automationRecoveryCoordinator.start().pipe(Scope.provide(commandCenterWorkerScope)),
               );

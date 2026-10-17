@@ -42,15 +42,12 @@
     "apps/web/src/browser/WebPreviewFrame.tsx": ["files"],
     // V2PORT: fork exports whose v1 consumers (or tests) were removed with v1
     // orchestration; each slice re-wires its own. S1: Codex permission kind,
-    // worktree base ref, auth draft scope, raw-route auth. S2: bridge make, worker
-    // start/Google verification (startup tests). S3: web push services, Windows attachment path limit, environment HTTP auth
-    // helpers. S4: efficiency Judge layers.
+    // worktree base ref, raw-route auth. S3: web push services, Windows attachment
+    // path limit, environment HTTP auth helpers. S4: efficiency Judge layers.
     "apps/server/src/provider/security/CodexPermissionEscalation.ts": ["exports"],
     "apps/server/src/git/GitWorkflowService.ts": ["exports"],
     "apps/server/src/auth/EnvironmentAuth.ts": ["exports"],
     "apps/server/src/http.ts": ["exports"],
-    "apps/server/src/command-center/OrchestrationBridge.ts": ["exports"],
-    "apps/server/src/serverRuntimeStartup.ts": ["exports"],
     // Used in-file by withGitHubProvisioningIdentity (ProviderInstanceRegistry);
     // exported for the v1 ProviderService test that v0.1.0 removed.
     "apps/server/src/provider/githubProvisioningIdentity.ts": ["exports"],
@@ -139,6 +136,8 @@
         // Command Center's sidebar redesign, behind the Beta settings toggle but
         // not mounted yet.
         "src/components/SidebarV2.tsx": ["files"],
+        // Plan-step source of SidebarV2's working line; reachable only through it.
+        "src/command-center/threadPlanProgress.ts": ["files"],
       },
     },
     "apps/mobile": {
