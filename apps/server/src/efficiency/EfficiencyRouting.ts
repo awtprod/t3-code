@@ -32,9 +32,9 @@ type RoutingMode = "manual" | "auto";
 /**
  * The turn-start fields efficiency routing reads and rewrites. Routing used to
  * run on the V1 `thread.turn.start` command, whose schema was deleted with the
- * V1 engine. S4 re-hooks routing into V2 turn start (ProviderTurnStartService)
- * behind the existing off switch; until then only the settings preview RPC
- * calls this, with a synthetic command.
+ * V1 engine. On V2 the client-turn router (`ClientTurnRouting.ts`) and the
+ * settings preview RPC build this shape from a V2 `message.dispatch` or launch
+ * plus the thread's side-channel routing state.
  */
 export interface TurnStartCommand {
   readonly type: "thread.turn.start";

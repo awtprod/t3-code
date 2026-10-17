@@ -2479,9 +2479,9 @@ const layerWsRpc = (
               providerRegistry.getProviders,
             ]);
             // Tier judgment is a per-message live signal; the settings preview
-            // shows only the deterministic rule/static routing. V2 shells carry
-            // no routing fields yet (S4), so the thread contributes only its
-            // project and model.
+            // shows only the deterministic rule/static routing. The thread
+            // contributes its project and model; the client passes the tier
+            // it shows (the thread's side-channel routing tier).
             const resolution = resolveInteractiveEfficiency({
               command: {
                 type: "thread.turn.start",
