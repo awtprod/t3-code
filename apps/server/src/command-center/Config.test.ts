@@ -351,7 +351,7 @@ it.effect("rejects Space config and instruction symlinks that escape the private
   }).pipe(Effect.provide(configTestLayer)),
 );
 
-const writeAgentSpaceConfig = (agent: unknown) =>
+const writeAgentSpaceConfig = (agent: unknown, extra: Record<string, unknown> = {}) =>
   Effect.gen(function* () {
     const config = yield* CommandCenterConfig;
     const fs = yield* FileSystem.FileSystem;
@@ -385,6 +385,7 @@ const writeAgentSpaceConfig = (agent: unknown) =>
         connectionIds: [],
         routing: { provider: "auto", model: "auto" },
         ...(agent === undefined ? {} : { agent }),
+        ...extra,
       }),
     );
     yield* fs.writeFileString(path.join(config.configDirectory, "spaces/agent.md"), "Agent.");
@@ -396,6 +397,29 @@ it.effect("leaves a Space without an agent block agent-less (default off)", () =
     const loaded = yield* writeAgentSpaceConfig(undefined);
     expect(loaded.health.status).toBe("loaded");
     expect(loaded.spaces[0]?.agent).toBeUndefined();
+  }).pipe(Effect.provide(configTestLayer)),
+);
+
+it.effect("grants phone calls only to a Space whose policy lists them", () =>
+  Effect.gen(function* () {
+    const implicit = yield* writeAgentSpaceConfig({ enabled: true });
+    const defaults = implicit.spaces[0]?.policy.allowedCapabilities ?? [];
+    expect(defaults).toContain("cc.items.write");
+    expect(defaults).not.toContain("cc.phone.call-owner");
+    expect(defaults).not.toContain("cc.phone.call");
+    const explicit = yield* writeAgentSpaceConfig(
+      { enabled: true },
+      {
+        policy: {
+          allowedCapabilities: ["cc.items.read", "cc.phone.call-owner"],
+          autoRunRiskLevels: ["low"],
+        },
+      },
+    );
+    expect(explicit.spaces[0]?.policy.allowedCapabilities).toEqual([
+      "cc.items.read",
+      "cc.phone.call-owner",
+    ]);
   }).pipe(Effect.provide(configTestLayer)),
 );
 

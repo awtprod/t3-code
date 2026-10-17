@@ -24,7 +24,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 const SPACE_ACTIVITY_SUMMARY_CHARS = 1_000;
 const SPACE_ACTIVITY_TITLE_CHARS = 200;
-/** Rows kept per Space; older rows are pruned on insert. */
+/** Rows kept per Space (phone rows excepted); older rows are pruned on insert. */
 export const SPACE_ACTIVITY_RETENTION = 500;
 export const SPACE_ACTIVITY_MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
@@ -116,7 +116,14 @@ export interface SpaceActivityRecord {
   readonly status: string;
   /** Raw message text; clipped and searched for a PR URL here. */
   readonly text: string | null;
+  /**
+   * The orchestration or audit event sequence the row came from. Rows that do
+   * not come from an event log (phone calls) use 0, which the reactor's resume
+   * cursor ignores.
+   */
   readonly eventSequence: number;
+  /** An explicit link (the column holds at most 500 characters); replaces the PR URL in `text`. */
+  readonly url?: string;
 }
 
 export interface SpaceActivityQuery {
@@ -137,7 +144,10 @@ export interface SpaceActivityShape {
    * then prune the Space to its newest rows. Returns whether a row was added.
    */
   readonly record: (input: SpaceActivityRecord) => Effect.Effect<boolean, CommandCenterError>;
-  /** Highest event sequence recorded for a source kind; the reactor's resume cursor. */
+  /**
+   * Highest event sequence recorded for a source kind; the reactor's resume
+   * cursor. Rows written outside the event logs (sequence 0) never move it.
+   */
   readonly latestEventSequence: (
     sourceKind: SpaceActivitySourceKind,
   ) => Effect.Effect<number | undefined, CommandCenterError>;
@@ -203,7 +213,8 @@ export const queryRecentSpaceActivity = (
     return rows.map(({ url, ...row }) => (url === null ? row : { ...row, url }));
   });
 
-const make = Effect.gen(function* () {
+/** @public Built per request by routes that cannot depend on the runtime service. */
+export const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   const recent: SpaceActivityShape["recent"] = (input) =>
@@ -211,7 +222,7 @@ const make = Effect.gen(function* () {
 
   const record: SpaceActivityShape["record"] = (input) => {
     const text = input.text ?? "";
-    const url = findPullRequestUrl(text) ?? null;
+    const url = input.url ?? findPullRequestUrl(text) ?? null;
     return sql
       .withTransaction(
         Effect.gen(function* () {
@@ -228,12 +239,16 @@ const make = Effect.gen(function* () {
             RETURNING id
           `;
           if (inserted.length === 0) return false;
+          // Phone rows are kept: daily call caps and webhook matching read them,
+          // and at most a few are written per day.
           yield* sql`
             DELETE FROM command_center_space_activity
             WHERE space_id = ${input.spaceId}
+              AND NOT (source_kind = 'run' AND source_id LIKE 'phone-%')
               AND id NOT IN (
                 SELECT id FROM command_center_space_activity
                 WHERE space_id = ${input.spaceId}
+                  AND NOT (source_kind = 'run' AND source_id LIKE 'phone-%')
                 ORDER BY occurred_at DESC, id DESC
                 LIMIT ${SPACE_ACTIVITY_RETENTION}
               )
@@ -248,7 +263,7 @@ const make = Effect.gen(function* () {
     sql<{ readonly sequence: number | null }>`
       SELECT MAX(event_sequence) AS sequence
       FROM command_center_space_activity
-      WHERE source_kind = ${sourceKind}
+      WHERE source_kind = ${sourceKind} AND event_sequence > 0
     `.pipe(
       Effect.map((rows) => rows[0]?.sequence ?? undefined),
       Effect.mapError(persistenceError("Could not read the Space activity cursor.")),

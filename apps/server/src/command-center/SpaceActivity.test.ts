@@ -167,6 +167,29 @@ it.layer(testLayer)("SpaceActivity service", (it) => {
     }),
   );
 
+  it.effect("keeps an explicit link and ignores sequence-0 rows in the resume cursor", () =>
+    Effect.gen(function* () {
+      yield* insertSpace("phones");
+      const activity = yield* SpaceActivity;
+      expect(
+        yield* activity.record({
+          ...row({ sequence: 0 }),
+          spaceId: "phones",
+          sourceKind: "run",
+          sourceId: "phone-start:conv_1",
+          url: "https://api.elevenlabs.io/v1/convai/conversations/conv_1",
+        }),
+      ).toBe(true);
+      expect(yield* activity.latestEventSequence("run")).toBeUndefined();
+      const [entry] = yield* activity.recent({ spaceId: "phones" });
+      expect(entry?.url).toBe("https://api.elevenlabs.io/v1/convai/conversations/conv_1");
+      expect(
+        yield* activity.record({ ...row({ sequence: 9 }), spaceId: "phones", sourceKind: "run" }),
+      ).toBe(true);
+      expect(yield* activity.latestEventSequence("run")).toBe(9);
+    }),
+  );
+
   it.effect("prunes each Space to its newest rows and honors since/limit", () =>
     Effect.gen(function* () {
       yield* insertSpace("acme");
@@ -200,6 +223,35 @@ it.layer(testLayer)("SpaceActivity service", (it) => {
       expect(yield* activity.recent({ spaceId: "command-center" })).toHaveLength(1);
       const invalid = yield* Effect.flip(activity.recent({ spaceId: "acme", since: "soon" }));
       expect(invalid.reason).toBe("validation");
+    }),
+  );
+
+  it.effect("never prunes phone rows, which daily call caps and the webhook read", () =>
+    Effect.gen(function* () {
+      yield* insertSpace("dialer");
+      const activity = yield* SpaceActivity;
+      const oldest = { ...row({ sequence: 0 }), spaceId: "dialer", sourceKind: "run" as const };
+      yield* activity.record({ ...oldest, sourceId: "phone-start:conv_old" });
+      yield* activity.record({ ...oldest, sourceId: "phone-uncertain:owner:dialer:a1" });
+      // Only run rows are phone rows; a thread whose id looks similar is pruned as usual.
+      yield* activity.record({ ...oldest, sourceKind: "thread", sourceId: "phone-lookalike" });
+      for (let index = 0; index < SPACE_ACTIVITY_RETENTION + 5; index += 1) {
+        yield* activity.record({
+          ...row({ sequence: 100 + index }),
+          spaceId: "dialer",
+          occurredAt: secondsAfterNow(index + 1),
+        });
+      }
+      const sql = yield* SqlClient.SqlClient;
+      const kept = yield* sql<{ readonly sourceId: string; readonly n: number }>`
+        SELECT source_id AS "sourceId", COUNT(*) AS n FROM command_center_space_activity
+        WHERE space_id = 'dialer' GROUP BY source_id ORDER BY source_id
+      `;
+      expect(kept).toEqual([
+        { sourceId: "phone-start:conv_old", n: 1 },
+        { sourceId: "phone-uncertain:owner:dialer:a1", n: 1 },
+        { sourceId: "thread-1", n: SPACE_ACTIVITY_RETENTION },
+      ]);
     }),
   );
 });

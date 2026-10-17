@@ -1,4 +1,8 @@
-import type { CommandCenterInboxDetail, CommandCenterInboxDraftReceipt } from "@t3tools/contracts";
+import type {
+  CommandCenterInboxDetail,
+  CommandCenterInboxDraftReceipt,
+  CommandCenterInboxProposalPayload,
+} from "@t3tools/contracts";
 
 export const INBOX_PAGE_SIZE = 25;
 export const INBOX_HISTORY_PAGE_SIZE = 30;
@@ -305,6 +309,11 @@ export function mergeHistoryById<T extends { readonly id: string; readonly seque
     for (const entry of page) entries.set(entry.id, entry);
   }
   return [...entries.values()].sort((left, right) => right.sequence - left.sequence);
+}
+
+/** A Space agent's third-party call plan: accepting it places the call (server `phone.call`). */
+export function isPhoneCallProposal(payload: CommandCenterInboxProposalPayload): boolean {
+  return payload.kind === "prepared-action" && payload.actionKind === "phone.call";
 }
 
 /**

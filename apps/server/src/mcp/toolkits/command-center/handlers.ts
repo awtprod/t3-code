@@ -11,6 +11,8 @@ import * as GoogleReadConnector from "../../../command-center/GoogleReadConnecto
 import { googleCapabilityForOperation } from "../../../command-center/GoogleCapabilities.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
 import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
+import { PhoneCalls } from "../../../command-center/phone/PhoneCalls.ts";
+import { PhoneCallProposals } from "../../../command-center/phone/PhoneCallProposals.ts";
 import { commandCenterProviderAvailability } from "../../../command-center/ProviderAvailability.ts";
 import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -271,6 +273,17 @@ export const resolveRunStartScope = (input: {
 export const memoryWriteOperationForScope = (scope: {
   readonly memoryWriteMode?: McpInvocationContext.McpMemoryWriteMode;
 }): "remember" | "propose" => (scope.memoryWriteMode === "remember" ? "remember" : "propose");
+
+/** Phone calls belong to the always-on Space agent; other credentials cannot place or file them. */
+const requireSpaceAgentScope = <S extends { readonly role?: string | undefined }>(scope: S) =>
+  scope.role === "space-agent"
+    ? Effect.succeed(scope)
+    : Effect.fail(
+        new CommandCenterError({
+          reason: "validation",
+          message: "Only a Space agent can use the phone tools.",
+        }),
+      );
 
 /** Space agent scopes act as the agent; every other credential keeps the default actor. */
 const spaceAgentItemActor = (scope: {
@@ -682,6 +695,33 @@ const handlers = {
           ...(limit === undefined ? {} : { limit }),
         }),
       };
+    }),
+  cc_phone_call_me: ({ spaceId, purpose, brief, question }) =>
+    Effect.gen(function* () {
+      const scope = yield* requireSpaceAgentScope(
+        yield* requireScopedSpace("cc.phone.call-owner", spaceId),
+      );
+      const phone = yield* PhoneCalls;
+      return yield* phone.callOwner({
+        spaceId: SpaceId.make(scope.spaceId),
+        purpose,
+        brief,
+        ...(question === undefined ? {} : { question }),
+      });
+    }),
+  cc_phone_call: ({ requestId, spaceId, ...plan }) =>
+    Effect.gen(function* () {
+      const scope = yield* requireSpaceAgentScope(
+        yield* requireScopedSpace("cc.phone.call", spaceId),
+      );
+      // Files the plan for approval only; nothing here can dial.
+      const proposals = yield* PhoneCallProposals;
+      return yield* proposals.file({
+        spaceId: scope.spaceId,
+        threadId: scope.threadId,
+        requestId,
+        plan: { ...plan, spaceId: SpaceId.make(scope.spaceId) },
+      });
     }),
 } satisfies Parameters<typeof CommandCenterToolkit.toLayer>[0];
 
