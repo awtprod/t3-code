@@ -718,34 +718,33 @@ export const withoutUndefinedFields = <A>(value: A): A => {
   ) as A;
 };
 
-type CommandCenterHandlers = typeof handlers;
-const jsonSafeHandlers = Object.fromEntries(
-  Object.entries(handlers).map(([name, handler]) => [
-    name,
-    (...args: ReadonlyArray<unknown>) =>
-      (handler as (...input: ReadonlyArray<unknown>) => Effect.Effect<unknown, unknown, unknown>)(
-        ...args,
-      ).pipe(Effect.map(withoutUndefinedFields)),
-  ]),
-) as unknown as CommandCenterHandlers;
+/** Wraps one handler so its success value is strict JSON (see above). */
+const jsonSafe =
+  <Args extends ReadonlyArray<unknown>, A, E, R>(
+    handler: (...args: Args) => Effect.Effect<A, E, R>,
+  ) =>
+  (...args: Args): Effect.Effect<A, E, R> =>
+    handler(...args).pipe(Effect.map(withoutUndefinedFields));
 
 /** Every Command Center tool declares its access (see `McpToolAccess`). */
 export const CommandCenterToolkitHandlersLive = McpToolAccess.toLayer(CommandCenterToolkit, {
-  cc_spaces_list: McpToolAccess.reads(jsonSafeHandlers.cc_spaces_list),
-  cc_items_list: McpToolAccess.reads(jsonSafeHandlers.cc_items_list),
-  cc_memory_list: McpToolAccess.reads(jsonSafeHandlers.cc_memory_list),
-  cc_memory_search: McpToolAccess.reads(jsonSafeHandlers.cc_memory_search),
-  cc_space_brief: McpToolAccess.reads(jsonSafeHandlers.cc_space_brief),
-  cc_automations_list: McpToolAccess.reads(jsonSafeHandlers.cc_automations_list),
-  cc_runs_list: McpToolAccess.reads(jsonSafeHandlers.cc_runs_list),
-  cc_google_read: McpToolAccess.reads(jsonSafeHandlers.cc_google_read),
-  cc_space_activity: McpToolAccess.reads(jsonSafeHandlers.cc_space_activity),
+  cc_spaces_list: McpToolAccess.reads(jsonSafe(handlers.cc_spaces_list)),
+  cc_items_list: McpToolAccess.reads(jsonSafe(handlers.cc_items_list)),
+  cc_memory_list: McpToolAccess.reads(jsonSafe(handlers.cc_memory_list)),
+  cc_memory_search: McpToolAccess.reads(jsonSafe(handlers.cc_memory_search)),
+  cc_space_brief: McpToolAccess.reads(jsonSafe(handlers.cc_space_brief)),
+  cc_automations_list: McpToolAccess.reads(jsonSafe(handlers.cc_automations_list)),
+  cc_runs_list: McpToolAccess.reads(jsonSafe(handlers.cc_runs_list)),
+  cc_google_read: McpToolAccess.reads(jsonSafe(handlers.cc_google_read)),
+  cc_space_activity: McpToolAccess.reads(jsonSafe(handlers.cc_space_activity)),
   // Writes check their Command Center capability in the handler.
-  cc_items_create: McpToolAccess.writesWithCapability(jsonSafeHandlers.cc_items_create),
-  cc_items_update: McpToolAccess.writesWithCapability(jsonSafeHandlers.cc_items_update),
-  cc_memory_propose: McpToolAccess.writesWithCapability(jsonSafeHandlers.cc_memory_propose),
-  cc_automations_create: McpToolAccess.writesWithCapability(jsonSafeHandlers.cc_automations_create),
-  cc_automations_save: McpToolAccess.writesWithCapability(jsonSafeHandlers.cc_automations_save),
-  cc_runs_start: McpToolAccess.writesWithCapability(jsonSafeHandlers.cc_runs_start),
-  cc_automations_run: McpToolAccess.writesWithCapability(jsonSafeHandlers.cc_automations_run),
+  cc_items_create: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_items_create)),
+  cc_items_update: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_items_update)),
+  cc_memory_propose: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_memory_propose)),
+  cc_automations_create: McpToolAccess.writesWithCapability(
+    jsonSafe(handlers.cc_automations_create),
+  ),
+  cc_automations_save: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_automations_save)),
+  cc_runs_start: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_runs_start)),
+  cc_automations_run: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_automations_run)),
 });
