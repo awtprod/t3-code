@@ -141,6 +141,70 @@ export function planUpstreamSync(options: UpstreamSyncPlanOptions): UpstreamSync
   };
 }
 
+/** Command Center re-platformed onto upstream orchestration v2 at this tag. */
+export const STABLE_TAG_FLOOR = "v0.1.0";
+
+export interface StableUpstreamTag {
+  readonly ref: string;
+  readonly commit: string;
+}
+
+const STABLE_TAG_PATTERN = /^v(\d+)\.(\d+)\.(\d+)$/;
+
+function stableTagVersion(tag: string): readonly [number, number, number] | undefined {
+  const match = STABLE_TAG_PATTERN.exec(tag);
+  if (!match) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareVersions(
+  left: readonly [number, number, number],
+  right: readonly [number, number, number],
+): number {
+  return left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
+}
+
+/**
+ * Picks the newest stable upstream release from `git ls-remote --tags --refs` output.
+ * Only exact `vMAJOR.MINOR.PATCH` tags count: nightly and preview builds never become a sync
+ * target. A release older than the re-platform floor is refused rather than synced backwards.
+ */
+export function selectLatestStableTag(
+  lsRemoteOutput: string,
+  floor: string = STABLE_TAG_FLOOR,
+): StableUpstreamTag {
+  const floorVersion = stableTagVersion(floor);
+  if (!floorVersion) throw new Error(`Stable tag floor must look like v1.2.3: ${floor}`);
+  let best:
+    | { readonly version: readonly [number, number, number]; readonly tag: StableUpstreamTag }
+    | undefined;
+  for (const line of lsRemoteOutput.split("\n")) {
+    const [commitField, refField] = line.trim().split(/\s+/);
+    if (!commitField || !refField?.startsWith("refs/tags/")) continue;
+    const version = stableTagVersion(refField.slice("refs/tags/".length));
+    if (!version) continue;
+    const commit = validateCommit(commitField, `Commit for ${refField}`);
+    if (!best || compareVersions(version, best.version) > 0) {
+      best = { version, tag: { ref: validateUpstreamRef(refField), commit } };
+    }
+  }
+  if (!best) throw new Error("Upstream has no stable vMAJOR.MINOR.PATCH release tag.");
+  if (compareVersions(best.version, floorVersion) < 0) {
+    throw new Error(`Newest upstream release ${best.tag.ref} is older than the floor ${floor}.`);
+  }
+  return best.tag;
+}
+
+/** Lists the remote's tags (a read; nothing is fetched) and picks the newest stable release. */
+export function resolveLatestStableTag(repositoryPath: string, remote: string): StableUpstreamTag {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) {
+    throw new Error(`Remote must be a plain remote name: ${remote}`);
+  }
+  return selectLatestStableTag(
+    git(NodePath.resolve(repositoryPath), ["ls-remote", "--tags", "--refs", remote]),
+  );
+}
+
 export function advancePublicBaseline(
   repositoryPath: string,
   targetCommit: string,
