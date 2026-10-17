@@ -31,8 +31,8 @@ import * as ProjectionStore from "./ProjectionStore.ts";
  * to recovery is threshold + sweep interval. A run parked on an approval or a
  * question is never stopped: the user may legitimately be away.
  */
-export const STALLED_RUN_THRESHOLD = Duration.minutes(10);
-export const STALLED_RUN_SWEEP_INTERVAL = Duration.seconds(60);
+const STALLED_RUN_THRESHOLD = Duration.minutes(10);
+const STALLED_RUN_SWEEP_INTERVAL = Duration.seconds(60);
 
 export interface StalledRun {
   readonly threadId: ThreadId;

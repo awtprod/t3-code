@@ -265,7 +265,7 @@ function claudeExtendedTurnTokenUsage(usage: {
  * The turn's last live usage with the cost the CLI reported in its result.
  * `undefined` when there is no usage to attach it to or no valid cost.
  */
-export function claudeFinalTurnTokenUsage(
+function claudeFinalTurnTokenUsage(
   lastTokenUsage: OrchestrationV2ProviderTurnTokenUsage | undefined,
   result: SDKResultMessage | undefined,
 ): OrchestrationV2ProviderTurnTokenUsage | undefined {
