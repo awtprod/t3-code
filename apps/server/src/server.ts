@@ -885,7 +885,7 @@ const layerCommandCenter = Layer.mergeAll(
 // Web Push services (VAPID config, subscription store, sender) shared by the
 // notifier and the HTTP route group. ServerSecretStore holds the VAPID key pair.
 const layerWebPushConfig = WebPushConfig.layer.pipe(Layer.provide(ServerSecretStore.layer));
-export const layerWebPushServices = Layer.mergeAll(
+const layerWebPushServices = Layer.mergeAll(
   layerWebPushConfig,
   WebPushSubscriptions.layer,
   WebPushSender.layer.pipe(Layer.provide(layerWebPushConfig)),

@@ -745,14 +745,17 @@ describe("serverSettings helpers", () => {
     const replaced = applyServerSettingsPatch(added, {
       usagePriceOverrides: { "example-model": prices },
     });
+    // The Command Center price seeds are default entries and are left alone.
+    const seeds = DEFAULT_SERVER_SETTINGS.usagePriceOverrides;
     expect(replaced.usagePriceOverrides).toEqual({
+      ...seeds,
       "example-model": prices,
       "other-model": prices,
     });
     const removed = applyServerSettingsPatch(replaced, {
       usagePriceOverrides: { "example-model": null },
     });
-    expect(removed.usagePriceOverrides).toEqual({ "other-model": prices });
+    expect(removed.usagePriceOverrides).toEqual({ ...seeds, "other-model": prices });
     expect(current.usagePriceOverrides["example-model"]?.cacheReadCostPerMillionTokens).toBe(0.5);
   });
 

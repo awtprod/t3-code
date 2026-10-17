@@ -19,9 +19,6 @@ const legacyReaders = ["orchestration-v2/legacy/", "persistence/Migrations/"] as
 const legacyReaderFiles: Record<string, string> = {
   // Provider history for settings migration reads V1 thread sessions once at load.
   "serverSettings.ts": "one-time provider history for settings migration",
-  // V2PORT: code that still reads the frozen V1 read model; after the cutover these
-  // see only pre-cutover rows. Each entry leaves with its slice.
-  "persistence/Layers/ProjectionTurnUsage.ts": "V2PORT S3: usage rows joined to V1 turns",
 };
 const retiredPaths = [
   "orchestration",

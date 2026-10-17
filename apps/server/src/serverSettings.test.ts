@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import {
+  DatabaseConnectionId,
   DEFAULT_SERVER_SETTINGS,
   ModelSelection,
   ProjectId,
@@ -624,7 +625,11 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         });
         assert.deepStrictEqual(updated.usageLimitSources, saved.usageLimitSources);
         const persisted = yield* readPersisted;
-        assert.deepStrictEqual(persisted.usagePriceOverrides, { "example-model": prices });
+        // The Command Center seeds stay alongside the custom price.
+        assert.deepStrictEqual(persisted.usagePriceOverrides, {
+          ...DEFAULT_SERVER_SETTINGS.usagePriceOverrides,
+          "example-model": prices,
+        });
         assert.deepStrictEqual(persisted.usageModelAliases, usageModelAliases);
         assert.deepStrictEqual(persisted.usageLimitSources, usageLimitSources);
         assert.equal(persisted.storageCleanup.worktreeSettledAfterDays, 0);
@@ -632,7 +637,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
         yield* serverSettings.updateSettings({ usagePriceOverrides: { "example-model": null } });
         const restored = yield* readPersisted;
-        assert.deepStrictEqual(restored.usagePriceOverrides, {});
+        assert.deepStrictEqual(
+          restored.usagePriceOverrides,
+          DEFAULT_SERVER_SETTINGS.usagePriceOverrides,
+        );
       }),
     ).pipe(Effect.provide(layerServerSettings())),
   );
@@ -1083,6 +1091,27 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(persisted.providerInstances.codex, {
         driver: "codex",
         config: { binaryPath: "/opt/guard/bin/codex" },
+      });
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("keeps a legacy providers.codex.homePath for usage scanning after migration", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      // The fork's usage scan read this legacy home when no explicit default
+      // codex slot existed; the migration must carry it into that slot.
+      yield* fileSystem.writeFileString(
+        serverConfig.settingsPath,
+        JSON.stringify({ providers: { codex: { homePath: "/srv/acme/.codex-legacy" } } }),
+      );
+
+      const settings = yield* serverSettings.getSettings;
+
+      assert.deepEqual(settings.providerInstances[ProviderInstanceId.make("codex")], {
+        driver: ProviderDriverKind.make("codex"),
+        config: { homePath: "/srv/acme/.codex-legacy" },
       });
     }).pipe(Effect.provide(layerServerSettings())),
   );
@@ -1658,6 +1687,101 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         JSON.stringify(ServerSettingsModule.redactServerSettingsForClient(saved)),
         "legacy-api-key",
       );
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect(
+    "stores Supabase access tokens in the secret store, never settings.json, hidden from clients",
+    () =>
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const store = yield* ServerSecretStore.ServerSecretStore;
+        const projectId = ProjectId.make("project-database");
+        const connectionId = DatabaseConnectionId.make("conn-database");
+        const token = "sbp-acme-database-placeholder";
+        const connection = {
+          provider: "supabase" as const,
+          projectId,
+          workspaceRoot: "/work/project-database",
+          label: "prod",
+          isDefault: true,
+          projectRef: "abcdefghijk",
+          readOnly: true,
+        };
+
+        const next = yield* serverSettings.updateSettings({
+          databaseConnections: { [connectionId]: { ...connection, accessToken: token } },
+        });
+
+        // The server-side view resolves the token for the connector...
+        assert.equal(next.databaseConnections[connectionId]?.accessToken, token);
+        // ...the secret store holds it under the fork's stable key...
+        const stored = yield* store.get(
+          `database-supabase-${Buffer.from(connectionId, "utf8").toString("base64url")}`,
+        );
+        assert.isTrue(Option.isSome(stored));
+        assert.equal(new TextDecoder().decode(Option.getOrThrow(stored)), token);
+        // ...clients only ever see the redacted marker...
+        const client = ServerSettingsModule.redactServerSettingsForClient(next);
+        assert.equal(client.databaseConnections[connectionId]?.accessToken, "");
+        assert.isTrue(client.databaseConnections[connectionId]?.accessTokenRedacted);
+        assert.notInclude(JSON.stringify(client), token);
+        // ...and settings.json never contains it.
+        const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+        assert.notInclude(raw, token);
+        assert.deepInclude(JSON.parse(raw).databaseConnections[connectionId], {
+          projectId,
+          label: "prod",
+          projectRef: "abcdefghijk",
+          accessToken: "",
+          accessTokenRedacted: true,
+        });
+
+        // Echoing the redacted client value back keeps the stored token.
+        const roundTripped = yield* serverSettings.updateSettings({
+          databaseConnections: {
+            [connectionId]: {
+              ...connection,
+              readOnly: false,
+              accessToken: "",
+              accessTokenRedacted: true,
+            },
+          },
+        });
+        assert.equal(roundTripped.databaseConnections[connectionId]?.accessToken, token);
+        assert.isFalse(roundTripped.databaseConnections[connectionId]?.readOnly);
+        assert.notInclude(yield* fileSystem.readFileString(serverConfig.settingsPath), token);
+      }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+  );
+
+  it.effect("seeds usage price overrides and keeps a removed seed removed", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+
+      const initial = yield* serverSettings.getSettings;
+      assert.deepEqual(Object.keys(initial.usagePriceOverrides).toSorted(), [
+        "jev-latest",
+        "z-ai/glm-5.3-flash",
+      ]);
+      assert.equal(initial.usagePriceOverrides["jev-latest"]?.inputCostPerMillionTokens, 0.042);
+      assert.equal(initial.usagePriceOverrides["jev-latest"]?.outputCostPerMillionTokens, 0);
+      assert.deepEqual(initial.usagePriceOverrides["z-ai/glm-5.3-flash"], {
+        inputCostPerMillionTokens: 0.15,
+        outputCostPerMillionTokens: 0.5,
+        cacheReadCostPerMillionTokens: 0.03,
+        cacheWriteCostPerMillionTokens: 0.15,
+      });
+
+      yield* serverSettings.updateSettings({ usagePriceOverrides: { "jev-latest": null } });
+      const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      // Stored whole once edited, so the next load cannot bring the seed back.
+      const stored = decodeServerSettingsJson(raw);
+      const reloaded = yield* stored;
+      assert.deepEqual(Object.keys(reloaded.usagePriceOverrides), ["z-ai/glm-5.3-flash"]);
     }).pipe(Effect.provide(layerServerSettings())),
   );
 

@@ -499,6 +499,8 @@ const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set([
   "reviewGuideModelSelection",
   "textGenerationModelSelection",
   "pullRequestMergeMethod",
+  // Seeded with default prices: stored whole once edited, so removing a seed sticks.
+  "usagePriceOverrides",
 ]);
 
 function stripDefaultServerSettings(current: unknown, defaults: unknown): unknown | undefined {

@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
+  DatabaseConnectionId,
   EnvironmentId,
   type ModelSelection,
   type OrchestrationV2AppThread,
@@ -1979,6 +1980,135 @@ it.effect(
         ),
       );
     }),
+);
+
+function runDatabaseAccessScenario(input: {
+  readonly connections: Readonly<
+    Record<string, { readonly projectId: ProjectId; readonly readOnly: boolean }>
+  >;
+  readonly createThread?: boolean;
+}) {
+  return Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const mcpConfigs = yield* Ref.make<
+      ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+    >([]);
+    const projectId = ProjectId.make("project-provider-session-manager-database");
+    const threadId = ThreadId.make("thread-provider-session-manager-database");
+    const databaseConnections = Object.fromEntries(
+      Object.entries(input.connections).map(([id, connection]) => [
+        DatabaseConnectionId.make(id),
+        {
+          provider: "supabase" as const,
+          projectId: connection.projectId,
+          workspaceRoot: "/srv/acme/unrelated-workspace",
+          label: id,
+          isDefault: false,
+          projectRef: `acme${id}refabcdefgh`,
+          readOnly: connection.readOnly,
+          accessToken: "",
+        },
+      ]),
+    );
+    const layerProjectService = Layer.mock(ProjectService.ProjectService)({
+      getById: (requestedProjectId) =>
+        Effect.succeed(Option.some(makeBrowserAccessProject(requestedProjectId))),
+    });
+    return yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const registry = yield* McpSessionRegistry.McpSessionRegistry;
+      const now = yield* DateTime.now;
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      if (input.createThread !== false) {
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now, projectId })],
+        });
+      }
+      yield* manager
+        .open({ threadId, providerSessionId, modelSelection, runtimePolicy })
+        .pipe(Effect.ignore);
+      const captured = (yield* Ref.get(mcpConfigs))[0];
+      assert.isDefined(captured);
+      const resolved = yield* registry.resolve(
+        captured!.authorizationHeader.replace(/^Bearer\s+/, ""),
+      );
+      return { projectId, resolved };
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 1_000,
+          mcpConfigs,
+          projectServiceLayer: layerProjectService,
+          serverSettingsLayer: ServerSettings.layerTest({
+            enableAgentBrowserAccess: false,
+            databaseConnections,
+          }).pipe(Layer.orDie),
+        }),
+      ),
+    );
+  });
+}
+
+it.effect("ProviderSessionManagerV2 grants database write scoped to the thread's project", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project-provider-session-manager-database");
+    const { resolved } = yield* runDatabaseAccessScenario({
+      connections: {
+        staging: { projectId, readOnly: true },
+        prod: { projectId, readOnly: false },
+      },
+    });
+    assert.isDefined(resolved);
+    assert.isTrue(resolved!.capabilities.has("database.read"));
+    assert.isTrue(resolved!.capabilities.has("database.write"));
+    assert.equal(resolved!.projectId, projectId);
+    // No worktree: the credential is scoped to the project's workspace root.
+    assert.equal(resolved!.cwd, process.cwd());
+  }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 grants database read only when every connection is read-only",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project-provider-session-manager-database");
+      const { resolved } = yield* runDatabaseAccessScenario({
+        connections: { staging: { projectId, readOnly: true } },
+      });
+      assert.isTrue(resolved!.capabilities.has("database.read"));
+      assert.isFalse(resolved!.capabilities.has("database.write"));
+    }),
+);
+
+it.effect("ProviderSessionManagerV2 grants no database access to another project's thread", () =>
+  Effect.gen(function* () {
+    const { resolved } = yield* runDatabaseAccessScenario({
+      connections: {
+        other: { projectId: ProjectId.make("project-acme-other"), readOnly: false },
+      },
+    });
+    assert.isFalse(resolved!.capabilities.has("database.read"));
+    assert.isFalse(resolved!.capabilities.has("database.write"));
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 fails database access closed for a missing thread", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project-provider-session-manager-database");
+    const { resolved } = yield* runDatabaseAccessScenario({
+      connections: { prod: { projectId, readOnly: false } },
+      createThread: false,
+    });
+    assert.isFalse(resolved!.capabilities.has("database.read"));
+    assert.isFalse(resolved!.capabilities.has("database.write"));
+    assert.isUndefined(resolved!.projectId);
+  }),
 );
 
 it.effect("ProviderSessionManagerV2 honors a project browser-access opt-out", () =>

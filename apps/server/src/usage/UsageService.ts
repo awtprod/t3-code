@@ -191,8 +191,21 @@ export class UsageService extends Context.Service<
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
     /** Refetches the rate table ahead of its TTL. See `ensureRates`. */
     readonly refreshRates: Effect.Effect<UsagePricing>;
+    /**
+     * The rates every usage figure on this environment is priced with: the
+     * LiteLLM table (within its TTL), the `usagePriceOverrides` setting and
+     * the `usageModelAliases` setting. Shared so per-turn analytics price
+     * exactly like the transcript scan.
+     */
+    readonly readRateTables: Effect.Effect<UsageRateTables, UsageReadError>;
   }
 >()("@awtprod/command-center/usage/UsageService") {}
+
+export interface UsageRateTables {
+  readonly rates: RateTable;
+  readonly overrides: RateTable;
+  readonly aliases: ReadonlyMap<string, string>;
+}
 
 const EMPTY_PRICING: UsagePricing = {
   status: "unavailable",
@@ -218,6 +231,7 @@ const layerTest = Layer.succeed(
         scanDurationMs: 0,
       }),
     refreshRates: Effect.succeed(EMPTY_PRICING),
+    readRateTables: Effect.succeed({ rates: new Map(), overrides: new Map(), aliases: new Map() }),
   }),
 );
 
@@ -928,9 +942,19 @@ export const make = Effect.gen(function* () {
     return yield* Deferred.await(deferred);
   });
 
+  const readRateTables = Effect.gen(function* () {
+    const settings = yield* readSettings;
+    yield* ensureRates(false);
+    return {
+      rates,
+      overrides: createOverrideRateTable(settings.usagePriceOverrides),
+      aliases: resolveModelAliases(settings.usageModelAliases),
+    } satisfies UsageRateTables;
+  }).pipe(Effect.withSpan("UsageService.readRateTables"));
+
   // `awaitPersisted` is outside the service interface: tests use it to restart
   // against what a previous instance wrote.
-  return { readSummary, refreshRates, awaitPersisted } as const;
+  return { readSummary, refreshRates, readRateTables, awaitPersisted } as const;
 });
 
 export const layer = Layer.effect(UsageService, make);

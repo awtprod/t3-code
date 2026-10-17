@@ -181,7 +181,7 @@ export type ChatFileAttachment = typeof ChatFileAttachment.Type;
  * the path plus a pull hint and acts on the file where it lives (the Resolve
  * MCP opens it in place; `scp` copies it when a local copy is needed).
  */
-export const WINDOWS_FILE_ATTACHMENT_PATH_MAX_CHARS = 4096;
+const WINDOWS_FILE_ATTACHMENT_PATH_MAX_CHARS = 4096;
 export const ChatWindowsFileAttachment = Schema.Struct({
   type: Schema.Literal("windows-file"),
   id: ChatAttachmentId,
