@@ -21,7 +21,6 @@ const legacyReaderFiles: Record<string, string> = {
   "serverSettings.ts": "one-time provider history for settings migration",
   // V2PORT: code that still reads the frozen V1 read model; after the cutover these
   // see only pre-cutover rows. Each entry leaves with its slice.
-  "persistence/Layers/ProjectionTurnUsage.ts": "V2PORT S3: usage rows joined to V1 turns",
   "persistence/Layers/ProviderRestartRecovery.ts": "V2PORT S1: v1 restart recovery, no v2 caller",
   "persistence/Layers/ProviderTurnSendClaims.ts": "V2PORT S1: v1 send claims, no v2 caller",
 };

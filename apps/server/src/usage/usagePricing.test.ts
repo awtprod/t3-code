@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 
 import { cursorRateModel } from "@t3tools/provider-cursor/server/accountUsage";
 import type { UsageSpeed } from "@t3tools/provider-core/server/usage";
@@ -249,25 +250,28 @@ describe("usage pricing", () => {
     expect(lookupRate(table, "example-model")).toBeNull();
   });
 
-  it("prices a local-override model the LiteLLM table doesn't carry", () => {
-    const table = parseRateTable({});
-
-    const priced = lookupRate(table, "z-ai/glm-5.3-flash");
-    expect(priced?.inputCostPerToken).toBe(0.15 / 1_000_000);
-    expect(priced?.outputCostPerToken).toBe(0.5 / 1_000_000);
-    // Casing/whitespace still normalizes onto the override.
-    expect(lookupRate(table, " Z-AI/GLM-5.3-Flash ")?.inputCostPerToken).toBe(0.15 / 1_000_000);
-  });
-
-  it("lets a real LiteLLM entry win over the local override", () => {
-    const table = parseRateTable({ "z-ai/glm-5.3-flash": rate(9) });
-
-    expect(lookupRate(table, "z-ai/glm-5.3-flash")?.inputCostPerToken).toBe(9);
-  });
-
-  it("prices the TypeSafe judge model (jev-latest) with free output", () => {
-    const priced = lookupRate(parseRateTable({}), "jev-latest");
-    expect(priced?.inputCostPerToken).toBe(0.042 / 1_000_000);
-    expect(priced?.outputCostPerToken).toBe(0);
+  it("prices the seeded jev-latest and z-ai/glm-5.3-flash rates through the setting", () => {
+    const overrides = createOverrideRateTable(DEFAULT_SERVER_SETTINGS.usagePriceOverrides);
+    const totals = {
+      uncachedInputTokens: 1_000_000,
+      cachedInputTokens: 1_000_000,
+      cacheCreationTokens: 1_000_000,
+      outputTokens: 1_000_000,
+      reasoningTokens: 0,
+    };
+    const price = (model: string) =>
+      priceUsage(
+        parseRateTable({}),
+        { model, totals, speed: "standard", reportedCostUsd: null },
+        overrides,
+      );
+    // $0.042 per 1M input, cache read and cache write; output free.
+    expect(price("jev-latest").costUsd).toBeCloseTo(0.042 * 3, 10);
+    expect(price("jev-latest").costSource).toBe("modelPriced");
+    // $0.15 input + $0.03 cached + $0.15 cache write + $0.50 output per 1M.
+    expect(price("z-ai/glm-5.3-flash").costUsd).toBeCloseTo(0.15 + 0.03 + 0.15 + 0.5, 10);
+    // There is no second, built-in price path any more.
+    expect(lookupRate(parseRateTable({}), "jev-latest")).toBeNull();
+    expect(lookupRate(parseRateTable({}), "z-ai/glm-5.3-flash")).toBeNull();
   });
 });

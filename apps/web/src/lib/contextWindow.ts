@@ -56,6 +56,8 @@ export function deriveLatestContextWindowSnapshot(
     const remainingTokens =
       maxTokens !== null ? Math.max(0, Math.round(maxTokens - usedTokens)) : null;
     const remainingPercentage = usedPercentage !== null ? Math.max(0, 100 - usedPercentage) : null;
+    // Fork extension (Claude): cache writes, latest-request split, reported cost.
+    const extended = liveUsage.extended;
     return {
       usedTokens,
       totalProcessedTokens: null,
@@ -68,9 +70,17 @@ export function deriveLatestContextWindowSnapshot(
       outputTokens: liveUsage.outputTokens ?? null,
       reasoningOutputTokens: liveUsage.reasoningOutputTokens ?? null,
       lastUsedTokens: null,
-      lastInputTokens: null,
-      lastCachedInputTokens: null,
-      lastOutputTokens: null,
+      lastInputTokens: extended?.lastInputTokens ?? null,
+      lastCachedInputTokens: extended?.lastCachedInputTokens ?? null,
+      lastOutputTokens: extended?.lastOutputTokens ?? null,
+      ...(extended === undefined
+        ? {}
+        : {
+            cacheWriteInputTokens: extended.cacheWriteInputTokens ?? null,
+            lastCacheWriteInputTokens: extended.lastCacheWriteInputTokens ?? null,
+            costUsd: extended.costUsd ?? null,
+            costKind: extended.costKind ?? null,
+          }),
       lastReasoningOutputTokens: null,
       toolUses: null,
       durationMs: null,

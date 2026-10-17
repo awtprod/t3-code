@@ -86,6 +86,46 @@ describe("live provider-turn usage (#8144)", () => {
     expect(snapshot?.usedPercentage).toBe(21);
   });
 
+  it("carries the fork's extended Claude usage: cache writes, last request, reported cost", () => {
+    const snapshot = deriveLatestContextWindowSnapshot([], {
+      usedTokens: 42_000,
+      maxTokens: 200_000,
+      inputTokens: 40_000,
+      cachedInputTokens: 30_000,
+      outputTokens: 2_000,
+      updatedAt: "2026-08-27T00:00:00.000Z",
+      extended: {
+        cacheWriteInputTokens: 5_000,
+        lastInputTokens: 12_000,
+        lastCachedInputTokens: 9_000,
+        lastCacheWriteInputTokens: 1_000,
+        lastOutputTokens: 700,
+        costUsd: 0.1234,
+        costKind: "reported",
+      },
+    });
+    expect(snapshot).toMatchObject({
+      cacheWriteInputTokens: 5_000,
+      lastInputTokens: 12_000,
+      lastCachedInputTokens: 9_000,
+      lastCacheWriteInputTokens: 1_000,
+      lastOutputTokens: 700,
+      costUsd: 0.1234,
+      costKind: "reported",
+    });
+  });
+
+  it("adds nothing when the provider sends no extended usage", () => {
+    const snapshot = deriveLatestContextWindowSnapshot([], {
+      usedTokens: 42_000,
+      inputTokens: 40_000,
+      updatedAt: "2026-08-27T00:00:00.000Z",
+    });
+    expect(snapshot?.lastInputTokens).toBeNull();
+    expect(snapshot && "costUsd" in snapshot).toBe(false);
+    expect(snapshot && "cacheWriteInputTokens" in snapshot).toBe(false);
+  });
+
   it("handles a report without a known context window", () => {
     const snapshot = deriveLatestContextWindowSnapshot([], {
       usedTokens: 42_000,

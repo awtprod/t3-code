@@ -4,7 +4,8 @@ import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts"
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
-import { Tool } from "effect/ai";
+import * as Schema from "effect/Schema";
+import { McpSchema, Tool } from "effect/ai";
 
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
@@ -549,5 +550,123 @@ describe("Command Center MCP Item writes", () => {
       expect(user.outputs).toEqual([false]);
       expect(user.calls[0]?.actor).toBeUndefined();
     }),
+  );
+});
+
+const listScope = itemScope({
+  capabilities: new Set(["cc.items.read", "cc.runs.start"]),
+});
+
+/** Records as the Command Center service returns them: optional fields present as `undefined`. */
+const bootstrapWithUndefinedFields = {
+  spaces: [],
+  connections: [],
+  items: [
+    {
+      id: "item-1",
+      spaceId: "acme",
+      kind: "decision",
+      status: "review",
+      priority: "normal",
+      title: "Pick a vendor",
+      description: undefined,
+      dueAt: undefined,
+      artifactIds: [],
+      provenance: { kind: "agent", capturedAt: ITEM_UPDATED_AT },
+      metadata: {},
+      createdAt: ITEM_UPDATED_AT,
+      updatedAt: ITEM_UPDATED_AT,
+    },
+  ],
+  runs: [
+    {
+      id: "run-1",
+      spaceId: "acme",
+      kind: "agent",
+      status: "running",
+      commandId: undefined,
+      parentRunId: undefined,
+      automationId: undefined,
+      repositoryId: undefined,
+      projectId: undefined,
+      threadId: undefined,
+      providerId: undefined,
+      modelId: undefined,
+      artifactIds: [],
+      createdAt: ITEM_UPDATED_AT,
+      startedAt: undefined,
+      finishedAt: undefined,
+    },
+  ],
+  approvals: [],
+};
+
+const isJson = Schema.is(Schema.Json);
+
+const callListTool = (name: "cc_items_list" | "cc_runs_list") =>
+  Effect.gen(function* () {
+    const toolkit = yield* CommandCenterToolkit;
+    const stream = yield* toolkit.handle(name, {} as never);
+    return Array.from(yield* Stream.runCollect(stream));
+  }).pipe(
+    Effect.provide(
+      McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
+        Layer.provideMerge(
+          Layer.mergeAll(
+            Layer.succeed(McpInvocationContext.McpInvocationContext, listScope),
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: (id) => Effect.succeed(liveThreadShell(id)),
+            }),
+            Layer.mock(CommandCenterService.CommandCenterService)({
+              getConfiguredSpace: () =>
+                Effect.succeed({
+                  agent: { enabled: true },
+                  policy: { allowedCapabilities: ["cc.items.read", "cc.runs.start"] },
+                } as never),
+              bootstrap: Effect.succeed({
+                ...bootstrapWithUndefinedFields,
+                needsYou: bootstrapWithUndefinedFields.items,
+              } as never),
+            }),
+            Layer.mock(AutomationRuns.AutomationRuns)({}),
+            Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+            Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+            Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+            Layer.mock(SpaceActivity.SpaceActivity)({}),
+            Layer.succeed(
+              ReadinessGate.CommandCenterReadinessGate,
+              ReadinessGate.CommandCenterReadinessGate.of({
+                state: Effect.succeed("ready"),
+                requireReady: Effect.void,
+                markReady: Effect.void,
+                markFailed: Effect.void,
+              }),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+describe("Command Center MCP list results", () => {
+  it.effect.each(["cc_items_list", "cc_runs_list"] as const)(
+    "%s returns a result the MCP CallToolResult schema accepts",
+    (name) =>
+      Effect.gen(function* () {
+        const outputs = yield* callListTool(name);
+        expect(outputs.map((output) => output.isFailure)).toEqual([false]);
+        const structuredContent = outputs[0]!.encodedResult;
+        expect(isJson(structuredContent)).toBe(true);
+        // effect's MCP server builds exactly this; it throws on non-JSON content.
+        const result = new McpSchema.CallToolResult({
+          content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+          structuredContent: structuredContent as Schema.Json,
+        });
+        expect(result.structuredContent).toEqual(structuredContent);
+        const listed = structuredContent as Record<string, ReadonlyArray<Record<string, unknown>>>;
+        const record = name === "cc_items_list" ? listed.items![0]! : listed.runs![0]!;
+        expect(record.id).toBe(name === "cc_items_list" ? "item-1" : "run-1");
+        expect(Object.values(record)).not.toContain(undefined);
+      }),
   );
 });

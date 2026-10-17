@@ -28,6 +28,7 @@ import {
   OrchestrationV2CheckpointScope,
   OrchestrationV2Command,
   OrchestrationV2LimitRecoveryUpdate,
+  OrchestrationV2ProviderTurnTokenUsage,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
@@ -1566,5 +1567,36 @@ describe("latestProviderTurnForAttempt", () => {
     ];
     expect(latestProviderTurnForAttempt(turns, RunAttemptId.make("goal-attempt"))?.id).toBe("last");
     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
+  });
+});
+
+describe("provider turn token usage fork extension", () => {
+  const decode = Schema.decodeUnknownSync(OrchestrationV2ProviderTurnTokenUsage);
+  const base = { usedTokens: 10, updatedAt: "2026-10-16T00:00:00.000Z" };
+
+  it("keeps the appended extended usage and stays optional", () => {
+    expect(decode(base).extended).toBeUndefined();
+    expect(
+      decode({
+        ...base,
+        extended: {
+          cacheWriteInputTokens: 4,
+          lastOutputTokens: 2,
+          costUsd: 0.01,
+          costKind: "reported",
+        },
+      }).extended,
+    ).toEqual({
+      cacheWriteInputTokens: 4,
+      lastOutputTokens: 2,
+      costUsd: 0.01,
+      costKind: "reported",
+    });
+  });
+
+  it("rejects a negative or non-finite cost and unknown cost kinds", () => {
+    expect(() => decode({ ...base, extended: { costUsd: -1 } })).toThrow();
+    expect(() => decode({ ...base, extended: { costUsd: Number.POSITIVE_INFINITY } })).toThrow();
+    expect(() => decode({ ...base, extended: { costKind: "estimated" } })).toThrow();
   });
 });

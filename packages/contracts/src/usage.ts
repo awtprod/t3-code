@@ -416,18 +416,6 @@ export const UsageQueryResult = Schema.Struct({
 });
 export type UsageQueryResult = typeof UsageQueryResult.Type;
 
-export const UsagePricingOverride = Schema.Struct({
-  providerInstanceId: Schema.optional(ProviderInstanceId),
-  driver: Schema.optional(ProviderDriverKind),
-  model: TrimmedNonEmptyString,
-  effectiveAt: IsoDateTime,
-  uncachedInputMicroUsdPerMillion: NonNegativeInt,
-  cacheReadInputMicroUsdPerMillion: Schema.optional(NonNegativeInt),
-  cacheWriteInputMicroUsdPerMillion: Schema.optional(NonNegativeInt),
-  outputMicroUsdPerMillion: NonNegativeInt,
-});
-export type UsagePricingOverride = typeof UsagePricingOverride.Type;
-
 export class UsageQueryError extends Schema.TaggedError<UsageQueryError>()("UsageQueryError", {
   message: TrimmedNonEmptyString,
 }) {}

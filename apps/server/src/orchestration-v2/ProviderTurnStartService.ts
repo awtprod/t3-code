@@ -46,6 +46,11 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import { readWindowsMediaSettings } from "../command-center/WindowsMediaConfig.ts";
+import {
+  appendWindowsFileAttachmentLines,
+  withoutWindowsFileAttachments,
+} from "../windowsFileAttachmentPrompt.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -117,6 +122,8 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    // Windows file references name their scp pull command with this ssh config.
+    const windowsMediaSettings = yield* readWindowsMediaSettings;
 
     // These callbacks outlive startup while a run drains background work. Build
     // them outside start's scope so they cannot retain its full thread history.
@@ -953,10 +960,18 @@ export const layer: Layer.Layer<
       const routableSubagents = projection.subagents.filter((subagent) =>
         RunExecutionService.canRouteRelatedSubagent(subagent.status),
       );
-      const userText = projectComposerContextForProvider({
-        text: message.text,
-        records: message.context?.records ?? [],
+      const userText = appendWindowsFileAttachmentLines({
+        text: projectComposerContextForProvider({
+          text: message.text,
+          records: message.context?.records ?? [],
+        }),
+        attachments: message.attachments,
+        sshConfigPath: windowsMediaSettings.sshConfigPath,
       });
+      // A Windows file reference is fully described by its prompt line and has
+      // no local bytes; adapters only know stored images and files (Claude
+      // fails the turn on any other attachment), so it never reaches them.
+      const providerAttachments = withoutWindowsFileAttachments(message.attachments);
       // Delivered once: this run's provider turn marks the work as told. A
       // restart continuation is prompted by its own text or resumes natively.
       const noteContinuation = isRestartNoteContinuation(
@@ -1134,7 +1149,7 @@ export const layer: Layer.Layer<
                 modelContextWindow,
                 // The note is sent with the user text, so it spends the same allowance.
                 userText: restartNote === "" ? userText : `${restartNote}\n\n${userText}`,
-                attachments: message.attachments,
+                attachments: providerAttachments,
                 providerThread: budgetProviderThread,
                 nativeContextEstimate:
                   budgetProviderThread.contextUsage?.usedTokens === undefined
@@ -1268,7 +1283,7 @@ export const layer: Layer.Layer<
         message: {
           messageId: message.id,
           text: userText,
-          attachments: message.attachments,
+          attachments: providerAttachments,
           createdBy: message.createdBy,
           creationSource: message.creationSource,
           ...(message.scheduledTaskId === undefined

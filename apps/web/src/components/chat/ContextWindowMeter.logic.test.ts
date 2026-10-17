@@ -6,6 +6,7 @@ import {
   hasAvailableCompactionProvider,
   hasDismissedResumeCompaction,
   formatContextWindowCost,
+  formatContextWindowTurnCost,
   resolveContextWindowModelDisplayName,
   shouldOfferResumeCompaction,
   shouldReserveContextWindowMeter,
@@ -117,6 +118,13 @@ describe("resolveContextWindowModelDisplayName", () => {
         new Map(),
       ),
     ).toBe("custom-model");
+  });
+});
+
+describe("formatContextWindowTurnCost", () => {
+  it("labels a provider-reported cost and marks anything else as an estimate", () => {
+    expect(formatContextWindowTurnCost(0.12345, "reported")).toBe("$0.1235 reported");
+    expect(formatContextWindowTurnCost(0.5, null)).toBe("$0.5000 est.");
   });
 });
 

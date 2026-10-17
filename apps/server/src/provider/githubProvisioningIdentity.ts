@@ -39,7 +39,7 @@ import type {
 export const GITHUB_IDENTITY_VARIABLE = "COMMAND_CENTER_GITHUB_IDENTITY";
 export const GITHUB_PROVISIONING_IDENTITY_VARIABLE = "COMMAND_CENTER_GITHUB_PROVISIONING_IDENTITY";
 
-export function resolveProviderInstanceGitHubIdentity(
+function resolveProviderInstanceGitHubIdentity(
   instanceId: ProviderInstanceId,
   instance: ProviderInstanceConfig | undefined,
 ): string | undefined {
