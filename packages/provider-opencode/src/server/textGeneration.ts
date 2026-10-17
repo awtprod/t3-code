@@ -170,7 +170,8 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     }
 
     const fileParts = OpenCodeRuntime.toOpenCodeFileParts({
-      attachments: input.attachments?.filter((attachment) => attachment.type === "image"),
+      // Fork: generic files (PDFs, documents) reach the model too, not only images.
+      attachments: input.attachments,
       resolveAttachmentPath: host.resolveAttachmentPath,
     });
 
