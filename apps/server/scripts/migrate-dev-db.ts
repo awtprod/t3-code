@@ -289,9 +289,9 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
     WHERE m.type = 'table' AND c.name = 'thread_id'`;
   const threadIdNullable = new Map(threadColumns.map((row) => [row.name, row.notnull === 0]));
   // Command Center keeps FTS5 virtual tables (Memory search). Creating a virtual table
-  // creates its shadow tables too, so shadow tables are not created again; their rows
-  // are copied as-is (replacing the fresh index's initial rows) and the virtual table
-  // itself is not inserted into, which would index every row a second time.
+  // creates its shadow tables too, so shadow tables are neither created nor copied:
+  // newer node:sqlite opens databases in defensive mode, which refuses writes to them.
+  // Rows go through the virtual table instead (rowid kept), which rebuilds the index.
   const virtualTables = schema
     .filter((entry) => entry.type === "table" && /^CREATE VIRTUAL TABLE/i.test(entry.sql))
     .map((entry) => entry.name);
@@ -318,10 +318,14 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
           WHERE ${rootIsVisible(sql)}`;
       }
       for (const { name } of tables) {
-        if (CLEARED_TABLES.includes(name) || virtualTables.includes(name)) continue;
-        if (isShadowTable(name)) {
-          yield* sql.unsafe(`DELETE FROM main."${name}"`).unprepared;
-          yield* sql.unsafe(`INSERT INTO main."${name}" SELECT * FROM src."${name}"`).unprepared;
+        if (CLEARED_TABLES.includes(name) || isShadowTable(name)) continue;
+        if (virtualTables.includes(name)) {
+          const columns = yield* sql<{ name: string }>`
+            SELECT name FROM pragma_table_info(${name}, 'src')`;
+          const list = ["rowid", ...columns.map((column) => `"${column.name}"`)].join(", ");
+          yield* sql.unsafe(
+            `INSERT INTO main."${name}" (${list}) SELECT ${list} FROM src."${name}"`,
+          ).unprepared;
           continue;
         }
         const nullable = threadIdNullable.get(name);
