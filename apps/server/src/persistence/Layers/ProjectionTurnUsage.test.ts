@@ -226,4 +226,72 @@ it.layer(layer)("ProjectionTurnUsageRepository on orchestration v2", (it) => {
       assert.equal(tiered.summary.turnCount, 0);
     }),
   );
+
+  it.effect("fills the efficiency columns from routed runs' decisions and filters by tier", () =>
+    Effect.gen(function* () {
+      yield* runMigrations();
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProjectionTurnUsageRepository;
+      const usage = {
+        usageScope: "main_agent",
+        usageStatus: "complete",
+        inputTokens: 100,
+        outputTokens: 10,
+        hasSubagents: false,
+      };
+      for (const ordinal of [1, 2]) {
+        yield* seedTurn({
+          threadId: "thread-routed",
+          ordinal,
+          model: "acme-model-1",
+          instanceId: "codex-main",
+          startedAt: `2026-09-01T12:0${ordinal}:00.000Z`,
+          completedAt: `2026-09-01T12:0${ordinal}:30.000Z`,
+          turnTokenUsage: usage,
+        });
+      }
+      // Run 1 was auto-routed; run 2 ran as picked (no decision row).
+      yield* sql`
+        INSERT INTO efficiency_run_decisions (run_id, thread_id, message_id, decision_json, created_at)
+        VALUES (
+          'thread-routed:run-1', 'thread-routed', 'message-routed-1',
+          ${JSON.stringify({
+            tier: "quality",
+            modelSelection: { instanceId: "codex-main", model: "acme-model-1" },
+            matchedRuleId: "acme-rule",
+            source: "tier-policy",
+            workload: "interactive",
+            contextThresholdPercent: 90,
+            toolWarningThreshold: 24,
+            fallbackReason: "No healthy quality candidate is available",
+            experimentArm: "challenger",
+          })},
+          '2026-09-01T12:01:00.000Z'
+        )
+      `;
+      const window = { from: "2026-09-01T00:00:00.000Z", to: "2026-09-02T00:00:00.000Z" };
+      const all = yield* repository.query(window);
+      assert.equal(all.summary.turnCount, 2);
+      const byRun = new Map(all.turns.map((turn) => [turn.turnId, turn]));
+      const routed = byRun.get("thread-routed:provider-turn-1" as never);
+      assert.equal(routed?.tier, "quality");
+      assert.equal(routed?.efficiencySource, "tier-policy");
+      assert.equal(routed?.efficiencyRuleId, "acme-rule");
+      assert.equal(routed?.fallbackReason, "No healthy quality candidate is available");
+      assert.equal(routed?.experimentArm, "challenger");
+      const unrouted = byRun.get("thread-routed:provider-turn-2" as never);
+      assert.isNull(unrouted?.tier);
+      assert.isNull(unrouted?.efficiencySource);
+      assert.deepEqual(all.byTier.map((group) => [group.key, group.summary.turnCount]).toSorted(), [
+        ["Manual / unrouted", 1],
+        ["quality", 1],
+      ]);
+
+      const quality = yield* repository.query({ ...window, tier: "quality" });
+      assert.equal(quality.summary.turnCount, 1);
+      assert.equal(quality.turns[0]?.turnId, "thread-routed:provider-turn-1");
+      const economy = yield* repository.query({ ...window, tier: "economy" });
+      assert.equal(economy.summary.turnCount, 0);
+    }),
+  );
 });
