@@ -1053,6 +1053,21 @@ export const OrchestrationV2ContextHandoff = Schema.Struct({
 });
 export type OrchestrationV2ContextHandoff = typeof OrchestrationV2ContextHandoff.Type;
 
+/** Fork-only live usage details; see `OrchestrationV2ProviderTurnTokenUsage.extended`. */
+export const OrchestrationV2ProviderTurnTokenUsageExtended = Schema.Struct({
+  cacheWriteInputTokens: Schema.optional(NonNegativeInt),
+  lastInputTokens: Schema.optional(NonNegativeInt),
+  lastCachedInputTokens: Schema.optional(NonNegativeInt),
+  lastCacheWriteInputTokens: Schema.optional(NonNegativeInt),
+  lastOutputTokens: Schema.optional(NonNegativeInt),
+  costUsd: Schema.optional(
+    Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0)),
+  ),
+  costKind: Schema.optional(Schema.Literal("reported")),
+});
+export type OrchestrationV2ProviderTurnTokenUsageExtended =
+  typeof OrchestrationV2ProviderTurnTokenUsageExtended.Type;
+
 /** Live context usage reported by the provider mid-turn (#8144). */
 export const OrchestrationV2ProviderTurnTokenUsage = Schema.Struct({
   usedTokens: NonNegativeInt,
@@ -1066,6 +1081,13 @@ export const OrchestrationV2ProviderTurnTokenUsage = Schema.Struct({
   promptCacheTtlMs: Schema.optional(PositiveInt),
   /** ISO timestamp of the provider's report; string so wire encoding is stable. */
   updatedAt: Schema.String,
+  /**
+   * Command Center fork extension, kept as one appended field so the upstream
+   * struct diff stays a single insertion: cache writes, the latest request's
+   * token split and the provider-reported turn cost, for providers that
+   * report them (Claude). Absent everywhere else; clients render nothing then.
+   */
+  extended: Schema.optional(OrchestrationV2ProviderTurnTokenUsageExtended),
 });
 export type OrchestrationV2ProviderTurnTokenUsage =
   typeof OrchestrationV2ProviderTurnTokenUsage.Type;

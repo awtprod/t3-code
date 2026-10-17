@@ -147,3 +147,11 @@ export function formatContextWindowCost(cost: {
   const fractionDigits = Math.abs(cost.amount) > 0 && Math.abs(cost.amount) < 0.01 ? 4 : 2;
   return `${cost.currency} ${cost.amount.toFixed(fractionDigits)}`;
 }
+
+/** A provider-reported (or estimated) turn cost in USD, as the meter shows it. */
+export function formatContextWindowTurnCost(
+  costUsd: number,
+  costKind: "reported" | "estimated" | "api-equivalent-estimate" | null,
+): string {
+  return `$${costUsd.toFixed(4)}${costKind === "reported" ? " reported" : " est."}`;
+}

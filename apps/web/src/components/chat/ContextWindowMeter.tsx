@@ -4,6 +4,7 @@ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import {
   formatContextWindowCompactionMessage,
   formatContextWindowCost,
+  formatContextWindowTurnCost,
 } from "./ContextWindowMeter.logic";
 import { Minimize2Icon } from "lucide-react";
 import { composerFloatingLayerProps } from "./composerEventScope";
@@ -198,6 +199,14 @@ export function ContextWindowMeter(props: {
               <span className="text-secondary-label">Cost</span>
               <span className="font-medium tabular-nums text-secondary-label">
                 {formatContextWindowCost(usage.cost)}
+              </span>
+            </div>
+          ) : null}
+          {usage.costUsd != null ? (
+            <div className="flex items-center justify-between gap-3 text-2xs leading-4">
+              <span className="text-secondary-label">Turn cost</span>
+              <span className="font-medium tabular-nums text-secondary-label">
+                {formatContextWindowTurnCost(usage.costUsd, usage.costKind ?? null)}
               </span>
             </div>
           ) : null}
