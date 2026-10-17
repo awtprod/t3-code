@@ -1,8 +1,8 @@
 import {
   COMMAND_CENTER_EVENT_ACTIONS,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2Run,
   type OrchestrationV2ThreadShell,
-  type ProviderRuntimeEvent,
-  type ProviderSession,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -15,6 +15,7 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import { isCommandCenterThreadId } from "../provider/security/CommandCenterProviderIsolation.ts";
 import { makeCommandCenterAuditLog } from "./AuditLog.ts";
 import * as OrchestrationBridge from "./OrchestrationBridge.ts";
 
@@ -76,124 +77,37 @@ const nonEmptyMessage = (value: string | null | undefined, fallback: string): st
   return normalized && normalized.length > 0 ? normalized.slice(0, 4_000) : fallback;
 };
 
-const isCancellationReason = (reason: string | undefined): boolean =>
-  reason !== undefined &&
-  /\b(cancel(?:led|ed)?|interrupt(?:ed)?|stop(?:ped)? by user)\b/iu.test(reason);
-
-export interface ProviderEventTransition {
+export interface RunEventTransition {
   readonly status: "running" | TerminalRunStatus;
+  /** Set for failed runs: the failure text is read from the V2 projection. */
+  readonly needsFailureMessage?: true;
   readonly error?: string;
-  readonly failure?: {
-    readonly reason: string;
-    readonly message: string;
-    readonly retryable: boolean;
-  };
 }
 
-/** Maps only provider events that authoritatively change a Command Center Run lifecycle. */
-export const transitionForProviderEvent = (
-  event: ProviderRuntimeEvent,
-): ProviderEventTransition | undefined => {
-  switch (event.type) {
-    case "turn.started":
+/**
+ * Maps a V2 run status onto the Command Center Run lifecycle. Active states
+ * mean the Run is executing; terminal states end it. `queued` and `preparing`
+ * change nothing: the Run is already `running` once its thread is dispatched.
+ */
+export const transitionForRunStatus = (
+  status: OrchestrationV2Run["status"],
+): RunEventTransition | undefined => {
+  switch (status) {
+    case "starting":
+    case "running":
+    case "waiting":
       return { status: "running" };
-    case "turn.completed": {
-      switch (event.payload.state) {
-        case "completed":
-          return { status: "succeeded" };
-        case "interrupted":
-        case "cancelled":
-          return {
-            status: "canceled",
-            error: nonEmptyMessage(event.payload.stopReason, "The provider turn was canceled."),
-          };
-        case "failed": {
-          const message = nonEmptyMessage(
-            event.payload.errorMessage ?? event.payload.stopReason,
-            "The provider turn failed.",
-          );
-          return {
-            status: "failed",
-            error: message,
-            failure: {
-              reason: "provider-turn-failed",
-              message,
-              retryable: true,
-            },
-          };
-        }
-      }
-    }
-    case "turn.aborted":
-      return {
-        status: "canceled",
-        error: nonEmptyMessage(event.payload.reason, "The provider turn was aborted."),
-      };
-    case "runtime.error": {
-      const message = nonEmptyMessage(event.payload.message, "The provider runtime failed.");
-      return {
-        status: "failed",
-        error: message,
-        failure: {
-          reason: event.payload.class ?? "provider-runtime-error",
-          message,
-          retryable: event.payload.class !== "permission_error",
-        },
-      };
-    }
-    case "session.state.changed":
-      if (event.payload.state !== "error") return undefined;
-      return {
-        status: "failed",
-        error: nonEmptyMessage(
-          event.payload.reason,
-          "The provider session entered an error state.",
-        ),
-        failure: {
-          reason: "provider-session-error",
-          message: nonEmptyMessage(
-            event.payload.reason,
-            "The provider session entered an error state.",
-          ),
-          retryable: true,
-        },
-      };
-    case "thread.state.changed":
-      if (event.payload.state !== "error") return undefined;
-      return {
-        status: "failed",
-        error: "The provider thread entered an error state.",
-        failure: {
-          reason: "provider-thread-error",
-          message: "The provider thread entered an error state.",
-          retryable: true,
-        },
-      };
-    case "session.exited": {
-      if (event.payload.recoverable === true) return undefined;
-      if (isCancellationReason(event.payload.reason)) {
-        return {
-          status: "canceled",
-          error: nonEmptyMessage(event.payload.reason, "The provider session was stopped."),
-        };
-      }
-      const message = nonEmptyMessage(
-        event.payload.reason,
-        event.payload.exitKind === "error"
-          ? "The provider session exited with an error."
-          : "The provider session exited before the Run completed.",
-      );
-      return {
-        status: "failed",
-        error: message,
-        failure: {
-          reason: "provider-session-exited",
-          message,
-          retryable: true,
-        },
-      };
-    }
-    default:
+    case "completed":
+      return { status: "succeeded" };
+    case "interrupted":
+      return { status: "canceled", error: "The provider turn was interrupted." };
+    case "cancelled":
+      return { status: "canceled", error: "The provider turn was canceled." };
+    case "failed":
+    case "rolled_back":
+      return { status: "failed", needsFailureMessage: true };
+    case "queued":
+    case "preparing":
       return undefined;
   }
 };
@@ -386,11 +300,9 @@ export const makeRunLifecyclePersistence = Effect.gen(function* () {
 });
 
 export interface RunLifecycleShape {
-  readonly handleProviderEvent: (
-    event: ProviderRuntimeEvent,
-  ) => Effect.Effect<RunTransition | undefined, RunLifecycleError>;
-  readonly handleOrchestrationEvent: (
-    event: OrchestrationBridge.LegacyOrchestrationEvent,
+  /** Applies one V2 domain event; only `run.updated` on a `cc:` thread can change a Run. */
+  readonly handleThreadEvent: (
+    event: OrchestrationV2DomainEvent,
   ) => Effect.Effect<RunTransition | undefined, RunLifecycleError>;
   readonly reconcile: Effect.Effect<ReadonlyArray<RunTransition>, RunLifecycleError>;
   readonly failRun: (input: {
@@ -411,21 +323,13 @@ interface RuntimeDependencies {
   readonly getThread: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadShell | undefined, RunLifecycleError>;
-  readonly listProviderSessions: Effect.Effect<ReadonlyArray<ProviderSession>, RunLifecycleError>;
+  /** The recorded failure text of a V2 run, or undefined. */
+  readonly getRunFailureMessage: (input: {
+    readonly threadId: ThreadId;
+    readonly runId: string;
+  }) => Effect.Effect<string | undefined, RunLifecycleError>;
   readonly revokeThread: (threadId: ThreadId) => Effect.Effect<void>;
 }
-
-const isLiveProviderSession = (
-  sessions: ReadonlyArray<ProviderSession>,
-  threadId: string,
-): boolean =>
-  sessions.some(
-    (session) =>
-      session.threadId === threadId &&
-      (session.status === "connecting" ||
-        session.status === "ready" ||
-        session.status === "running"),
-  );
 
 /** The V1 latestTurn states, derived from a V2 shell's latest run status. */
 const latestRunOutcome = (
@@ -462,49 +366,46 @@ export const makeWithDependencies = (deps: RuntimeDependencies): RunLifecycleSha
     return transition;
   });
 
-  const handleProviderEvent = Effect.fn("RunLifecycle.handleProviderEvent")(function* (
-    event: ProviderRuntimeEvent,
+  const handleThreadEvent = Effect.fn("RunLifecycle.handleThreadEvent")(function* (
+    event: OrchestrationV2DomainEvent,
   ) {
-    const selected = transitionForProviderEvent(event);
-    if (selected === undefined) return undefined;
-    const transition = yield* deps.persistence.transition({
-      threadId: event.threadId,
-      sourceEventId: event.eventId,
-      status: selected.status,
-      actorKind: "agent",
-      occurredAt: event.createdAt,
-      ...(selected.error === undefined ? {} : { error: selected.error }),
-      ...(selected.failure === undefined ? {} : { failure: selected.failure }),
-    });
-    return yield* revokeTerminal(transition);
-  });
-
-  const handleOrchestrationEvent = Effect.fn("RunLifecycle.handleOrchestrationEvent")(function* (
-    event: OrchestrationBridge.LegacyOrchestrationEvent,
-  ) {
-    const sessionError = OrchestrationBridge.legacySessionErrorEvent(event);
-    if (sessionError === undefined) {
+    if (event.type !== "run.updated" || !isCommandCenterThreadId(event.threadId)) {
       return undefined;
     }
-    const message = nonEmptyMessage(
-      sessionError.payload.session.lastError,
-      "The provider session failed to start.",
+    const run = event.payload;
+    const selected = transitionForRunStatus(run.status);
+    if (selected === undefined) return undefined;
+    const occurredAt = DateTime.formatIso(event.occurredAt);
+    // One audit row per V2 run and outcome: repeated run.updated events with
+    // the same status (checkpoint, attempt bookkeeping) replay idempotently.
+    const sourceEventId = `v2-run:${run.id}`;
+    if (selected.status === "failed") {
+      const message = nonEmptyMessage(
+        yield* deps.getRunFailureMessage({ threadId: event.threadId, runId: run.id }),
+        "The provider turn failed.",
+      );
+      return yield* revokeTerminal(
+        yield* deps.persistence.transition({
+          threadId: event.threadId,
+          sourceEventId,
+          status: "failed",
+          actorKind: "agent",
+          occurredAt,
+          error: message,
+          failure: { reason: "provider-turn-failed", message, retryable: true },
+        }),
+      );
+    }
+    return yield* revokeTerminal(
+      yield* deps.persistence.transition({
+        threadId: event.threadId,
+        sourceEventId,
+        status: selected.status,
+        actorKind: "agent",
+        occurredAt,
+        ...(selected.error === undefined ? {} : { error: selected.error }),
+      }),
     );
-    const transition = yield* deps.persistence.transition({
-      threadId: sessionError.payload.threadId,
-      sourceEventId: sessionError.eventId,
-      status: "failed",
-      actorKind: "agent",
-      occurredAt: sessionError.occurredAt,
-      error: message,
-      failure: {
-        reason: "provider-session-error",
-        message,
-        retryable: true,
-      },
-      allowedPreviousStates: ["queued", "running"],
-    });
-    return yield* revokeTerminal(transition);
   });
 
   const failRun: RunLifecycleShape["failRun"] = Effect.fn("RunLifecycle.failRun")(
@@ -527,11 +428,14 @@ export const makeWithDependencies = (deps: RuntimeDependencies): RunLifecycleSha
     },
   );
 
+  /**
+   * Startup: settle Runs whose V2 run finished while the server was down, and
+   * fail Runs whose thread or V2 run never came to exist. A V2 run that is
+   * still active is left alone: V2's own restart recovery continues or ends it,
+   * and its terminal `run.updated` reaches `handleThreadEvent`.
+   */
   const reconcile: RunLifecycleShape["reconcile"] = Effect.gen(function* () {
-    const [runs, sessions] = yield* Effect.all(
-      [deps.persistence.listRunning, deps.listProviderSessions],
-      { concurrency: 2 },
-    );
+    const runs = yield* deps.persistence.listRunning;
     const reconciliationTime = DateTime.formatIso(yield* DateTime.now);
     const transitions: Array<RunTransition> = [];
     for (const run of runs) {
@@ -566,7 +470,7 @@ export const makeWithDependencies = (deps: RuntimeDependencies): RunLifecycleSha
           case "completed":
             transition = yield* deps.persistence.transition({
               runId: run.id,
-              sourceEventId: `${sourceEventId}:${latestRunId}:completed`,
+              sourceEventId: `v2-run:${latestRunId}`,
               status: "succeeded",
               actorKind: "system",
               occurredAt,
@@ -575,7 +479,7 @@ export const makeWithDependencies = (deps: RuntimeDependencies): RunLifecycleSha
           case "interrupted":
             transition = yield* deps.persistence.transition({
               runId: run.id,
-              sourceEventId: `${sourceEventId}:${latestRunId}:interrupted`,
+              sourceEventId: `v2-run:${latestRunId}`,
               status: "canceled",
               actorKind: "system",
               occurredAt,
@@ -584,12 +488,17 @@ export const makeWithDependencies = (deps: RuntimeDependencies): RunLifecycleSha
             break;
           case "error": {
             const message = nonEmptyMessage(
-              thread?.lastError,
+              latestRunId === undefined
+                ? thread?.lastError
+                : yield* deps.getRunFailureMessage({
+                    threadId: ThreadId.make(run.threadId),
+                    runId: latestRunId,
+                  }),
               "The provider turn failed before the server restarted.",
             );
             transition = yield* deps.persistence.transition({
               runId: run.id,
-              sourceEventId: `${sourceEventId}:${latestRunId}:error`,
+              sourceEventId: `v2-run:${latestRunId}`,
               status: "failed",
               actorKind: "system",
               occurredAt,
@@ -603,25 +512,27 @@ export const makeWithDependencies = (deps: RuntimeDependencies): RunLifecycleSha
             break;
           }
           case "running":
-          case undefined:
-            if (!isLiveProviderSession(sessions, run.threadId)) {
-              const message =
-                "The server restarted and no live provider session can continue this Run.";
-              transition = yield* deps.persistence.transition({
-                runId: run.id,
-                sourceEventId: `${sourceEventId}:${latestRunId ?? "no-turn"}:orphaned`,
-                status: "failed",
-                actorKind: "system",
-                occurredAt,
-                error: message,
-                failure: {
-                  reason: "restart-orphaned-run",
-                  message,
-                  retryable: true,
-                },
-              });
-            }
             break;
+          case undefined: {
+            const message =
+              thread === undefined
+                ? "The server restarted before this Run's thread was created."
+                : "The server restarted before this Run's thread started any work.";
+            transition = yield* deps.persistence.transition({
+              runId: run.id,
+              sourceEventId: `${sourceEventId}:no-run:orphaned`,
+              status: "failed",
+              actorKind: "system",
+              occurredAt,
+              error: message,
+              failure: {
+                reason: "restart-orphaned-run",
+                message,
+                retryable: true,
+              },
+            });
+            break;
+          }
         }
       }
       const revoked = yield* revokeTerminal(transition);
@@ -630,38 +541,37 @@ export const makeWithDependencies = (deps: RuntimeDependencies): RunLifecycleSha
     return transitions;
   });
 
-  return RunLifecycle.of({ handleProviderEvent, handleOrchestrationEvent, reconcile, failRun });
+  return RunLifecycle.of({ handleThreadEvent, reconcile, failRun });
 };
 
 const make = Effect.gen(function* () {
   const persistence = yield* makeRunLifecyclePersistence;
   const orchestration = yield* OrchestrationBridge.OrchestrationBridge;
+  const projectionError = (message: string) => (cause: unknown) =>
+    lifecycleError("projection", message, cause);
   const service = makeWithDependencies({
     persistence,
     getThread: (threadId) =>
-      orchestration.getThreadShellById(threadId).pipe(
-        Effect.map(Option.getOrUndefined),
-        Effect.mapError((cause) =>
-          lifecycleError("projection", "The linked provider thread could not be inspected.", cause),
+      orchestration
+        .getThreadShellById(threadId)
+        .pipe(
+          Effect.map(Option.getOrUndefined),
+          Effect.mapError(projectionError("The linked provider thread could not be inspected.")),
         ),
-      ),
-    // V2PORT: the live provider session list comes from the bridge, which
-    // fails with V2PortPending until S2 maps ProviderSessionManager sessions.
-    listProviderSessions: orchestration.listProviderSessions.pipe(
-      Effect.mapError((cause) =>
-        lifecycleError("projection", "Live provider sessions could not be listed.", cause),
-      ),
-    ),
+    getRunFailureMessage: (input) =>
+      orchestration
+        .getRunFailureMessage(input)
+        .pipe(Effect.mapError(projectionError("The run failure could not be read."))),
     revokeThread: McpSessionRegistry.revokeActiveMcpThread,
   });
 
-  // V2PORT: both streams fail with V2PortPending (logged once) until S2 feeds
-  // Run lifecycle from V2 run and provider events.
-  yield* Stream.runForEach(orchestration.streamProviderEvents, (event: ProviderRuntimeEvent) =>
-    service.handleProviderEvent(event).pipe(
+  // Subscribe before reconciling so a run that ends meanwhile is not missed;
+  // both paths settle a Run with the same compare-and-set and audit ids.
+  yield* Stream.runForEach(orchestration.streamThreadEvents, (event) =>
+    service.handleThreadEvent(event).pipe(
       Effect.catch((error) =>
-        Effect.logError("command-center.run-lifecycle.provider-event-failed", {
-          eventId: event.eventId,
+        Effect.logError("command-center.run-lifecycle.thread-event-failed", {
+          eventId: event.id,
           threadId: event.threadId,
           reason: error.reason,
         }),
@@ -669,25 +579,7 @@ const make = Effect.gen(function* () {
     ),
   ).pipe(
     Effect.catch((cause) =>
-      Effect.logError("command-center.run-lifecycle.provider-events-unavailable", {
-        message: cause.message,
-      }),
-    ),
-    Effect.forkScoped,
-  );
-
-  yield* Stream.runForEach(orchestration.streamDomainEvents, (event) =>
-    service.handleOrchestrationEvent(event).pipe(
-      Effect.catch((error) =>
-        Effect.logError("command-center.run-lifecycle.orchestration-event-failed", {
-          eventId: event.eventId,
-          reason: error.reason,
-        }),
-      ),
-    ),
-  ).pipe(
-    Effect.catch((cause) =>
-      Effect.logError("command-center.run-lifecycle.orchestration-events-unavailable", {
+      Effect.logError("command-center.run-lifecycle.thread-events-unavailable", {
         message: cause.message,
       }),
     ),

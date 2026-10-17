@@ -381,6 +381,30 @@ describe("CommandCenterHome projection", () => {
     expect(options.models.some((model) => model.id === "claude-opus")).toBe(false);
   });
 
+  it("ignores the retired commandCenterAutomation capability on non-Codex providers", () => {
+    const projects = projectEnvironmentProjects(PROJECTS, BOOTSTRAP);
+    // Older servers could still send the Kimi-era flag; it no longer opts a
+    // provider into Command Center routing, which needs Codex isolation.
+    const flagged = {
+      ...PROVIDERS[0],
+      instanceId: "acme-agent",
+      driver: "acmeAgent",
+      displayName: "Acme Agent",
+      capabilities: {
+        cacheTelemetry: "none",
+        nativeSubagents: false,
+        usageTelemetry: false,
+        commandCenterAutomation: true,
+      },
+      models: [{ ...PROVIDERS[0]!.models[0], slug: "acme-model", name: "Acme Model" }],
+    } as unknown as ServerProvider;
+
+    const options = buildRouteOptions(BOOTSTRAP, projects, [flagged, ...PROVIDERS]);
+
+    expect(options.providers.some((provider) => provider.id === "acme-agent")).toBe(false);
+    expect(options.models.some((model) => model.id === "acme-model")).toBe(false);
+  });
+
   it("shows an unhealthy Codex model but does not select it by default", () => {
     const projects = projectEnvironmentProjects(PROJECTS, BOOTSTRAP);
     const unavailable = {

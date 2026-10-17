@@ -21,7 +21,10 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import type * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
-import type { LegacyOrchestrationCommand as ClientOrchestrationCommand } from "./OrchestrationBridge.ts";
+import {
+  CommandCenterIsolationUnavailable,
+  type CommandCenterOrchestrationCommand as ClientOrchestrationCommand,
+} from "./OrchestrationBridge.ts";
 import {
   type DispatcherDependencies,
   RunDispatcherError,
@@ -157,6 +160,7 @@ function makeFixture(
   route = readyRoute,
   options: {
     readonly resolveTargetProject?: DispatcherDependencies["resolveTargetProject"];
+    readonly admitThread?: DispatcherDependencies["admitThread"];
     readonly space?: StoredSpace;
     readonly executionAuthorized?: boolean;
     readonly parentRunId?: string;
@@ -262,6 +266,7 @@ function makeFixture(
       Effect.sync(() => {
         unregisteredThread = threadId;
       }),
+    admitThread: options.admitThread ?? (() => Effect.void),
   };
 
   return {
@@ -307,7 +312,7 @@ function makeFixture(
   };
 }
 
-/** The fields these tests read from the V1-shaped `thread.turn.start` the dispatcher builds. */
+/** The fields these tests read from the `thread.turn.start` the dispatcher builds. */
 interface LegacyTurnStartView {
   readonly type: "thread.turn.start";
   readonly runtimeMode?: string;
@@ -465,6 +470,71 @@ it.effect("persists dispatch failure and revokes the linked thread scope", () =>
     expect(state.storedRun.state).toBe("failed");
     expect(state.failedError?.reason).toBe("dispatch-failed");
     expect(state.unregisteredThread).toBe(ThreadId.make("cc:interactive:thread-example"));
+  }),
+);
+
+it.effect(
+  "fails a Run refused by the isolation gate before claiming or provisioning anything",
+  () =>
+    Effect.gen(function* () {
+      let resolvedProjects = 0;
+      const admitted: Array<{ readonly threadId: string; readonly runtimeMode: string }> = [];
+      const fixture = makeFixture(readyRoute, {
+        resolveTargetProject: () =>
+          Effect.sync(() => {
+            resolvedProjects += 1;
+            return targetProject;
+          }),
+        admitThread: (input) =>
+          Effect.gen(function* () {
+            admitted.push({ threadId: input.threadId, runtimeMode: input.runtimeMode });
+            return yield* new CommandCenterIsolationUnavailable({
+              threadId: input.threadId,
+              providerInstanceId: String(input.modelSelection.instanceId),
+              reason: "Example isolation refusal.",
+            });
+          }),
+      });
+      const failure = yield* Effect.flip(
+        fixture.dispatcher.dispatch({ runId, dispatchCommand: fixture.dispatch() }),
+      );
+      const state = fixture.read();
+
+      expect(failure.reason).toBe("isolation-unavailable");
+      expect(failure.message).toBe("Example isolation refusal.");
+      expect(admitted).toEqual([
+        { threadId: "cc:interactive:thread-example", runtimeMode: "auto-accept-edits" },
+      ]);
+      // Terminal from `queued`: no project, clone, scope or thread was created.
+      expect(state.storedRun.state).toBe("failed");
+      expect(state.storedRun.threadId).toBeNull();
+      expect(state.failedError?.reason).toBe("isolation-unavailable");
+      expect(state.failedError?.message).toBe("Example isolation refusal.");
+      expect(resolvedProjects).toBe(0);
+      expect(state.dispatchCount).toBe(0);
+      expect(state.registeredThread).toBeUndefined();
+    }),
+);
+
+it.effect("keeps the gate's reason when the bridge refuses the launch itself", () =>
+  Effect.gen(function* () {
+    const fixture = makeFixture();
+    const failure = yield* Effect.flip(
+      fixture.dispatcher.dispatch({
+        runId,
+        dispatchCommand: (command) =>
+          Effect.fail(
+            new CommandCenterIsolationUnavailable({
+              threadId: command.type === "thread.turn.start" ? command.threadId : "",
+              providerInstanceId: "codex",
+              reason: "Example launch refusal.",
+            }),
+          ),
+      }),
+    );
+    expect(failure.reason).toBe("isolation-unavailable");
+    expect(fixture.read().failedError?.message).toBe("Example launch refusal.");
+    expect(fixture.read().unregisteredThread).toBe(ThreadId.make("cc:interactive:thread-example"));
   }),
 );
 

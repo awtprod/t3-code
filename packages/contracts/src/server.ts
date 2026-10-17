@@ -269,7 +269,6 @@ export const ServerProvider = Schema.Struct({
       cacheTelemetry: CacheTelemetryCapability,
       nativeSubagents: Schema.Boolean,
       usageTelemetry: Schema.Boolean,
-      commandCenterAutomation: Schema.optional(Schema.Boolean),
     }),
   ),
   supportsConversationRollback: Schema.optional(Schema.Boolean),

@@ -38,6 +38,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import type * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -69,11 +70,13 @@ import * as ReadinessGate from "./ReadinessGate.ts";
 import { commandCenterProviderAvailability } from "./ProviderAvailability.ts";
 import { commandCenterRpcRequiresReadiness } from "./RpcAuthorization.ts";
 import * as OrchestrationBridge from "./OrchestrationBridge.ts";
+import { streamThreadPlanProgress } from "./ThreadPlanProgress.ts";
 
 export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.AuthenticatedSession) =>
   WsCommandCenterRpcGroup.toLayer(
     Effect.gen(function* () {
       const orchestrationBridge = yield* OrchestrationBridge.OrchestrationBridge;
+      const sql = yield* SqlClient.SqlClient;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const currentSessionId = currentSession.sessionId;
       const commandCenter = yield* CommandCenterService.CommandCenterService;
@@ -394,9 +397,6 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
       const dispatchCommandCenterRun = (runId: CommandCenterRunId) =>
         RunDispatcher.dispatchActiveRun({
           runId,
-          // V2PORT: Command Center run dispatch still emits V1 orchestration
-          // commands; the bridge fails them with V2PortPending until S2 maps
-          // runs onto OrchestratorV2.
           dispatchCommand: orchestrationBridge.dispatchCommand,
         }).pipe(
           Effect.mapError(
@@ -487,6 +487,15 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
                 maxLimit: COMMAND_CENTER_SPACE_AGENT_ACTIVITY_MAX_LIMIT,
               }),
             ).pipe(Effect.map((entries) => ({ spaceId: input.spaceId, entries }))),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.threadPlanProgressSubscribe]: (input) =>
+          observeRpcStream(
+            COMMAND_CENTER_WS_METHODS.threadPlanProgressSubscribe,
+            streamThreadPlanProgress({
+              threadIds: input.threadIds,
+              events: orchestrationBridge.streamThreadEvents,
+            }).pipe(Stream.provideService(SqlClient.SqlClient, sql)),
             { "rpc.aggregate": "command-center" },
           ),
         [COMMAND_CENTER_WS_METHODS.eventsReplay]: (input) =>
