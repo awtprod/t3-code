@@ -1720,6 +1720,35 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
   );
 
+  it.effect("seeds usage price overrides and keeps a removed seed removed", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+
+      const initial = yield* serverSettings.getSettings;
+      assert.deepEqual(Object.keys(initial.usagePriceOverrides).toSorted(), [
+        "jev-latest",
+        "z-ai/glm-5.3-flash",
+      ]);
+      assert.equal(initial.usagePriceOverrides["jev-latest"]?.inputCostPerMillionTokens, 0.042);
+      assert.equal(initial.usagePriceOverrides["jev-latest"]?.outputCostPerMillionTokens, 0);
+      assert.deepEqual(initial.usagePriceOverrides["z-ai/glm-5.3-flash"], {
+        inputCostPerMillionTokens: 0.15,
+        outputCostPerMillionTokens: 0.5,
+        cacheReadCostPerMillionTokens: 0.03,
+        cacheWriteCostPerMillionTokens: 0.15,
+      });
+
+      yield* serverSettings.updateSettings({ usagePriceOverrides: { "jev-latest": null } });
+      const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      // Stored whole once edited, so the next load cannot bring the seed back.
+      const stored = decodeServerSettingsJson(raw);
+      const reloaded = yield* stored;
+      assert.deepEqual(Object.keys(reloaded.usagePriceOverrides), ["z-ai/glm-5.3-flash"]);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("stores sensitive provider instance environment values outside settings.json", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;

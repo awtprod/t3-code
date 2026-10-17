@@ -32,7 +32,6 @@ import {
 import { ModelSelection } from "./modelSelection.ts";
 import { ProjectScript, type ProjectMutation } from "./project.ts";
 import { DEFAULT_RUNTIME_MODE, RuntimeMode } from "./providerPolicy.ts";
-import { UsagePricingOverride } from "./usage.ts";
 import { EfficiencySettings } from "./efficiency.ts";
 import { BrowserProfile, BrowserProfileId, DEFAULT_BROWSER_PROFILE_ID } from "./browserProfile.ts";
 import {
@@ -557,6 +556,33 @@ export const UsageModelPriceOverride = Schema.Struct({
   cacheWriteCostPerMillionTokens: Schema.optionalKey(UsageModelTokenPrice),
 });
 export type UsageModelPriceOverride = typeof UsageModelPriceOverride.Type;
+
+/**
+ * Prices the usage screens need that LiteLLM does not carry, seeded into the
+ * `usagePriceOverrides` setting (USD per million tokens). The setting is the
+ * one price mechanism: a user can edit or remove these like any override.
+ * - `jev-latest`: TypeSafe System One judge model, $0.042 / 1M input, output
+ *   free (early-access list price, https://docs.typesafe.ai/models).
+ * - `z-ai/glm-5.3-flash`: OpenCode GLM passthrough, Z.ai list price $0.15 / 1M
+ *   input, $0.50 / 1M output, $0.03 / 1M cached input; no separate cache-write
+ *   price is published, so cache writes cost plain input.
+ */
+export const DEFAULT_USAGE_PRICE_OVERRIDES: Readonly<
+  Record<string, typeof UsageModelPriceOverride.Type>
+> = {
+  "jev-latest": {
+    inputCostPerMillionTokens: 0.042,
+    outputCostPerMillionTokens: 0,
+    cacheReadCostPerMillionTokens: 0.042,
+    cacheWriteCostPerMillionTokens: 0.042,
+  },
+  "z-ai/glm-5.3-flash": {
+    inputCostPerMillionTokens: 0.15,
+    outputCostPerMillionTokens: 0.5,
+    cacheReadCostPerMillionTokens: 0.03,
+    cacheWriteCostPerMillionTokens: 0.15,
+  },
+};
 
 /** A binary path setting that decodes empty input to the provider's default executable. */
 export const makeBinaryPathSetting = (fallback: string) =>
@@ -1450,9 +1476,6 @@ export const ServerSettings = Schema.Struct({
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // Command Center token-efficiency routing. Defaults keep routing off.
   efficiency: EfficiencySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
-  usagePricingOverrides: Schema.Array(UsagePricingOverride).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-  ),
   // Days a managed worktree may sit idle (no thread activity, no running
   // terminal) before its build artifacts are pruned and, after a further
   // fixed minimum, the worktree itself is removed — only when it has no
@@ -1473,9 +1496,12 @@ export const ServerSettings = Schema.Struct({
   cursorKeychainUsageEnabled: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
-  /** Exact model IDs, applied to past and future usage on this environment. */
+  /**
+   * Exact model IDs, applied to past and future usage on this environment.
+   * Starts with the Command Center seeds; editing the map replaces it whole.
+   */
   usagePriceOverrides: Schema.Record(TrimmedNonEmptyString, UsageModelPriceOverride).pipe(
-    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_USAGE_PRICE_OVERRIDES)),
   ),
   /**
    * Exact model ID to the model its usage counts as, such as a preview slug to
@@ -1780,7 +1806,6 @@ export const ServerSettingsPatch = Schema.Struct({
   // Database bindings are also replaced as a whole. Credentials in redacted
   // entries are materialized and persisted by the server settings service.
   databaseConnections: Schema.optionalKey(DatabaseConnections),
-  usagePricingOverrides: Schema.optionalKey(Schema.Array(UsagePricingOverride)),
   worktreeCleanupAfterDays: Schema.optionalKey(Schema.NullOr(PositiveInt)),
   // Per-entry, unlike `providerInstances`: a client only ever adds or removes
   // one source, and sending the whole map races another edit that has not
