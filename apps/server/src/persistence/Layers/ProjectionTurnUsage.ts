@@ -300,7 +300,7 @@ function nonNegative(value: number): number {
 }
 
 /** v2 counts input including cache reads and writes; analytics splits it. */
-export function turnUsageTokens(usage: TurnTokenUsage): TurnUsageTokens {
+function turnUsageTokens(usage: TurnTokenUsage): TurnUsageTokens {
   const cacheRead = usage.cachedInputTokens ?? null;
   const cacheWrite = usage.cacheCreationTokens ?? null;
   return {
