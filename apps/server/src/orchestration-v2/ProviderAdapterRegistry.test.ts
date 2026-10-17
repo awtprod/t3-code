@@ -441,6 +441,9 @@ describe("Command Center admission gate", () => {
           startTurn: (input: { readonly threadId: ThreadId }) => record("start", input.threadId),
           forkThread: (input: { readonly targetThreadId: ThreadId }) =>
             record("fork", input.targetThreadId),
+          steerTurn: (input: { readonly threadId: ThreadId }) => record("steer", input.threadId),
+          compactThread: (input: { readonly threadId: ThreadId }) =>
+            record("compact", input.threadId),
         } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime),
     } as unknown as ProviderAdapter.ProviderAdapterV2["Service"];
   };
@@ -467,6 +470,23 @@ describe("Command Center admission gate", () => {
         runId: `run:${threadId}`,
         providerThread: providerThread(threadId),
       } as unknown as ProviderAdapter.ProviderAdapterV2TurnInput),
+    steer: (runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime, threadId: string) =>
+      runtime.steerTurn({
+        threadId: ThreadId.make(threadId),
+        runId: `run:${threadId}`,
+        providerTurnId: `provider-turn:${threadId}`,
+        providerThread: providerThread(threadId),
+      } as unknown as ProviderAdapter.ProviderAdapterV2SteerInput),
+    compact: (runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime, threadId: string) =>
+      (
+        runtime.compactThread as NonNullable<
+          ProviderAdapter.ProviderAdapterV2SessionRuntime["compactThread"]
+        >
+      )({
+        threadId: ThreadId.make(threadId),
+        runId: `run:${threadId}`,
+        providerThread: providerThread(threadId),
+      } as unknown as ProviderAdapter.ProviderAdapterV2TurnInput),
     fork: (runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime, threadId: string) =>
       runtime.forkThread({
         targetThreadId: ThreadId.make(threadId),
@@ -478,6 +498,8 @@ describe("Command Center admission gate", () => {
     resume: "ProviderAdapterResumeThreadError",
     start: "ProviderAdapterTurnStartError",
     fork: "ProviderAdapterForkThreadError",
+    steer: "ProviderAdapterSteerRunError",
+    compact: "ProviderAdapterTurnStartError",
   } as const;
   const cases = [
     { owner: "cc:interactive:acme", other: "thread-acme" },
@@ -487,26 +509,33 @@ describe("Command Center admission gate", () => {
     { owner: "cc:interactive:acme", other: "cc:interactive:acme-other" },
   ] as const;
 
-  for (const { owner, other } of cases) {
-    for (const operation of ["ensure", "resume", "start", "fork"] as const) {
-      it.effect(`refuses ${operation} for ${other} in a session ${owner} opened`, () => {
-        const calls: Array<string> = [];
-        return Effect.scoped(
-          Effect.gen(function* () {
-            const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
-            const adapter = yield* registry.get(personalId);
-            const session = yield* adapter.openSession(openInput(owner, "approval-required"));
-            const refused = yield* operations[operation](session, other).pipe(Effect.flip);
-            assert.strictEqual(refused._tag, expectedTag[operation]);
-            assert.isTrue(isAdmissionError("cause" in refused ? refused.cause : undefined));
-            // The opening thread itself is served, and the refusal never reached the adapter.
-            yield* operations[operation](session, owner);
-            assert.deepEqual(calls, [`${operation}:${owner}`]);
-          }),
-        ).pipe(Effect.provide(fromAdapters([sessionAdapter(calls)])));
-      });
-    }
-  }
+  const refusalCases = cases.flatMap(({ owner, other }) =>
+    (["ensure", "resume", "start", "fork", "steer", "compact"] as const).map((operation) => ({
+      owner,
+      other,
+      operation,
+    })),
+  );
+
+  it.effect.each(refusalCases)(
+    "refuses $operation for $other in a session $owner opened",
+    ({ owner, other, operation }) => {
+      const calls: Array<string> = [];
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+          const adapter = yield* registry.get(personalId);
+          const session = yield* adapter.openSession(openInput(owner, "approval-required"));
+          const refused = yield* operations[operation](session, other).pipe(Effect.flip);
+          assert.strictEqual(refused._tag, expectedTag[operation]);
+          assert.isTrue(isAdmissionError("cause" in refused ? refused.cause : undefined));
+          // The opening thread itself is served, and the refusal never reached the adapter.
+          yield* operations[operation](session, owner);
+          assert.deepEqual(calls, [`${operation}:${owner}`]);
+        }),
+      ).pipe(Effect.provide(fromAdapters([sessionAdapter(calls)])));
+    },
+  );
 
   it.effect("lets ordinary threads, the Space agent included, share an ordinary session", () => {
     const calls: Array<string> = [];
@@ -515,10 +544,17 @@ describe("Command Center admission gate", () => {
         const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
         const adapter = yield* registry.get(personalId);
         const session = yield* adapter.openSession(openInput("thread-acme", "approval-required"));
-        for (const operation of ["ensure", "resume", "start", "fork"] as const) {
+        for (const operation of [
+          "ensure",
+          "resume",
+          "start",
+          "fork",
+          "steer",
+          "compact",
+        ] as const) {
           yield* operations[operation](session, "cc-space-agent-acme-lab");
         }
-        assert.lengthOf(calls, 4);
+        assert.lengthOf(calls, 6);
       }),
     ).pipe(Effect.provide(fromAdapters([sessionAdapter(calls)])));
   });
