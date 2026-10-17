@@ -230,7 +230,7 @@ function latestRun(runs: ReadonlyArray<OrchestrationV2Run>): OrchestrationV2Run 
 }
 
 /** The run a dispatch or launch created for `messageId`. */
-export function runIdForMessage(
+function runIdForMessage(
   storedEvents: OrchestratorV2DispatchResult["storedEvents"],
   messageId: MessageId,
 ): OrchestrationV2Run["id"] | undefined {

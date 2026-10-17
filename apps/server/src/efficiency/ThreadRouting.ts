@@ -35,7 +35,7 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 /** Newest delegations exposed on a parent's routing state. */
-export const ROUTING_STATE_DELEGATION_LIMIT = 20;
+const ROUTING_STATE_DELEGATION_LIMIT = 20;
 
 const decodeDecisionJson = Schema.decodeUnknownOption(Schema.fromJsonString(EfficiencyDecision));
 const encodeDecisionJson = Schema.encodeSync(Schema.fromJsonString(EfficiencyDecision));
