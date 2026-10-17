@@ -250,6 +250,43 @@ it.effect("records one actionable failure and one urgent Needs You alert under r
   }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect.each(["cancelled", "interrupted"] as const)(
+  "terminalizes a %s V2 run as canceled without a failure or Needs You alert",
+  (status) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const events = yield* CommandCenterEventStream;
+      const persistence = yield* makeRunLifecyclePersistence;
+      const threadId = `cc:automation:thread-${status}`;
+      yield* insertRun(sql, { id: `run-${status}`, threadId });
+      const revoked: Array<string> = [];
+      const lifecycle = lifecycleFor(persistence, {
+        revoked,
+        // A failure message must not be consulted or recorded for a cancellation.
+        failures: new Map([[`v2-run-${status}`, "Example failure that must not be used"]]),
+      });
+
+      const transition = yield* lifecycle.handleThreadEvent(
+        runUpdated({ eventId: `v2-${status}`, threadId, runId: `v2-run-${status}`, status }),
+      );
+
+      const runRows = yield* sql<{ readonly state: string; readonly error: string | null }>`
+        SELECT state, error FROM command_center_runs WHERE id = ${`run-${status}`}
+      `;
+      const itemRows = yield* sql<{ readonly id: string }>`
+        SELECT id FROM command_center_items
+      `;
+      expect(transition?.status).toBe("canceled");
+      expect(runRows[0]?.state).toBe("canceled");
+      expect(runRows[0]?.error).not.toBe("Example failure that must not be used");
+      expect(itemRows).toEqual([]);
+      expect(revoked).toEqual([threadId]);
+      const replay = yield* events.replay({ afterSequence: 0, limit: 20 });
+      expect(replay.events.map((event) => event._tag)).toEqual(["RunStateChanged"]);
+      expect(replay.events[0]).toMatchObject({ payload: { status: "canceled" } });
+    }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("ignores V2 events outside Command Center Run threads", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
