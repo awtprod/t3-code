@@ -2716,6 +2716,8 @@ const makeWsRpcLayer = (
                 spaceId: input.spaceId,
                 ...(input.limit === undefined ? {} : { limit: input.limit }),
                 maxLimit: COMMAND_CENTER_SPACE_AGENT_ACTIVITY_MAX_LIMIT,
+                // The owner's view of what wakes the agent, mail and calendar included.
+                includeExternal: true,
               }),
             ).pipe(Effect.map((entries) => ({ spaceId: input.spaceId, entries }))),
             { "rpc.aggregate": "command-center" },

@@ -346,7 +346,7 @@ export const make = Effect.gen(function* () {
             event.kind === "ended"
               ? `${event.summary} (outcome: ${event.outcome})`
               : `The call did not connect (${event.failureReason}).`,
-          eventSequence: 0,
+          eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
           url: elevenLabsConversationUrl(event.conversationId),
         });
         if (!inserted) return { status: 200 as const, duplicate: true };

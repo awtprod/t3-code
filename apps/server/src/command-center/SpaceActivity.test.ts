@@ -11,6 +11,7 @@ import {
   findPullRequestUrl,
   layer as spaceActivityLayer,
   resolveSpaceIdsForProject,
+  SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
   SPACE_ACTIVITY_RETENTION,
   SpaceActivity,
 } from "./SpaceActivity.ts";
@@ -173,7 +174,7 @@ it.layer(testLayer)("SpaceActivity service", (it) => {
       const activity = yield* SpaceActivity;
       expect(
         yield* activity.record({
-          ...row({ sequence: 0 }),
+          ...row({ sequence: SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE }),
           spaceId: "phones",
           sourceKind: "run",
           sourceId: "phone-start:conv_1",
@@ -181,12 +182,97 @@ it.layer(testLayer)("SpaceActivity service", (it) => {
         }),
       ).toBe(true);
       expect(yield* activity.latestEventSequence("run")).toBeUndefined();
-      const [entry] = yield* activity.recent({ spaceId: "phones" });
+      const [entry] = yield* activity.recent({ spaceId: "phones", includeExternal: true });
       expect(entry?.url).toBe("https://api.elevenlabs.io/v1/convai/conversations/conv_1");
+      // No run row with a real sequence here: the layer's database is shared, and
+      // the next test owns "a real run row moves the cursor".
+    }),
+  );
+
+  it.effect("keeps a source-supplied link and leaves external rows out of the cursors", () =>
+    Effect.gen(function* () {
+      yield* insertSpace("personal");
+      const activity = yield* SpaceActivity;
+      const external = {
+        spaceId: "personal",
+        occurredAt: NOW,
+        sourceKind: "run" as const,
+        sourceId: "gmail:thread-1:1",
+        projectId: null,
+        title: "Mail: Contract draft",
+        status: "new",
+        text: "from Pat Example <pat@example.com> https://github.com/acme/app/pull/9",
+        eventSequence: SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
+        url: "https://mail.google.com/mail/#all/thread-1",
+      };
+      expect(yield* activity.record(external)).toBe(true);
+      expect(yield* activity.record(external)).toBe(false);
       expect(
-        yield* activity.record({ ...row({ sequence: 9 }), spaceId: "phones", sourceKind: "run" }),
+        yield* activity.record({
+          ...external,
+          sourceId: "gmail:thread-2:1",
+          url: `https://mail.google.com/${"x".repeat(600)}`,
+        }),
       ).toBe(true);
-      expect(yield* activity.latestEventSequence("run")).toBe(9);
+      const entries = yield* activity.recent({ spaceId: "personal", includeExternal: true });
+      expect(entries.map((entry) => [entry.sourceId, entry.url])).toEqual([
+        ["gmail:thread-2:1", undefined],
+        ["gmail:thread-1:1", "https://mail.google.com/mail/#all/thread-1"],
+      ]);
+      // Sequence-0 rows never become a resume cursor for the Run or thread streams.
+      expect(yield* activity.latestEventSequence("run")).toBeUndefined();
+      expect(
+        yield* activity.record({
+          ...row({ sequence: 42 }),
+          spaceId: "personal",
+          sourceKind: "run",
+        }),
+      ).toBe(true);
+      expect(yield* activity.latestEventSequence("run")).toBe(42);
+    }),
+  );
+
+  it.effect("leaves mail and calendar rows out of recent unless asked, before the limit", () =>
+    Effect.gen(function* () {
+      yield* insertSpace("household");
+      const activity = yield* SpaceActivity;
+      for (const [index, sourceId] of ["thread-a", "thread-b"].entries()) {
+        yield* activity.record({
+          ...row({ sequence: 100 + index, occurredAt: secondsAfterNow(-60 + index) }),
+          spaceId: "household",
+          sourceId,
+        });
+      }
+      // A newer poll's worth of external rows (more than the limit) on top.
+      const external = ["gmail:t-1:1", "gmail:t-2:1", "gmail:t-3:2", "calendar:standup:x"];
+      for (const [index, sourceId] of external.entries()) {
+        yield* activity.record({
+          spaceId: "household",
+          occurredAt: secondsAfterNow(index + 1),
+          sourceKind: "run",
+          sourceId,
+          projectId: null,
+          title: `External ${sourceId}`,
+          status: "new",
+          text: "from Pat Example <pat@example.com>",
+          eventSequence: SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
+        });
+      }
+      const ids = (entries: ReadonlyArray<{ readonly sourceId: string }>) =>
+        entries.map((entry) => entry.sourceId);
+
+      expect(ids(yield* activity.recent({ spaceId: "household", limit: 2 }))).toEqual([
+        "thread-b",
+        "thread-a",
+      ]);
+      expect(
+        ids(
+          yield* activity.recent({ spaceId: "household", since: secondsAfterNow(-120), limit: 50 }),
+        ),
+      ).toEqual(["thread-b", "thread-a"]);
+      expect(
+        ids(yield* activity.recent({ spaceId: "household", limit: 2, includeExternal: true })),
+      ).toEqual(["calendar:standup:x", "gmail:t-3:2"]);
     }),
   );
 
@@ -230,7 +316,11 @@ it.layer(testLayer)("SpaceActivity service", (it) => {
     Effect.gen(function* () {
       yield* insertSpace("dialer");
       const activity = yield* SpaceActivity;
-      const oldest = { ...row({ sequence: 0 }), spaceId: "dialer", sourceKind: "run" as const };
+      const oldest = {
+        ...row({ sequence: SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE }),
+        spaceId: "dialer",
+        sourceKind: "run" as const,
+      };
       yield* activity.record({ ...oldest, sourceId: "phone-start:conv_old" });
       yield* activity.record({ ...oldest, sourceId: "phone-uncertain:owner:dialer:a1" });
       // Only run rows are phone rows; a thread whose id looks similar is pruned as usual.

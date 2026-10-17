@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { RepositoryId, SpaceId } from "@command-center/core";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
@@ -5,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import { Tool } from "effect/unstable/ai";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
@@ -14,6 +16,7 @@ import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
 import { PhoneCalls } from "../../../command-center/phone/PhoneCalls.ts";
 import { PhoneCallProposals } from "../../../command-center/phone/PhoneCallProposals.ts";
+import { SqlitePersistenceMemory } from "../../../persistence/Layers/Sqlite.ts";
 import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
@@ -267,13 +270,19 @@ const activityScope = (
 const invokeSpaceActivity = (
   scope: McpInvocationContext.McpInvocationScope,
   input: { readonly since?: string; readonly limit?: number },
+  /** A real feed to read instead of the recording mock. */
+  activityLayer?: Layer.Layer<SpaceActivity.SpaceActivity>,
 ) =>
   Effect.gen(function* () {
     const requests: Array<unknown> = [];
+    const results: Array<unknown> = [];
     const outputs = yield* Effect.gen(function* () {
       const toolkit = yield* CommandCenterToolkit;
       const stream = yield* toolkit.handle("cc_space_activity", input);
-      return Array.from(yield* Stream.runCollect(stream)).map((output) => output.isFailure);
+      return Array.from(yield* Stream.runCollect(stream)).map((output) => {
+        results.push(output.result);
+        return output.isFailure;
+      });
     }).pipe(
       // Typed tool failures surface as a failed effect.
       Effect.catch(() => Effect.succeed([true])),
@@ -299,29 +308,74 @@ const invokeSpaceActivity = (
                   markFailed: Effect.void,
                 }),
               ),
-              Layer.mock(SpaceActivity.SpaceActivity)({
-                recent: (request) =>
-                  Effect.sync(() => {
-                    requests.push(request);
-                    return [
-                      {
-                        occurredAt: "2026-10-09T12:00:00.000Z",
-                        title: "Build the activity feed",
-                        status: "completed",
-                        summary: "Done.",
-                        sourceKind: "thread" as const,
-                        sourceId: "t-feed",
-                      },
-                    ];
-                  }),
-              }),
+              activityLayer ??
+                Layer.mock(SpaceActivity.SpaceActivity)({
+                  recent: (request) =>
+                    Effect.sync(() => {
+                      requests.push(request);
+                      return [
+                        {
+                          occurredAt: "2026-10-09T12:00:00.000Z",
+                          title: "Build the activity feed",
+                          status: "completed",
+                          summary: "Done.",
+                          sourceKind: "thread" as const,
+                          sourceId: "t-feed",
+                        },
+                      ];
+                    }),
+                }),
             ),
           ),
         ),
       ),
     );
-    return { outputs, requests };
+    return { outputs, requests, results };
   });
+
+/** The real feed over in-memory SQLite, holding one thread row and two Google rows. */
+const seededActivityLayer = Layer.effect(
+  SpaceActivity.SpaceActivity,
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const now = "2026-10-09T12:00:00.000Z";
+    yield* sql`
+      INSERT INTO command_center_spaces (id, slug, name, kind, created_at, updated_at)
+      VALUES ('command-center', 'command-center', 'Command Center', 'business', ${now}, ${now})
+    `;
+    const activity = yield* SpaceActivity.SpaceActivity;
+    const base = { spaceId: "command-center", projectId: null, text: "Done." };
+    yield* activity.record({
+      ...base,
+      occurredAt: "2026-10-09T11:00:00.000Z",
+      sourceKind: "thread",
+      sourceId: "t-feed",
+      title: "Build the activity feed",
+      status: "completed",
+      eventSequence: 7,
+    });
+    for (const [index, sourceId] of ["gmail:18c2f0a1:1", "calendar:standup:x"].entries()) {
+      yield* activity.record({
+        ...base,
+        occurredAt: `2026-10-09T11:0${index + 1}:00.000Z`,
+        sourceKind: "run",
+        sourceId,
+        title: `Private Google row ${index}`,
+        status: "new",
+        eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
+      });
+    }
+    return activity;
+  }).pipe(Effect.orDie),
+).pipe(
+  Layer.provide(
+    SpaceActivity.layer.pipe(
+      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(NodeServices.layer),
+    ),
+  ),
+  Layer.orDie,
+);
 
 const { spaceId: _spaceId, ...unboundScope } = activityScope();
 
@@ -338,6 +392,24 @@ describe("cc_space_activity scoping", () => {
       const { outputs, requests } = yield* invokeSpaceActivity(activityScope(), { limit: 5 });
       expect(outputs).toEqual([false]);
       expect(requests).toEqual([{ spaceId: "command-center", limit: 5 }]);
+    }),
+  );
+
+  it.effect("leaves Google mail and calendar rows out for an items-only credential", () =>
+    Effect.gen(function* () {
+      const { outputs, results } = yield* invokeSpaceActivity(
+        activityScope(),
+        { limit: 1 },
+        seededActivityLayer,
+      );
+      expect(outputs).toEqual([false]);
+      // Only the thread row: the two newer Google rows are not returned, and the
+      // limit counts only returned rows, so the older thread row still fits.
+      expect(results).toEqual([
+        {
+          activity: [expect.objectContaining({ sourceKind: "thread", sourceId: "t-feed" })],
+        },
+      ]);
     }),
   );
 

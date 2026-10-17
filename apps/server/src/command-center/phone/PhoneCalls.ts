@@ -347,7 +347,7 @@ const make = Effect.gen(function* () {
             "It counts toward today's call limit. No end-of-call result will be recorded",
             "here; check the ElevenLabs conversation history.",
           ].join(" "),
-          eventSequence: 0,
+          eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
         });
         return true;
       }).pipe(
@@ -376,7 +376,7 @@ const make = Effect.gen(function* () {
         title: `${START_TITLE_PREFIX}${input.calleeLabel} — ${input.purpose}`,
         status: input.status,
         text: input.summary,
-        eventSequence: 0,
+        eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
       }),
     );
     if (startRecorded._tag === "Failure") {

@@ -304,7 +304,7 @@ const make = Effect.gen(function* () {
         title: `Phone: not placed ${input.targetLabel} — ${input.purpose}`,
         status: PhoneCallStatus.notPlaced,
         text: `Andrew approved the call, but it was not placed: ${input.reason}`,
-        eventSequence: 0,
+        eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
       });
     }).pipe(
       Effect.catchCause((cause) =>

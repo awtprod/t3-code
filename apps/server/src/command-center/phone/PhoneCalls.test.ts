@@ -265,7 +265,7 @@ describe("PhoneCalls", () => {
           status: "asking-owner",
           summary: "Switch to Example Parts?",
           url: null,
-          eventSequence: 0,
+          eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
         },
       ]);
       expect(JSON.stringify(rows)).not.toContain("+15550100000");
@@ -370,7 +370,7 @@ describe("PhoneCalls", () => {
         summary: expect.stringMatching(
           /^ElevenLabs did not answer within 15 s\. .*may be ringing; do not retry it\./u,
         ),
-        eventSequence: 0,
+        eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
       });
       expect(rows[2]?.sourceId).not.toBe(rows[1]?.sourceId);
       // Both unconfirmed calls count like placed ones: the fourth is refused before dialing.
@@ -878,7 +878,7 @@ describe("PhoneWebhook", () => {
         status: "ended",
         summary: "Andrew agreed to switch vendors. (outcome: decided)",
         url: "https://api.elevenlabs.io/v1/convai/conversations/conv_1",
-        eventSequence: 0,
+        eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
       });
       const replies = yield* pendingSpaceAgentReplies(SPACE);
       expect(

@@ -8,6 +8,9 @@
  * `resolveSpaceIdsForProject`). `SpaceActivityReactor` appends one bounded row per
  * finished turn or Run to `command_center_space_activity`; the Space agent
  * reads it through `recent` (brief and the `cc_space_activity` MCP tool).
+ * Externally observed rows (Google mail and calendar, `GoogleActivityPoller`)
+ * share the table but reach the agent only through its wake delta: `recent`
+ * leaves them out unless a caller opts in.
  *
  * @module SpaceActivity
  */
@@ -24,6 +27,18 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 const SPACE_ACTIVITY_SUMMARY_CHARS = 1_000;
 const SPACE_ACTIVITY_TITLE_CHARS = 200;
+/** The table's `url` CHECK; a longer URL is dropped rather than clipped into a broken link. */
+const SPACE_ACTIVITY_URL_CHARS = 500;
+/**
+ * Event sequence of rows observed outside the orchestration and audit event
+ * logs (Google mail and calendar, `GoogleActivityPoller`). Those rows reuse the
+ * `run` source kind (the table's CHECK allows only `thread` and `run`) with a
+ * namespaced source id such as `gmail:<threadId>:<count>`, so the unique key
+ * still dedupes them. Both event logs number from 1 (AUTOINCREMENT), so
+ * sequence 0 marks exactly these rows: it keeps them out of every reactor
+ * cursor and out of `recent` unless a caller opts in.
+ */
+export const SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE = 0;
 /** Rows kept per Space (phone rows excepted); older rows are pruned on insert. */
 export const SPACE_ACTIVITY_RETENTION = 500;
 export const SPACE_ACTIVITY_MAX_LIMIT = 50;
@@ -118,11 +133,12 @@ export interface SpaceActivityRecord {
   readonly text: string | null;
   /**
    * The orchestration or audit event sequence the row came from. Rows that do
-   * not come from an event log (phone calls) use 0, which the reactor's resume
-   * cursor ignores.
+   * not come from an event log (phone calls, Google mail and calendar) use
+   * `SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE` (0), which the reactor's resume
+   * cursor ignores and `recent` leaves out unless `includeExternal`.
    */
   readonly eventSequence: number;
-  /** An explicit link (the column holds at most 500 characters); replaces the PR URL in `text`. */
+  /** A link the source supplies itself; otherwise the newest PR URL in `text` is used. */
   readonly url?: string;
 }
 
@@ -132,10 +148,21 @@ export interface SpaceActivityQuery {
   readonly limit?: number;
   /** Upper clamp for `limit`; defaults to `SPACE_ACTIVITY_MAX_LIMIT`. */
   readonly maxLimit?: number;
+  /**
+   * Return externally observed rows (sequence `SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE`:
+   * Google mail and calendar) too. Off by default: they carry Google data that
+   * a reader holding only `cc.items.read` must not see, and a poll's worth of
+   * them would crowd thread and Run rows out of a bounded list. The Space agent
+   * receives them in its wake delta; only the owner's activity view opts in.
+   */
+  readonly includeExternal?: boolean;
 }
 
 export interface SpaceActivityShape {
-  /** Newest first. `limit` is clamped to 1..`maxLimit` (default 20, max 50). */
+  /**
+   * Newest first. `limit` is clamped to 1..`maxLimit` (default 20, max 50).
+   * Externally observed rows are left out unless `includeExternal`.
+   */
   readonly recent: (
     input: SpaceActivityQuery,
   ) => Effect.Effect<ReadonlyArray<SpaceActivityEntry>, CommandCenterError>;
@@ -146,7 +173,7 @@ export interface SpaceActivityShape {
   readonly record: (input: SpaceActivityRecord) => Effect.Effect<boolean, CommandCenterError>;
   /**
    * Highest event sequence recorded for a source kind; the reactor's resume
-   * cursor. Rows written outside the event logs (sequence 0) never move it.
+   * cursor. Externally observed rows (sequence 0) never count.
    */
   readonly latestEventSequence: (
     sourceKind: SpaceActivitySourceKind,
@@ -180,8 +207,10 @@ const persistenceError = (message: string) => (cause: unknown) =>
 
 /**
  * The newest activity rows of a Space (newest first, limit clamped to
- * 1..`maxLimit`, default 50). Shared by `SpaceActivity.recent` and the Space
- * brief loader, which only has a `SqlClient`.
+ * 1..`maxLimit`, default 50), without externally observed rows unless
+ * `includeExternal`. The one reader of the feed for tools and briefs: shared by
+ * `SpaceActivity.recent` and the Space brief loader, which only has a
+ * `SqlClient`. The filter is in SQL, so the limit counts only returned rows.
  */
 export const queryRecentSpaceActivity = (
   input: SpaceActivityQuery,
@@ -201,12 +230,15 @@ export const queryRecentSpaceActivity = (
       });
     }
     const since = sinceTime === undefined ? null : DateTime.formatIso(sinceTime.value);
+    const includeExternal = input.includeExternal === true ? 1 : 0;
     const rows = yield* sql<ActivityRow>`
       SELECT occurred_at AS "occurredAt", title, status, summary, url,
         source_kind AS "sourceKind", source_id AS "sourceId"
       FROM command_center_space_activity
       WHERE space_id = ${input.spaceId}
         AND (${since} IS NULL OR occurred_at > ${since})
+        AND (${includeExternal} = 1
+          OR event_sequence <> ${SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE})
       ORDER BY occurred_at DESC, id DESC
       LIMIT ${limit}
     `.pipe(Effect.mapError(persistenceError("Could not read Space activity.")));
@@ -222,7 +254,12 @@ export const make = Effect.gen(function* () {
 
   const record: SpaceActivityShape["record"] = (input) => {
     const text = input.text ?? "";
-    const url = input.url ?? findPullRequestUrl(text) ?? null;
+    const url =
+      input.url === undefined
+        ? (findPullRequestUrl(text) ?? null)
+        : input.url.length <= SPACE_ACTIVITY_URL_CHARS
+          ? input.url
+          : null;
     return sql
       .withTransaction(
         Effect.gen(function* () {
@@ -263,7 +300,8 @@ export const make = Effect.gen(function* () {
     sql<{ readonly sequence: number | null }>`
       SELECT MAX(event_sequence) AS sequence
       FROM command_center_space_activity
-      WHERE source_kind = ${sourceKind} AND event_sequence > 0
+      WHERE source_kind = ${sourceKind}
+        AND event_sequence > ${SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE}
     `.pipe(
       Effect.map((rows) => rows[0]?.sequence ?? undefined),
       Effect.mapError(persistenceError("Could not read the Space activity cursor.")),
