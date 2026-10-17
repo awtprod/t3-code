@@ -1,7 +1,10 @@
 import { ChatAttachmentId, PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@t3tools/contracts";
 import { expect, it } from "vite-plus/test";
 
-import { appendWindowsFileAttachmentLines } from "./windowsFileAttachmentPrompt.ts";
+import {
+  appendWindowsFileAttachmentLines,
+  withoutWindowsFileAttachments,
+} from "./windowsFileAttachmentPrompt.ts";
 
 const windowsFile = {
   type: "windows-file" as const,
@@ -52,4 +55,10 @@ it("skips a reference that would exceed the provider input limit", () => {
       sshConfigPath: "/c",
     }),
   ).toBe(long);
+});
+
+it("keeps Windows file references away from provider adapters", () => {
+  expect(withoutWindowsFileAttachments([image, windowsFile])).toEqual([image]);
+  const onlyImages = [image];
+  expect(withoutWindowsFileAttachments(onlyImages)).toBe(onlyImages);
 });

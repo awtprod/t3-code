@@ -36,3 +36,12 @@ export function appendWindowsFileAttachmentLines(input: {
   }
   return text;
 }
+
+/** The attachments a provider adapter receives: everything but Windows file references. */
+export function withoutWindowsFileAttachments(
+  attachments: ReadonlyArray<ChatAttachment>,
+): ReadonlyArray<ChatAttachment> {
+  return attachments.some(isWindowsFileAttachment)
+    ? attachments.filter((attachment) => !isWindowsFileAttachment(attachment))
+    : attachments;
+}

@@ -1081,5 +1081,7 @@ effectIt.effect("sends a Windows file reference to the provider as a path and pu
     );
     const remotePath = ["D:", "Footage", "Take 3.mov"].join("/");
     expect(sent.text).toContain(`'editing-pc:${remotePath}' <dest>]`);
+    // The reference itself never reaches the adapter, which only knows stored files.
+    expect(sent.attachments).toEqual([]);
   }),
 );
