@@ -6,6 +6,8 @@ import {
   type AssetCreateUrlResult,
   type ChatFileAttachment,
   type CommandId,
+  type EfficiencyThreadRouting,
+  type EfficiencyTier,
   type EnvironmentId,
   isProviderDriverKind,
   ProjectId,
@@ -22,6 +24,7 @@ import {
   type ThreadContextRecord,
   type ThreadId,
   type ThreadLinkedPullRequest,
+  type ThreadRoutingMode,
   type RunId,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
@@ -487,14 +490,8 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
   nextModelSelection?: ModelSelection;
   currentBranch: string | null;
   nextBranch?: string;
-  currentRoutingMode?: "manual" | "auto";
-  nextRoutingMode?: "manual" | "auto";
-  currentEfficiencyTier?: "economy" | "balanced" | "quality";
-  nextEfficiencyTier?: "economy" | "balanced" | "quality";
 }): {
   modelSelection?: ModelSelection;
-  routingMode?: "manual" | "auto";
-  efficiencyTier?: "economy" | "balanced" | "quality";
   branch?: string;
   worktreePath?: null;
 } | null {
@@ -506,20 +503,89 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
       JSON.stringify(nextModelSelection.options ?? null) !==
         JSON.stringify(input.currentModelSelection.options ?? null));
   const branchChanged = input.nextBranch !== undefined && input.nextBranch !== input.currentBranch;
-  const routingModeChanged =
-    input.nextRoutingMode !== undefined && input.nextRoutingMode !== input.currentRoutingMode;
-  const efficiencyTierChanged =
-    input.nextEfficiencyTier !== undefined &&
-    input.nextEfficiencyTier !== input.currentEfficiencyTier;
-  if (!modelSelectionChanged && !branchChanged && !routingModeChanged && !efficiencyTierChanged) {
+  if (!modelSelectionChanged && !branchChanged) {
     return null;
   }
   return {
     ...(modelSelectionChanged ? { modelSelection: nextModelSelection } : {}),
-    ...(routingModeChanged ? { routingMode: input.nextRoutingMode } : {}),
-    ...(efficiencyTierChanged ? { efficiencyTier: input.nextEfficiencyTier } : {}),
     ...(branchChanged ? { branch: input.nextBranch, worktreePath: null } : {}),
   };
+}
+
+/** The composer's efficiency routing: what the next turn of this thread is sent with. */
+export interface ComposerEfficiencyRouting {
+  readonly mode: ThreadRoutingMode;
+  readonly tier: EfficiencyTier;
+}
+
+/**
+ * The composer's routing for the active thread. A choice made in this view
+ * wins; otherwise a server thread shows its side-channel routing (manual when
+ * it has none), and a new draft starts in auto while efficiency routing is on.
+ */
+export function resolveComposerEfficiencyRouting(input: {
+  readonly efficiencyEnabled: boolean;
+  readonly defaultTier: EfficiencyTier;
+  readonly isLocalDraftThread: boolean;
+  readonly override: ComposerEfficiencyRouting | null;
+  readonly stored: Pick<
+    EfficiencyThreadRouting,
+    "routingMode" | "efficiencyTier" | "stored"
+  > | null;
+}): ComposerEfficiencyRouting {
+  if (!input.efficiencyEnabled) return { mode: "manual", tier: input.defaultTier };
+  return {
+    mode:
+      input.override?.mode ??
+      (input.stored?.stored === true ? input.stored.routingMode : undefined) ??
+      (input.isLocalDraftThread ? "auto" : "manual"),
+    tier: input.override?.tier ?? input.stored?.efficiencyTier ?? input.defaultTier,
+  };
+}
+
+/**
+ * Whether the composer's routing must be saved to the server before this send:
+ * never while efficiency routing is off (the server then routes nothing, so
+ * no request is made), always for a thread the server has no routing row for
+ * that should not be manual, and whenever the composer differs from the row.
+ */
+export function shouldPersistEfficiencyRoutingBeforeSend(input: {
+  readonly efficiencyEnabled: boolean;
+  readonly composer: ComposerEfficiencyRouting;
+  readonly stored: Pick<
+    EfficiencyThreadRouting,
+    "routingMode" | "efficiencyTier" | "stored"
+  > | null;
+}): boolean {
+  if (!input.efficiencyEnabled) return false;
+  const stored = input.stored;
+  if (stored === null || !stored.stored) return input.composer.mode === "auto";
+  return (
+    stored.routingMode !== input.composer.mode || stored.efficiencyTier !== input.composer.tier
+  );
+}
+
+/**
+ * An explicit model pick in the composer is a manual routing choice. In auto
+ * routing the server replaces the turn's model with the tier policy model and
+ * only falls back to the picked one, so leaving a thread in auto after the user
+ * picks a different model would silently run some other model while the picker
+ * still shows the user's choice. Returns true when the pick should flip the
+ * thread to manual routing: the thread is in auto and the picked provider
+ * instance or model differs from the composer's current selection.
+ */
+export function shouldSwitchToManualRoutingOnModelPick(input: {
+  readonly routingMode: ThreadRoutingMode;
+  readonly currentModelSelection: Pick<ModelSelection, "instanceId" | "model"> | null | undefined;
+  readonly nextModelSelection: Pick<ModelSelection, "instanceId" | "model">;
+}): boolean {
+  if (input.routingMode !== "auto") return false;
+  const current = input.currentModelSelection;
+  if (!current) return true;
+  return (
+    current.instanceId !== input.nextModelSelection.instanceId ||
+    current.model !== input.nextModelSelection.model
+  );
 }
 
 export function buildLocalDraftThread(
@@ -1285,9 +1351,9 @@ export function hasServerAcknowledgedLocalDispatch(input: {
   hasPendingApproval: boolean;
   hasPendingUserInput: boolean;
   threadError: string | null | undefined;
-  /** The server handed the latest user message to a subagent thread, so no
-   * turn or session change will follow on this thread. */
-  latestUserMessageDelegated?: boolean;
+  /** Efficiency routing ran the sent message in a routed child thread, so no
+   * run or message will follow on this thread for it. */
+  sentMessageDelegated?: boolean;
 }): boolean {
   if (!input.localDispatch) {
     return false;
@@ -1295,10 +1361,7 @@ export function hasServerAcknowledgedLocalDispatch(input: {
   if (input.hasPendingApproval || input.hasPendingUserInput || Boolean(input.threadError)) {
     return true;
   }
-  if (
-    input.latestUserMessageDelegated === true &&
-    input.localDispatch.latestUserMessageId !== (input.latestUserMessageId ?? null)
-  ) {
+  if (input.sentMessageDelegated === true) {
     return true;
   }
   // The thread shell can report a preparing or starting run before the detail
