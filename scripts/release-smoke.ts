@@ -244,9 +244,15 @@ async function assertNoCaseInsensitiveTrackedPathCollisions(): Promise<void> {
     canonicalPaths.set(canonicalPath, trackedPath);
 
     // .repos/ holds read-only upstream reference checkouts that nothing imports or builds
-    // (vendored Alchemy ships Runner.ts beside runner.mjs). Exact-path collisions above
-    // still cover them; only the module-resolution check skips them.
-    if (!trackedPath.startsWith(".repos/") && /\.[cm]?[jt]sx?$/u.test(trackedPath)) {
+    // (vendored Alchemy ships Runner.ts beside runner.mjs). Test files are never import
+    // targets, and upstream keeps sibling suites such as X.test.ts beside X.test.tsx.
+    // Exact-path collisions above still cover both; only the module-resolution check
+    // skips them.
+    if (
+      !trackedPath.startsWith(".repos/") &&
+      !/\.(?:test|spec)\.[cm]?[jt]sx?$/u.test(trackedPath) &&
+      /\.[cm]?[jt]sx?$/u.test(trackedPath)
+    ) {
       const canonicalModulePath = trackedPath
         .replace(/\.[cm]?[jt]sx?$/u, "")
         .normalize("NFC")
