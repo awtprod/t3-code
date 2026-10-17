@@ -269,7 +269,11 @@ it.layer(layer)("ProjectionTurnUsageRepository on orchestration v2", (it) => {
           '2026-09-01T12:01:00.000Z'
         )
       `;
-      const window = { from: "2026-09-01T00:00:00.000Z", to: "2026-09-02T00:00:00.000Z" };
+      const window = {
+        from: "2026-09-01T00:00:00.000Z",
+        to: "2026-09-02T00:00:00.000Z",
+        bucket: "hour" as const,
+      };
       const all = yield* repository.query(window);
       assert.equal(all.summary.turnCount, 2);
       const byRun = new Map(all.turns.map((turn) => [turn.turnId, turn]));
