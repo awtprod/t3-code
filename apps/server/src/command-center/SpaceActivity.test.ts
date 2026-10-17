@@ -167,6 +167,29 @@ it.layer(testLayer)("SpaceActivity service", (it) => {
     }),
   );
 
+  it.effect("keeps an explicit link and ignores sequence-0 rows in the resume cursor", () =>
+    Effect.gen(function* () {
+      yield* insertSpace("phones");
+      const activity = yield* SpaceActivity;
+      expect(
+        yield* activity.record({
+          ...row({ sequence: 0 }),
+          spaceId: "phones",
+          sourceKind: "run",
+          sourceId: "phone-start:conv_1",
+          url: "https://api.elevenlabs.io/v1/convai/conversations/conv_1",
+        }),
+      ).toBe(true);
+      expect(yield* activity.latestEventSequence("run")).toBeUndefined();
+      const [entry] = yield* activity.recent({ spaceId: "phones" });
+      expect(entry?.url).toBe("https://api.elevenlabs.io/v1/convai/conversations/conv_1");
+      expect(
+        yield* activity.record({ ...row({ sequence: 9 }), spaceId: "phones", sourceKind: "run" }),
+      ).toBe(true);
+      expect(yield* activity.latestEventSequence("run")).toBe(9);
+    }),
+  );
+
   it.effect("prunes each Space to its newest rows and honors since/limit", () =>
     Effect.gen(function* () {
       yield* insertSpace("acme");
