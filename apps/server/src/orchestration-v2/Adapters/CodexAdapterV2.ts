@@ -7249,10 +7249,23 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   if ((yield* Ref.get(activeTurns)).get(context.nativeTurnId) !== context) {
                     continue;
                   }
-                  yield* client.request("turn/interrupt", {
-                    threadId: yield* getNativeThreadId(context.providerThread),
-                    turnId: context.nativeTurnId,
-                  });
+                  yield* client
+                    .request("turn/interrupt", {
+                      threadId: yield* getNativeThreadId(context.providerThread),
+                      turnId: context.nativeTurnId,
+                    })
+                    .pipe(
+                      Effect.catchTags({
+                        // The turn ended between the check above and the request.
+                        // Its terminal event settles the interrupt below, so a
+                        // gone target is not a failed Stop (fork parity).
+                        CodexAppServerRequestError: (error) =>
+                          error.code === -32600 &&
+                          error.errorMessage === "no active turn to interrupt"
+                            ? Effect.void
+                            : Effect.fail(error),
+                      }),
+                    );
                 }
                 const containedTerminalKeys = new Set<string>();
                 const attemptedTerminalKeys = new Set<string>();
