@@ -24,7 +24,7 @@ import {
   VcsProcessTimeoutError,
 } from "@t3tools/contracts";
 import * as ProcessRunner from "../processRunner.ts";
-import { HOST_GIT_HARDENED_CONFIG_ARGS } from "./HostGitSecurity.ts";
+import { HOST_GIT_HARDENED_CONFIG_ARGS, inheritedGitConfigPins } from "./HostGitSecurity.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
 const encodeExitError = Schema.encodeEffect(Schema.fromJsonString(VcsProcessExitError));
@@ -81,6 +81,15 @@ const recordingService = (calls: ProcessRunner.ProcessRunInput[]) =>
     ),
   );
 
+/** The `GIT_CONFIG_*` entries of a spawn environment, in order. */
+const gitConfigEntries = (env: NodeJS.ProcessEnv | undefined) =>
+  Array.from({ length: Number(env?.GIT_CONFIG_COUNT ?? "0") }, (_, index) => [
+    env?.[`GIT_CONFIG_KEY_${index}`],
+    env?.[`GIT_CONFIG_VALUE_${index}`],
+  ]);
+/** Exact pins the suite setup exports (testUtils/gitConfig.setup.ts), if honoured. */
+const inheritedPins = () => inheritedGitConfigPins(process.env).map(([key, value]) => [key, value]);
+
 const ACME_REMOTE = "https://github.com/acme/web.git";
 const remoteWithUserInfo = (() => {
   const url = new URL(ACME_REMOTE);
@@ -115,12 +124,11 @@ describe("VcsProcess.run trusted Git config", () => {
       });
       expect(calls).toHaveLength(1);
       expect(calls[0]?.extendEnv).toBe(false);
-      expect(calls[0]?.env).toMatchObject({
-        GIT_CONFIG_COUNT: "1",
-        GIT_CONFIG_KEY_0: `http.${ACME_REMOTE}.extraheader`,
-        GIT_CONFIG_VALUE_0: accessTokenHeader("acme-token"),
-        GIT_TERMINAL_PROMPT: "0",
-      });
+      expect(calls[0]?.env?.GIT_TERMINAL_PROMPT).toBe("0");
+      expect(gitConfigEntries(calls[0]?.env)).toEqual([
+        ...inheritedPins(),
+        [`http.${ACME_REMOTE}.extraheader`, accessTokenHeader("acme-token")],
+      ]);
       // The hardening -c flags still come first and win over env config.
       expect(calls[0]?.args.slice(0, HOST_GIT_HARDENED_CONFIG_ARGS.length)).toEqual([
         ...HOST_GIT_HARDENED_CONFIG_ARGS,
@@ -170,6 +178,37 @@ describe("VcsProcess.run trusted Git config", () => {
         "HostGitTrustedConfigError",
       );
       expect(calls).toHaveLength(0);
+    }),
+  );
+
+  it.effect("carries only exact inherited test pins into hardened git", () =>
+    Effect.gen(function* () {
+      const pins = {
+        GIT_CONFIG_COUNT: "2",
+        GIT_CONFIG_KEY_0: "core.autocrlf",
+        GIT_CONFIG_VALUE_0: "false",
+        GIT_CONFIG_KEY_1: "init.defaultBranch",
+        GIT_CONFIG_VALUE_1: "main",
+      };
+      expect(inheritedGitConfigPins(pins)).toEqual([
+        ["core.autocrlf", "false"],
+        ["init.defaultBranch", "main"],
+      ]);
+      // Any non-pin entry, a pin with another value, or a malformed count drops the whole set.
+      for (const poisoned of [
+        { ...pins, GIT_CONFIG_KEY_1: "core.sshCommand", GIT_CONFIG_VALUE_1: "touch /tmp/pwned" },
+        { ...pins, GIT_CONFIG_VALUE_0: "true" },
+        { ...pins, GIT_CONFIG_KEY_1: "url.https://evil.example/.insteadOf" },
+        { ...pins, GIT_CONFIG_COUNT: "3" },
+        { ...pins, GIT_CONFIG_COUNT: "1e1" },
+      ]) {
+        expect(inheritedGitConfigPins(poisoned)).toEqual([]);
+      }
+      // The pins come from the server's own environment, never from the caller.
+      const calls: ProcessRunner.ProcessRunInput[] = [];
+      const service = yield* recordingService(calls);
+      yield* service.run({ ...baseInput, env: pins });
+      expect(gitConfigEntries(calls[0]?.env)).toEqual(inheritedPins());
     }),
   );
 
@@ -247,7 +286,8 @@ describe("VcsProcess.run", () => {
         ...baseInput.args,
       ]);
       expect(calls[0]?.extendEnv).toBe(false);
-      expect(calls[0]?.env).not.toHaveProperty("GIT_CONFIG_COUNT");
+      // The caller's raw GIT_CONFIG_COUNT never survives; only inherited exact pins may.
+      expect(gitConfigEntries(calls[0]?.env)).toEqual(inheritedPins());
       expect(calls[0]?.env).not.toHaveProperty("GIT_DIR");
       expect(calls[0]?.env).not.toHaveProperty("GIT_INDEX_FILE");
       expect(calls[1]?.env?.GIT_INDEX_FILE).toBe("/tmp/checkpoint-index");

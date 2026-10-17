@@ -27,7 +27,8 @@ import {
   hardenedHostGitEnvironment,
   resolveTrustedHostExecutable,
   type TrustedGitConfig,
-  trustedGitConfigEnvironment,
+  validateTrustedGitConfig,
+  withGitConfigEntries,
 } from "./HostGitSecurity.ts";
 
 export interface VcsProcessInput {
@@ -203,11 +204,11 @@ export const make = Effect.gen(function* () {
       });
     }
 
-    let trustedConfigEnvironment: Readonly<Record<string, string>> | undefined;
+    let trustedConfigEntry: readonly [string, string] | undefined;
     if (input.trustedConfig !== undefined) {
       const trusted =
         protectedExecutable?.name === "git" && !("connector" in protectedExecutable)
-          ? trustedGitConfigEnvironment(input.trustedConfig)
+          ? validateTrustedGitConfig(input.trustedConfig)
           : ({ rejected: "trusted-config-git-only" } as const);
       if ("rejected" in trusted) {
         return yield* new VcsProcessSpawnError({
@@ -215,7 +216,7 @@ export const make = Effect.gen(function* () {
           cause: new HostGitTrustedConfigError({ reason: trusted.rejected }),
         });
       }
-      trustedConfigEnvironment = trusted.environment;
+      trustedConfigEntry = trusted.entry;
     }
 
     const protectedEnvironment =
@@ -227,13 +228,13 @@ export const make = Effect.gen(function* () {
               [globalThis.process.env, input.env],
               { writableRoots },
             )
-          : {
-              ...hardenedHostGitEnvironment([input.env], {
+          : withGitConfigEntries(
+              hardenedHostGitEnvironment([input.env], {
                 allowIndexFile: input.operation.startsWith("GitVcsDriver.checkpoints."),
                 writableRoots,
               }),
-              ...trustedConfigEnvironment,
-            };
+              trustedConfigEntry === undefined ? [] : [trustedConfigEntry],
+            );
 
     const result = yield* processRunner
       .run({

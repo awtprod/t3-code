@@ -38,7 +38,7 @@ import {
   windowsLongPathConfigEnv,
 } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
-import { HOST_GIT_HARDENED_CONFIG_ARGS } from "./HostGitSecurity.ts";
+import { HOST_GIT_HARDENED_CONFIG_ARGS, inheritedGitConfigPins } from "./HostGitSecurity.ts";
 
 // Command Center: host Git runs as `git -c <hardened config>... -c safe.directory=<cwd> <subcommand>`
 // (HostGitSecurity), so spawner fakes match the subcommand after the leading `-c` pairs.
@@ -1559,35 +1559,54 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("does not read a filesystem permission error as an ssh refusal", () =>
-      Effect.gen(function* () {
-        const parent = yield* makeTmpDir();
-        const pathService = yield* Path.Path;
-        const cwd = pathService.join(parent, "repo");
-        const fileSystem = yield* FileSystem.FileSystem;
-        const driver = yield* GitVcsDriver.GitVcsDriver;
-        yield* fileSystem.makeDirectory(cwd);
-        yield* initRepoWithCommit(cwd);
-        yield* git(cwd, ["remote", "add", "origin", "git@example.invalid:owner/repo.git"]);
-        const fakeSsh = pathService.join(parent, "fake-ssh");
-        yield* writeTextFile(
-          parent,
-          "fake-ssh",
-          '#!/bin/sh\necho "fatal: cannot open backup file: Permission denied (os error 13)" >&2\nexit 255\n',
-        );
-        yield* fileSystem.chmod(fakeSsh, 0o755);
+    // Deterministic and offline: a real local fetch whose source objects are
+    // unreadable makes git itself print `error: ...: Permission denied`. (A fake
+    // GIT_SSH_COMMAND cannot inject the text: hardened git forces the host ssh.)
+    it.effect.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "does not read a filesystem permission error as an ssh refusal",
+      () =>
+        Effect.gen(function* () {
+          const parent = yield* makeTmpDir();
+          const pathService = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const seed = pathService.join(parent, "seed");
+          const remote = pathService.join(parent, "origin.git");
+          const cwd = pathService.join(parent, "repo");
+          yield* fileSystem.makeDirectory(seed);
+          yield* initRepoWithCommit(seed);
+          yield* git(seed, ["init", "--bare", remote]);
+          yield* git(seed, ["push", remote, "HEAD:refs/heads/main"]);
+          yield* fileSystem.makeDirectory(cwd);
+          yield* git(cwd, ["init"]);
+          yield* git(cwd, ["remote", "add", "origin", remote]);
+          const objectsDir = pathService.join(remote, "objects");
+          const fanout = (yield* fileSystem.readDirectory(objectsDir)).filter((entry) =>
+            /^[0-9a-f]{2}$/.test(entry),
+          );
+          assert.isAbove(fanout.length, 0);
+          yield* Effect.acquireRelease(
+            Effect.forEach(fanout, (entry) =>
+              fileSystem.chmod(pathService.join(objectsDir, entry), 0o000),
+            ),
+            () =>
+              Effect.forEach(fanout, (entry) =>
+                fileSystem.chmod(pathService.join(objectsDir, entry), 0o755).pipe(Effect.ignore),
+              ),
+          );
 
-        const error = yield* driver
-          .execute({
-            operation: "GitVcsDriver.test.osPermission",
-            cwd,
-            args: ["fetch", "origin"],
-            env: { LC_ALL: "C", GIT_SSH_COMMAND: fakeSsh },
-          })
-          .pipe(Effect.flip);
+          const error = yield* driver
+            .execute({
+              operation: "GitVcsDriver.test.osPermission",
+              cwd,
+              args: ["fetch", "origin"],
+              env: { LC_ALL: "C" },
+            })
+            .pipe(Effect.flip);
 
-        assert.notInclude(error.message, "(authentication_failed)");
-      }),
+          assert.strictEqual(error._tag, "GitCommandError");
+          assert.notInclude(error.message, "(authentication_failed)");
+        }).pipe(Effect.scoped),
     );
 
     it.effect("does not read remote hook output as a git failure reason", () =>
@@ -4594,8 +4613,8 @@ describe("Windows long path configuration", () => {
         cwd,
         args: ["config", "--get", key],
         // Command Center: host Git runs with an exact environment, so caller
-        // GIT_CONFIG_* entries (and the suite's own core.longpaths=true pin)
-        // never reach Git; only the driver's own long-path entry can.
+        // GIT_CONFIG_* entries never reach Git; only the driver's own long-path
+        // entry and the server's exact inherited pins can.
         env: {
           GIT_CONFIG_COUNT: "2",
           GIT_CONFIG_KEY_0: "user.name",
@@ -4625,11 +4644,14 @@ describe("Windows long path configuration", () => {
 
   it.effect("leaves Git config untouched on other platforms", () =>
     Effect.gen(function* () {
-      // `git config --get` exits 1 for an unset key: nothing was injected.
-      assert.deepStrictEqual(yield* readGitConfig("linux", "core.longpaths"), {
-        exitCode: 1,
-        value: "",
-      });
+      // `git config --get` exits 1 for an unset key. The driver injects nothing off
+      // Windows; the only possible value is the suite's own exact pin, which
+      // hardened Git inherits from the server environment.
+      const pinned = inheritedGitConfigPins(process.env).find(([key]) => key === "core.longpaths");
+      assert.deepStrictEqual(
+        yield* readGitConfig("linux", "core.longpaths"),
+        pinned === undefined ? { exitCode: 1, value: "" } : { exitCode: 0, value: pinned[1] },
+      );
       assert.deepStrictEqual(yield* readGitConfig("linux", "user.name"), {
         exitCode: 1,
         value: "",
