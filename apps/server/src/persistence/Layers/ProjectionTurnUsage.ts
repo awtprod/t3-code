@@ -1,3 +1,19 @@
+/**
+ * Command Center usage analytics (`usage.query`) over orchestration v2.
+ *
+ * Every completed v2 provider turn with main-agent token usage is one
+ * analytics row: tokens from the turn's `turnTokenUsage`, model and instance
+ * from its run, project from its thread, duration from its timestamps, and
+ * cost priced at read time with the same rates as the Usage page (the
+ * `usagePriceOverrides` setting, then LiteLLM). The fork's
+ * `projection_turn_usage` writer, its second pricing path and its table reads
+ * are gone; the table stays on disk unread.
+ *
+ * Not available from v2 turn usage (reported as null or a fixed bucket): tool
+ * use counts, provider-reported cost, per-subagent components, and the
+ * efficiency tier / rule / source / fallback / experiment columns (efficiency
+ * routing is not re-hooked into v2 yet).
+ */
 import {
   NonNegativeInt,
   ProviderDriverKind,
@@ -5,6 +21,7 @@ import {
   ProjectId,
   ThreadId,
   TurnId,
+  TurnTokenUsage,
   type UsageBreakdown,
   type UsageCostKind,
   type InternalGenerationUsageBreakdown,
@@ -17,21 +34,22 @@ import {
   EfficiencyTier,
 } from "@t3tools/contracts";
 import { RouteSelectionSource } from "@command-center/core";
-import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
+import { isCommandCenterThreadId } from "../../provider/security/CommandCenterProviderIsolation.ts";
+import { priceTurnUsage, type TurnUsageTokens } from "../../usage/turnUsagePricing.ts";
+import { UsageService } from "../../usage/UsageService.ts";
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
   ProjectionTurnUsageRepository,
   type ProjectionTurnUsageRepositoryShape,
-  type RecordTurnUsageInput,
 } from "../Services/ProjectionTurnUsage.ts";
-import { priceTurnUsage, resolveUsagePrice } from "../../usage/pricing.ts";
-import { ServerSettingsService } from "../../serverSettings.ts";
 
 const NullableNonNegativeInt = Schema.NullOr(NonNegativeInt);
 
@@ -262,50 +280,159 @@ function turnRows(rows: ReadonlyArray<UsageDbRow>): ReadonlyArray<UsageTurnRow> 
     .toSorted((left, right) => right.completedAt.localeCompare(left.completedAt));
 }
 
+const ProviderTurnUsageDbRow = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  projectId: Schema.NullOr(ProjectId),
+  providerInstanceId: ProviderInstanceId,
+  provider: ProviderDriverKind,
+  model: Schema.NullOr(Schema.String),
+  turnTokenUsage: Schema.NullOr(Schema.String),
+  startedAt: Schema.NullOr(Schema.String),
+  completedAt: Schema.String,
+});
+type ProviderTurnUsageDbRow = typeof ProviderTurnUsageDbRow.Type;
+
+const decodeTurnTokenUsage = Schema.decodeUnknownOption(Schema.fromJsonString(TurnTokenUsage));
+
+function nonNegative(value: number): number {
+  return Math.max(0, value);
+}
+
+/** v2 counts input including cache reads and writes; analytics splits it. */
+export function turnUsageTokens(usage: TurnTokenUsage): TurnUsageTokens {
+  const cacheRead = usage.cachedInputTokens ?? null;
+  const cacheWrite = usage.cacheCreationTokens ?? null;
+  return {
+    uncachedInputTokens:
+      usage.inputTokens === undefined
+        ? null
+        : nonNegative(usage.inputTokens - (cacheRead ?? 0) - (cacheWrite ?? 0)),
+    cacheReadInputTokens: cacheRead,
+    cacheWriteInputTokens: cacheWrite,
+    outputTokens: usage.outputTokens ?? null,
+    reasoningOutputTokens: usage.reasoningTokens ?? null,
+  };
+}
+
+function durationMs(row: ProviderTurnUsageDbRow): number | null {
+  if (row.startedAt === null) return null;
+  const started = DateTime.make(row.startedAt);
+  const completed = DateTime.make(row.completedAt);
+  if (Option.isNone(started) || Option.isNone(completed)) return null;
+  return nonNegative(
+    DateTime.toEpochMillis(completed.value) - DateTime.toEpochMillis(started.value),
+  );
+}
+
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const settings = yield* ServerSettingsService;
+  const usageService = yield* UsageService;
 
-  const selectRows = SqlSchema.findAll({
+  // One row per settled main-agent provider turn of a run. Subagent provider
+  // threads have no run attempt and are counted inside their parent turn's
+  // provider-reported totals where the provider includes them.
+  const selectProviderTurns = SqlSchema.findAll({
     Request: Schema.Struct({
       from: Schema.String,
       to: Schema.String,
       projectId: Schema.NullOr(Schema.String),
       providerInstanceId: Schema.NullOr(Schema.String),
       model: Schema.NullOr(Schema.String),
-      workload: Schema.NullOr(Schema.String),
-      quality: Schema.NullOr(Schema.String),
-      tier: Schema.NullOr(Schema.String),
     }),
-    Result: UsageDbRow,
+    Result: ProviderTurnUsageDbRow,
     execute: (input) => sql`
       SELECT
-        u.thread_id AS "threadId", u.turn_id AS "turnId", u.project_id AS "projectId",
-        u.provider_instance_id AS "providerInstanceId", u.provider_driver AS "provider",
-        u.model, u.workload, u.component_kind AS "componentKind", u.component_id AS "componentId",
-        u.quality, u.uncached_input_tokens AS "uncachedInputTokens",
-        u.cache_read_input_tokens AS "cacheReadInputTokens",
-        u.cache_write_input_tokens AS "cacheWriteInputTokens", u.output_tokens AS "outputTokens",
-        u.reasoning_output_tokens AS "reasoningOutputTokens", u.duration_ms AS "durationMs",
-        u.tool_uses AS "toolUses", u.cost_micro_usd AS "costMicroUsd", u.cost_kind AS "costKind",
-        u.cache_savings_micro_usd AS "cacheSavingsMicroUsd",
-        u.rate_provenance AS "rateProvenance", u.completed_at AS "completedAt",
-        json_extract(t.efficiency_decision_json, '$.tier') AS "tier",
-        json_extract(t.efficiency_decision_json, '$.source') AS "efficiencySource",
-        json_extract(t.efficiency_decision_json, '$.matchedRuleId') AS "efficiencyRuleId",
-        json_extract(t.efficiency_decision_json, '$.fallbackReason') AS "fallbackReason",
-        json_extract(t.efficiency_decision_json, '$.experimentArm') AS "experimentArm"
-      FROM projection_turn_usage u
-      LEFT JOIN projection_turns t ON t.thread_id = u.thread_id AND t.turn_id = u.turn_id
-      WHERE u.completed_at >= ${input.from} AND u.completed_at < ${input.to}
-        AND (${input.projectId} IS NULL OR u.project_id = ${input.projectId})
-        AND (${input.providerInstanceId} IS NULL OR u.provider_instance_id = ${input.providerInstanceId})
-        AND (${input.model} IS NULL OR u.model = ${input.model})
-        AND (${input.workload} IS NULL OR u.workload = ${input.workload})
-        AND (${input.quality} IS NULL OR u.quality = ${input.quality})
-        AND (${input.tier} IS NULL OR json_extract(t.efficiency_decision_json, '$.tier') = ${input.tier})
-      ORDER BY u.completed_at DESC
+        pt.thread_id AS "threadId",
+        pt.provider_turn_id AS "turnId",
+        th.project_id AS "projectId",
+        COALESCE(r.provider_instance_id, r.provider) AS "providerInstanceId",
+        COALESCE(ptr.driver, json_extract(ptr.payload_json, '$.driver'), r.provider) AS "provider",
+        json_extract(r.payload_json, '$.modelSelection.model') AS "model",
+        json_extract(pt.payload_json, '$.turnTokenUsage') AS "turnTokenUsage",
+        pt.started_at AS "startedAt",
+        pt.completed_at AS "completedAt"
+      FROM orchestration_v2_projection_provider_turns pt
+      JOIN orchestration_v2_projection_run_attempts a ON a.attempt_id = pt.run_attempt_id
+      JOIN orchestration_v2_projection_runs r ON r.run_id = a.run_id
+      LEFT JOIN orchestration_v2_projection_threads th ON th.thread_id = pt.thread_id
+      LEFT JOIN orchestration_v2_projection_provider_threads ptr
+        ON ptr.provider_thread_id = pt.provider_thread_id
+      WHERE pt.completed_at IS NOT NULL
+        AND pt.status IN ('completed', 'interrupted', 'failed', 'cancelled')
+        AND julianday(pt.completed_at) >= julianday(${input.from})
+        AND julianday(pt.completed_at) < julianday(${input.to})
+        AND (${input.projectId} IS NULL OR th.project_id = ${input.projectId})
+        AND (${input.providerInstanceId} IS NULL
+          OR COALESCE(r.provider_instance_id, r.provider) = ${input.providerInstanceId})
+        AND (${input.model} IS NULL
+          OR json_extract(r.payload_json, '$.modelSelection.model') = ${input.model})
+      ORDER BY pt.completed_at DESC
     `,
+  });
+
+  const usageRows = Effect.fn("ProjectionTurnUsageRepository.usageRows")(function* (
+    input: Parameters<ProjectionTurnUsageRepositoryShape["query"]>[0],
+  ) {
+    // Efficiency routing is not re-hooked into v2 yet, so no turn carries a
+    // tier: a tier filter matches nothing rather than everything.
+    if (input.tier !== undefined) return [] as ReadonlyArray<UsageDbRow>;
+    const turns = yield* selectProviderTurns({
+      from: input.from,
+      to: input.to,
+      projectId: input.projectId ?? null,
+      providerInstanceId: input.providerInstanceId ?? null,
+      model: input.model ?? null,
+    });
+    const tables = yield* usageService.readRateTables;
+    return turns.flatMap((turn): ReadonlyArray<UsageDbRow> => {
+      const usage =
+        turn.turnTokenUsage === null ? Option.none() : decodeTurnTokenUsage(turn.turnTokenUsage);
+      // A turn without any usage report is not analytics data.
+      if (Option.isNone(usage)) return [];
+      const workload = isCommandCenterThreadId(turn.threadId) ? "automation" : "interactive";
+      const quality = usage.value.usageStatus === "complete" ? "reported" : "partial";
+      if (input.workload !== undefined && input.workload !== workload) return [];
+      if (input.quality !== undefined && input.quality !== quality) return [];
+      const tokens =
+        usage.value.usageStatus === "unavailable"
+          ? {
+              uncachedInputTokens: null,
+              cacheReadInputTokens: null,
+              cacheWriteInputTokens: null,
+              outputTokens: null,
+              reasoningOutputTokens: null,
+            }
+          : turnUsageTokens(usage.value);
+      const priced = priceTurnUsage(tables, turn.model, tokens);
+      return [
+        {
+          threadId: turn.threadId,
+          turnId: turn.turnId,
+          projectId: turn.projectId,
+          providerInstanceId: turn.providerInstanceId,
+          provider: turn.provider,
+          model: turn.model,
+          workload,
+          componentKind: "main",
+          componentId: "main",
+          quality,
+          ...tokens,
+          durationMs: durationMs(turn),
+          toolUses: null,
+          costMicroUsd: priced.costMicroUsd,
+          costKind: priced.costKind,
+          cacheSavingsMicroUsd: priced.cacheSavingsMicroUsd,
+          rateProvenance: priced.rateProvenance,
+          completedAt: turn.completedAt,
+          tier: null,
+          efficiencySource: null,
+          efficiencyRuleId: null,
+          fallbackReason: null,
+          experimentArm: null,
+        },
+      ];
+    });
   });
 
   const selectInternalGenerationRows = SqlSchema.findAll({
@@ -328,80 +455,11 @@ const make = Effect.gen(function* () {
     `,
   });
 
-  const record: ProjectionTurnUsageRepositoryShape["record"] = Effect.fn(
-    "ProjectionTurnUsageRepository.record",
-  )(
-    function* (input: RecordTurnUsageInput) {
-      const currentSettings = yield* settings.getSettings;
-      const rate = resolveUsagePrice({
-        providerInstanceId: input.providerInstanceId,
-        driver: input.provider,
-        model: input.usage.model,
-        completedAt: input.usage.completedAt,
-        overrides: currentSettings.usagePricingOverrides,
-      });
-      const priced = priceTurnUsage(input.usage, rate);
-      yield* sql`
-      INSERT INTO projection_turn_usage (
-        thread_id, turn_id, project_id, provider_instance_id, provider_driver, model,
-        workload, component_kind, component_id, component_name, quality,
-        uncached_input_tokens, cache_read_input_tokens, cache_write_input_tokens,
-        output_tokens, reasoning_output_tokens, context_used_tokens, context_limit_tokens,
-        duration_ms, tool_uses, cost_micro_usd, cost_kind, cache_savings_micro_usd,
-        rate_provenance, completed_at
-      ) VALUES (
-        ${input.threadId}, ${input.turnId}, ${input.projectId}, ${input.providerInstanceId},
-        ${input.provider}, ${input.usage.model ?? null}, ${input.usage.workload},
-        ${input.usage.component.kind}, ${input.usage.component.id},
-        ${input.usage.component.name ?? null}, ${input.usage.quality},
-        ${input.usage.uncachedInputTokens ?? null}, ${input.usage.cacheReadInputTokens ?? null},
-        ${input.usage.cacheWriteInputTokens ?? null}, ${input.usage.outputTokens ?? null},
-        ${input.usage.reasoningOutputTokens ?? null}, ${input.usage.contextUsedTokens ?? null},
-        ${input.usage.contextLimitTokens ?? null}, ${input.usage.durationMs ?? null},
-        ${input.usage.toolUses ?? null}, ${priced.costMicroUsd}, ${priced.costKind},
-        ${priced.cacheSavingsMicroUsd}, ${priced.rateProvenance}, ${input.usage.completedAt}
-      )
-      ON CONFLICT (thread_id, turn_id, component_kind, component_id) DO UPDATE SET
-        project_id = excluded.project_id,
-        provider_instance_id = excluded.provider_instance_id,
-        provider_driver = excluded.provider_driver,
-        model = excluded.model,
-        workload = excluded.workload,
-        component_name = excluded.component_name,
-        quality = excluded.quality,
-        uncached_input_tokens = excluded.uncached_input_tokens,
-        cache_read_input_tokens = excluded.cache_read_input_tokens,
-        cache_write_input_tokens = excluded.cache_write_input_tokens,
-        output_tokens = excluded.output_tokens,
-        reasoning_output_tokens = excluded.reasoning_output_tokens,
-        context_used_tokens = excluded.context_used_tokens,
-        context_limit_tokens = excluded.context_limit_tokens,
-        duration_ms = excluded.duration_ms,
-        tool_uses = excluded.tool_uses,
-        cost_micro_usd = excluded.cost_micro_usd,
-        cost_kind = excluded.cost_kind,
-        cache_savings_micro_usd = excluded.cache_savings_micro_usd,
-        rate_provenance = excluded.rate_provenance,
-        completed_at = excluded.completed_at
-    `;
-    },
-    Effect.mapError(toPersistenceSqlError("record turn usage")),
-  );
-
   const query: ProjectionTurnUsageRepositoryShape["query"] = Effect.fn(
     "ProjectionTurnUsageRepository.query",
   )(
     function* (input) {
-      const rows = yield* selectRows({
-        from: input.from,
-        to: input.to,
-        projectId: input.projectId ?? null,
-        providerInstanceId: input.providerInstanceId ?? null,
-        model: input.model ?? null,
-        workload: input.workload ?? null,
-        quality: input.quality ?? null,
-        tier: input.tier ?? null,
-      });
+      const rows = yield* usageRows(input);
       const internalGenerationRows = yield* selectInternalGenerationRows({
         from: input.from,
         to: input.to,
@@ -453,7 +511,7 @@ const make = Effect.gen(function* () {
     Effect.mapError(toPersistenceSqlError("query turn usage")),
   );
 
-  return ProjectionTurnUsageRepository.of({ record, query });
+  return ProjectionTurnUsageRepository.of({ query });
 });
 
 export const ProjectionTurnUsageRepositoryLive = Layer.effect(ProjectionTurnUsageRepository, make);
