@@ -32,10 +32,8 @@ import type {
   RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
-import { ChatAttachmentId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
-import * as Base64 from "effect/encoding/Base64";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -44,13 +42,8 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import {
-  attachmentRelativePath,
-  chatAttachmentStableKey,
-  createDeterministicAttachmentId,
-} from "../attachmentStore.ts";
+import { persistInlineImageAttachments } from "../attachmentPersistence.ts";
 import * as ServerConfig from "../config.ts";
-import { parseBase64DataUrl } from "../imageMime.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadMessageIntake from "../orchestration-v2/ThreadMessageIntake.ts";
 import { ThreadLaunchService } from "../orchestration-v2/ThreadLaunchService.ts";
@@ -302,62 +295,24 @@ export const admitCommandCenterThread = (input: {
   );
 };
 
+/** Inline images go through the same persistence as the WS attachment RPC. */
 const persistInlineImages = Effect.fn("OrchestrationBridge.persistInlineImages")(function* (input: {
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
   readonly attachments: ReadonlyArray<CommandCenterInlineImage>;
 }) {
   if (input.attachments.length === 0) return [] as ReadonlyArray<ChatAttachment>;
-  const config = yield* ServerConfig.ServerConfig;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const invalid = (message: string, cause?: unknown) =>
-    new OrchestrationBridgeDispatchError({
-      operation: "thread.launch",
-      message,
-      ...(cause === undefined ? {} : { cause }),
-    });
-  return yield* Effect.forEach(
-    input.attachments.map((attachment, index) => ({ attachment, index })),
-    ({ attachment, index }) =>
-      Effect.gen(function* () {
-        const parsed = parseBase64DataUrl(attachment.dataUrl);
-        if (parsed === null || parsed.mimeType !== attachment.mimeType.toLowerCase()) {
-          return yield* invalid(`Attachment ${attachment.name} has an invalid image payload.`);
-        }
-        const bytes = yield* Effect.fromResult(Base64.decode(parsed.base64)).pipe(
-          Effect.mapError((cause) =>
-            invalid(`Attachment ${attachment.name} is not valid base64.`, cause),
-          ),
-        );
-        if (bytes.byteLength !== attachment.sizeBytes) {
-          return yield* invalid(`Attachment ${attachment.name} size does not match its payload.`);
-        }
-        const rawId = createDeterministicAttachmentId(
-          input.threadId,
-          chatAttachmentStableKey(input.messageId, index, bytes),
-        );
-        if (rawId === null) return yield* invalid("Could not allocate an attachment identifier.");
-        const persisted = {
-          type: "image" as const,
-          id: ChatAttachmentId.make(rawId),
-          name: attachment.name,
-          mimeType: attachment.mimeType,
-          sizeBytes: attachment.sizeBytes,
-        };
-        const relativePath = attachmentRelativePath(persisted);
-        if (relativePath === null) return yield* invalid("Could not place an attachment.");
-        yield* fileSystem
-          .writeFile(path.join(config.attachmentsDir, relativePath), bytes)
-          .pipe(
-            Effect.mapError((cause) =>
-              invalid(`Could not persist attachment ${attachment.name}.`, cause),
-            ),
-          );
-        return persisted as ChatAttachment;
-      }),
-    { concurrency: 2 },
+  const persisted: ReadonlyArray<ChatAttachment> = yield* persistInlineImageAttachments(input).pipe(
+    Effect.mapError(
+      (error) =>
+        new OrchestrationBridgeDispatchError({
+          operation: "thread.launch",
+          message: error.message,
+          ...(error.cause === undefined ? {} : { cause: error.cause }),
+        }),
+    ),
   );
+  return persisted;
 });
 
 const make = Effect.gen(function* () {
