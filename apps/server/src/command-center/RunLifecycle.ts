@@ -162,8 +162,18 @@ export const makeRunLifecyclePersistence = Effect.gen(function* () {
 
           if (input.status === "running") {
             if (run.state !== "running") return undefined;
+            const eventId = `cc:run:${run.id}:provider:${input.sourceEventId}:running`;
+            // V2 reports starting, running and waiting for one run, each with its
+            // own timestamp. The first records the Run as running; the rest are
+            // no-ops, not audit replays bound to different content.
+            const recorded = yield* sql<{ readonly present: number }>`
+              SELECT 1 AS present FROM command_center_audit_events
+              WHERE event_id = ${eventId}
+              LIMIT 1
+            `;
+            if (recorded.length > 0) return undefined;
             const appended = yield* appendAudit({
-              eventId: `cc:run:${run.id}:provider:${input.sourceEventId}:running`,
+              eventId,
               actorKind: input.actorKind,
               action: COMMAND_CENTER_EVENT_ACTIONS.runStateChanged,
               spaceId: run.spaceId,

@@ -91,13 +91,14 @@ const runUpdated = (input: {
   readonly threadId: string;
   readonly runId: string;
   readonly status: OrchestrationV2Run["status"];
+  readonly occurredAt?: string;
 }): OrchestrationV2DomainEvent =>
   ({
     id: EventId.make(input.eventId),
     type: "run.updated",
     threadId: ThreadId.make(input.threadId),
     runId: OrchestrationRunId.make(input.runId),
-    occurredAt: DateTime.makeUnsafe(fixtureTime),
+    occurredAt: DateTime.makeUnsafe(input.occurredAt ?? fixtureTime),
     payload: {
       id: OrchestrationRunId.make(input.runId),
       threadId: ThreadId.make(input.threadId),
@@ -139,11 +140,27 @@ it.effect("projects V2 run completion once, preserves the audit chain, and revok
     const revoked: Array<string> = [];
     const lifecycle = lifecycleFor(persistence, { revoked });
     const started = yield* lifecycle.handleThreadEvent(
-      runUpdated({ eventId: "v2-1", threadId, runId: "v2-run-a", status: "running" }),
+      runUpdated({ eventId: "v2-1", threadId, runId: "v2-run-a", status: "starting" }),
     );
-    // Further updates of the same run while it works add no audit rows.
+    // Further updates of the same run while it works add no audit rows. V2
+    // stamps each one with its own time, so they are not byte-identical replays.
+    const running = yield* lifecycle.handleThreadEvent(
+      runUpdated({
+        eventId: "v2-1b",
+        threadId,
+        runId: "v2-run-a",
+        status: "running",
+        occurredAt: "2026-01-01T00:00:05.000Z",
+      }),
+    );
     const restarted = yield* lifecycle.handleThreadEvent(
-      runUpdated({ eventId: "v2-2", threadId, runId: "v2-run-a", status: "waiting" }),
+      runUpdated({
+        eventId: "v2-2",
+        threadId,
+        runId: "v2-run-a",
+        status: "waiting",
+        occurredAt: "2026-01-01T00:00:19.000Z",
+      }),
     );
     const transition = yield* lifecycle.handleThreadEvent(
       runUpdated({ eventId: "v2-3", threadId, runId: "v2-run-a", status: "completed" }),
@@ -158,6 +175,7 @@ it.effect("projects V2 run completion once, preserves the audit chain, and revok
       WHERE id = 'run-success'
     `;
     expect(started?.status).toBe("running");
+    expect(running).toBeUndefined();
     expect(restarted).toBeUndefined();
     expect(transition?.status).toBe("succeeded");
     expect(repeated).toBeUndefined();
