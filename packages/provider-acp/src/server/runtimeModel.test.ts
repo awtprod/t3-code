@@ -1722,3 +1722,43 @@ describe("embeddedTerminalIdsFromSessionUpdate", () => {
     ).toBeUndefined();
   });
 });
+
+describe("ACP tool-call metadata updates", () => {
+  const previous: AcpToolCallState = {
+    toolCallId: "tool-1",
+    title: "Reading file",
+    detail: "same",
+    status: "inProgress",
+    data: { toolCallId: "tool-1" },
+  };
+
+  it("emits metadata-only updates immediately", () => {
+    const next: AcpToolCallState = {
+      ...previous,
+      data: { ...previous.data, locations: [{ path: "src/index.ts", line: 12 }] },
+    };
+    expect(
+      decideToolCallUpdateEmission({
+        previous,
+        next,
+        lastEmittedDetailLength: 4,
+        skippedSinceEmit: 3,
+      }),
+    ).toEqual({ emit: true, skippedSinceEmit: 0 });
+  });
+
+  it("still coalesces streamed input and unchanged updates", () => {
+    const streamed: AcpToolCallState = {
+      ...previous,
+      data: { ...previous.data, rawInput: { command: "vp test" } },
+    };
+    expect(
+      decideToolCallUpdateEmission({
+        previous,
+        next: streamed,
+        lastEmittedDetailLength: 4,
+        skippedSinceEmit: 0,
+      }),
+    ).toEqual({ emit: false, skippedSinceEmit: 0 });
+  });
+});

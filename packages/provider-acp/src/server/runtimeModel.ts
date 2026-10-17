@@ -10,6 +10,7 @@ import {
   deriveToolActivityPresentation,
   mergeToolActivityData,
 } from "@t3tools/shared/toolActivity";
+import { stableStringify } from "@t3tools/shared/relaySigning";
 import { T3_MCP_TOOL_NAMES } from "@t3tools/shared/t3McpToolPresentation";
 import type {
   OrchestrationV2ProviderThreadNativeMetadata,
@@ -970,6 +971,27 @@ function toolCallOutputUnchanged(previous: AcpToolCallState, next: AcpToolCallSt
   );
 }
 
+/**
+ * True when nothing but output changed. Metadata such as `locations` or a
+ * collab sub-agent id arrives on its own update and would otherwise be dropped
+ * as "unchanged". Streamed `rawInput` is excluded so input deltas still coalesce.
+ */
+function toolCallMetadataUnchanged(previous: AcpToolCallState, next: AcpToolCallState): boolean {
+  const {
+    content: _previousContent,
+    rawOutput: _previousOutput,
+    rawInput: _previousInput,
+    ...previousMetadata
+  } = previous.data;
+  const {
+    content: _nextContent,
+    rawOutput: _nextOutput,
+    rawInput: _nextInput,
+    ...nextMetadata
+  } = next.data;
+  return stableStringify(previousMetadata) === stableStringify(nextMetadata);
+}
+
 // Command tools keep `detail` equal to the command, so live stdout lives on
 // `data.content` / `data.rawOutput`. Measure that too, otherwise coalescing never
 // sees growth and in-progress output is held until completed/failed.
@@ -1031,6 +1053,10 @@ export function decideToolCallUpdateEmission(
     return { emit: true, skippedSinceEmit: 0 };
   }
   if (previous === undefined || previous.title !== next.title || previous.status !== next.status) {
+    return { emit: true, skippedSinceEmit: 0 };
+  }
+  const metadataUnchanged = toolCallMetadataUnchanged(previous, next);
+  if (!metadataUnchanged) {
     return { emit: true, skippedSinceEmit: 0 };
   }
   if (previous.detail === next.detail && toolCallOutputUnchanged(previous, next)) {
