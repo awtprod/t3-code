@@ -1,6 +1,6 @@
 import { Connection, Space, type Space as SpaceType } from "@command-center/core";
 import { describe, expect, it } from "@effect/vitest";
-import type { GoogleReadRequest } from "@t3tools/contracts";
+import { CommandCenterError, type GoogleReadRequest } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -20,6 +20,7 @@ import {
 } from "./GoogleActivity.ts";
 import { GoogleReadConnector, GoogleReadConnectorError } from "./GoogleReadConnector.ts";
 import * as CommandCenterService from "./Service.ts";
+import { renderMailCalendarSection } from "./SpaceBrief.ts";
 
 const decodeSpace = Schema.decodeUnknownSync(Space);
 const decodeConnection = Schema.decodeUnknownSync(Connection);
@@ -218,7 +219,8 @@ describe("gog output parsing", () => {
 const NOW_MS = Date.parse("2026-10-17T12:00:00.000Z");
 
 const briefHarness = (input: {
-  readonly connections: ReadonlyArray<ReturnType<typeof makeConnection>>;
+  /** `"fail"` makes the connections query fail as storage would. */
+  readonly connections: ReadonlyArray<ReturnType<typeof makeConnection>> | "fail";
   readonly read: (request: GoogleReadRequest) => Effect.Effect<unknown, GoogleReadConnectorError>;
 }) => {
   const requests: Array<GoogleReadRequest> = [];
@@ -246,7 +248,12 @@ const briefHarness = (input: {
     ),
     Layer.provide(
       Layer.mock(CommandCenterService.CommandCenterService)({
-        queryConnections: () => Effect.succeed({ connections: input.connections }),
+        queryConnections: () =>
+          input.connections === "fail"
+            ? Effect.fail(
+                new CommandCenterError({ reason: "persistence", message: "database is locked" }),
+              )
+            : Effect.succeed({ connections: input.connections }),
       }),
     ),
   );
@@ -328,6 +335,31 @@ describe("Space brief Google feed", () => {
       yield* TestClock.adjust("10 seconds");
       yield* Fiber.join(retry);
       expect(harness.requests).toHaveLength(4);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("says mail and calendar are unavailable when the connections cannot be read", () => {
+    const harness = briefHarness({ connections: "fail", read: () => Effect.die("must not read") });
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const brief = yield* GoogleActivityBrief;
+      const failed = { status: "unavailable", reason: "the Google connections could not be read" };
+      const section = yield* brief.section(personal);
+      expect(section).toEqual({
+        nowMs: NOW_MS,
+        timezone: "America/New_York",
+        mail: failed,
+        calendar: failed,
+      });
+      expect(section === undefined ? undefined : renderMailCalendarSection(section)).toBe(
+        "Mail + calendar unavailable: the Google connections could not be read",
+      );
+      // Only the feeds the policy allows are reported, and none for a Space without Google reads.
+      const mailOnly = yield* brief.section(makeSpace("personal", [GMAIL]));
+      expect(mailOnly?.mail).toEqual(failed);
+      expect(mailOnly?.calendar).toBeUndefined();
+      expect(yield* brief.section(makeSpace("personal", ["cc.items.read"]))).toBeUndefined();
+      expect(harness.requests).toEqual([]);
     }).pipe(Effect.provide(harness.layer));
   });
 

@@ -5,7 +5,11 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { layer as spaceActivityLayer, SpaceActivity } from "./SpaceActivity.ts";
+import {
+  layer as spaceActivityLayer,
+  SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
+  SpaceActivity,
+} from "./SpaceActivity.ts";
 import {
   EMPTY_SPACE_ACTIVITY,
   findCalendarConflicts,
@@ -173,6 +177,50 @@ it.layer(briefLayer)("Space brief activity", (it) => {
       // An unreadable feed drops the section, not the brief.
       yield* sql`DROP TABLE command_center_space_activity`;
       expect(yield* load()).not.toContain("Recent Space activity");
+    }),
+  );
+});
+
+it.layer(briefLayer)("Space brief activity with Google rows", (it) => {
+  it.effect("keeps mail and calendar rows out of the activity section and its row budget", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO command_center_spaces (id, slug, name, kind, created_at, updated_at)
+        VALUES ('space-example', 'space-example', 'Example', 'business', ${BRIEF_NOW}, ${BRIEF_NOW})
+      `;
+      const activity = yield* Effect.provide(SpaceActivity, spaceActivityLayer);
+      yield* activity.record({
+        spaceId: "space-example",
+        occurredAt: "2026-10-09T11:00:00.000Z",
+        sourceKind: "thread",
+        sourceId: "thread-1",
+        projectId: null,
+        title: "Ship the feed",
+        status: "completed",
+        text: "Done.",
+        eventSequence: 1,
+      });
+      // More newer external rows than the brief reads, as one busy poll adds.
+      for (let index = 0; index < SPACE_BRIEF_LIMITS.activityRows + 5; index += 1) {
+        yield* activity.record({
+          spaceId: "space-example",
+          occurredAt: `2026-10-09T11:${String(10 + index).padStart(2, "0")}:00.000Z`,
+          sourceKind: "run",
+          sourceId: `gmail:thread-${index}:1`,
+          projectId: null,
+          title: `Mail: Private subject ${index}`,
+          status: "new",
+          text: "from Pat Example <pat@example.com>",
+          eventSequence: SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
+        });
+      }
+      const brief = renderSpaceBrief(yield* loadSpaceBriefInput({ space, now: BRIEF_NOW }));
+
+      expect(brief).toContain("Recent Space activity");
+      expect(brief).toContain("[completed] Ship the feed");
+      expect(brief).not.toContain("Private subject");
+      expect(brief).not.toContain("pat@example.com");
     }),
   );
 });

@@ -4,6 +4,7 @@ import { expect, it } from "@effect/vitest";
 import { CommandCenterError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
@@ -262,6 +263,7 @@ const setupHarness = (input: {
 }) => {
   const invocations: ProcessRunner.ProcessRunInput[] = [];
   const stored: Array<ReadonlyArray<string>> = [];
+  const logs: Array<string> = [];
   const processLayer = Layer.succeed(
     ProcessRunner.ProcessRunner,
     ProcessRunner.ProcessRunner.of({
@@ -309,6 +311,17 @@ const setupHarness = (input: {
       }),
     ),
     Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(
+      Logger.layer(
+        [
+          Logger.make<unknown, void>(({ message }) => {
+            const [text] = Array.isArray(message) ? message : [message];
+            if (typeof text === "string" && text.startsWith("google setup")) logs.push(text);
+          }),
+        ],
+        { mergeWithExisting: false },
+      ),
+    ),
   );
   const connectOnce = Effect.gen(function* () {
     const setup = yield* GoogleConnectionSetup;
@@ -323,7 +336,7 @@ const setupHarness = (input: {
     });
     return invocations.find((entry) => entry.args.includes("1"))?.args ?? [];
   }).pipe(Effect.provide(layer));
-  return { connectOnce, stored };
+  return { connectOnce, stored, logs };
 };
 
 const decodeConnection = Schema.decodeUnknownSync(Connection);
@@ -371,5 +384,22 @@ it.effect("keeps Gmail-only consent when the declaring connection is another acc
     expect(beginArgs).toEqual(expect.arrayContaining(["--services", "gmail", "--readonly"]));
     expect(beginArgs).not.toContain("gmail,calendar");
     expect(harness.stored).toEqual([["gmail.read"]]);
+  });
+});
+
+it.effect("logs an unresolvable declared Calendar connection once per setup", () => {
+  const harness = setupHarness({
+    connections: [
+      declaredConnection("google-broken-a", ["cc.connections.google.calendar.read"]),
+      declaredConnection("google-broken-b", ["cc.connections.google.calendar.read"]),
+    ],
+    accountAliasFor: () => undefined,
+  });
+  return Effect.gen(function* () {
+    yield* harness.connectOnce;
+    expect(harness.stored).toEqual([["gmail.read"]]);
+    expect(harness.logs).toEqual([
+      "google setup could not resolve a declared Calendar connection's account",
+    ]);
   });
 });

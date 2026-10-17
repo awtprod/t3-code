@@ -121,7 +121,7 @@ const make = Effect.gen(function* () {
 
   const noteOutcome = (
     spaceId: string,
-    feed: GoogleActivityFeed | "spaces" | "connections",
+    feed: GoogleActivityFeed | "spaces" | "connections" | "account",
     failure: unknown | undefined,
   ) => {
     const key = `${spaceId}:${feed}`;
@@ -131,11 +131,12 @@ const make = Effect.gen(function* () {
     }
     if (failing.has(key)) return Effect.void;
     failing.add(key);
-    return Effect.logWarning("google activity poll failed; skipping until it recovers", {
-      spaceId,
-      feed,
-      ...describeFailure(failure),
-    });
+    return Effect.logWarning(
+      feed === "account"
+        ? "google activity poll could not resolve the mailbox; mail links open the default account"
+        : "google activity poll failed; skipping until it recovers",
+      { spaceId, feed, ...describeFailure(failure) },
+    );
   };
 
   const record = (input: {
@@ -238,10 +239,13 @@ const make = Effect.gen(function* () {
       });
     }
     if (parsed.entries.length === 0) return 0;
-    // Only for the link: a mailbox the alias does not name opens Gmail's default account.
-    const account = yield* config
-      .resolveGoogleAccount({ spaceId: space.id, connectionId })
-      .pipe(Effect.option);
+    // Only for the link: a mailbox the alias does not name opens Gmail's default
+    // account. A failed lookup (config storage) is logged once per streak.
+    const account = yield* config.resolveGoogleAccount({ spaceId: space.id, connectionId }).pipe(
+      Effect.tap(() => noteOutcome(space.id, "account", undefined)),
+      Effect.tapError((cause) => noteOutcome(space.id, "account", cause)),
+      Effect.option,
+    );
     const accountAlias = Option.getOrUndefined(account)?.accountAlias;
     const occurredAt = DateTime.formatIso(DateTime.makeUnsafe(nowMs));
     let added = 0;

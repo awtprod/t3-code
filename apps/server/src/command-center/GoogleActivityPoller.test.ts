@@ -1,7 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Connection, Space, type Space as SpaceType } from "@command-center/core";
 import { describe, expect, it } from "@effect/vitest";
-import type { GoogleReadRequest } from "@t3tools/contracts";
+import { CommandCenterError, type GoogleReadRequest } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -100,6 +100,8 @@ const makeHarness = (spaces: ReadonlyArray<SpaceType>) => {
   const failures = new Map<string, "fail" | "hang">();
   const requests: Array<GoogleReadRequest> = [];
   const logs: Array<string> = [];
+  /** Set `fail` to make the mailbox lookup fail as config storage would. */
+  const account = { fail: false };
   const connector = GoogleReadConnector.of({
     verify: () => Effect.void,
     read: (request) =>
@@ -147,7 +149,11 @@ const makeHarness = (spaces: ReadonlyArray<SpaceType>) => {
           configDirectory: "runtime-config",
           load: Effect.die("unused"),
           resolveGoogleAccount: () =>
-            Effect.succeed({ accountAlias: "person@example.com", label: "person@example.com" }),
+            account.fail
+              ? Effect.fail(
+                  new CommandCenterError({ reason: "persistence", message: "database is locked" }),
+                )
+              : Effect.succeed({ accountAlias: "person@example.com", label: "person@example.com" }),
         }),
       ),
     ),
@@ -194,7 +200,7 @@ const makeHarness = (spaces: ReadonlyArray<SpaceType>) => {
         ORDER BY id
       `;
     });
-  return { layer, feeds, failures, requests, logs, seed, rows };
+  return { layer, feeds, failures, requests, logs, account, seed, rows };
 };
 
 describe("GoogleActivityPoller", () => {
@@ -321,6 +327,32 @@ describe("GoogleActivityPoller", () => {
         "google activity poll recovered",
         "google activity poll recovered",
       ]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("links to the default mailbox when the account lookup fails, logging it once", () => {
+    const harness = makeHarness([makeSpace("personal", { capabilities: [GMAIL] })]);
+    harness.account.fail = true;
+    harness.feeds.personal = { mail: { threads: [thread("18c2f0a1")] } };
+    return Effect.gen(function* () {
+      yield* harness.seed;
+      const poller = yield* GoogleActivityPoller;
+      expect((yield* poller.poll).spaces).toEqual([
+        { spaceId: "personal", recorded: 1, failed: [] },
+      ]);
+      harness.feeds.personal = { mail: { threads: [thread("18c2f0a1", 2)] } };
+      expect((yield* poller.poll).spaces[0]?.recorded).toBe(1);
+      expect((yield* harness.rows("personal")).map((row) => row.url)).toEqual([
+        "https://mail.google.com/mail/#all/18c2f0a1",
+        "https://mail.google.com/mail/#all/18c2f0a1",
+      ]);
+      expect(harness.logs).toEqual([
+        "google activity poll could not resolve the mailbox; mail links open the default account",
+      ]);
+      harness.account.fail = false;
+      harness.feeds.personal = { mail: { threads: [thread("18c2f0a1", 3)] } };
+      yield* poller.poll;
+      expect(harness.logs.slice(1)).toEqual(["google activity poll recovered"]);
     }).pipe(Effect.provide(harness.layer));
   });
 

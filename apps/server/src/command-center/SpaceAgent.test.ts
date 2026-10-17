@@ -7,7 +7,9 @@ import {
   type OrchestrationThreadShell,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -18,7 +20,7 @@ import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSn
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import * as ConnectionHealth from "./ConnectionHealth.ts";
-import { GoogleActivityBrief } from "./GoogleActivity.ts";
+import { GoogleActivityBrief, type GoogleActivityBriefShape } from "./GoogleActivity.ts";
 import { layer as commandCenterServiceLayer } from "./Service.ts";
 import * as SpaceAgent from "./SpaceAgent.ts";
 import * as SpaceAgentWaker from "./SpaceAgentWaker.ts";
@@ -71,6 +73,8 @@ const makeHarness = (
     makeSpace("quiet-space"),
   ]),
   mailCalendar?: SpaceBriefMailCalendar,
+  /** Replaces the fixed `mailCalendar` read (still recorded in `briefSections`). */
+  section?: GoogleActivityBriefShape["section"],
 ) => {
   const dispatched: Array<ClientOrchestrationCommand> = [];
   const threads = new Map<string, OrchestrationThreadShell>();
@@ -83,10 +87,9 @@ const makeHarness = (
         GoogleActivityBrief,
         GoogleActivityBrief.of({
           section: (space) =>
-            Effect.sync(() => {
-              briefSections.push(space.id);
-              return mailCalendar;
-            }),
+            Effect.sync(() => briefSections.push(space.id)).pipe(
+              Effect.andThen(section === undefined ? Effect.succeed(mailCalendar) : section(space)),
+            ),
         }),
       ),
     ),
@@ -199,6 +202,69 @@ describe("Space agent", () => {
         "- 2 h ago · Pat Example <pat@example.com> · Contract draft",
       );
       expect(turn.message.text).toContain("Calendar unavailable: the Google read failed");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("reads mail and calendar before the lock every Space's turns share", () => {
+    const gate: {
+      entered?: Deferred.Deferred<void>;
+      release?: Deferred.Deferred<void>;
+    } = {};
+    const harness = makeHarness(
+      configWith([
+        makeSpace("agent-space", { enabled: true }),
+        makeSpace("second-space", { enabled: true }),
+      ]),
+      undefined,
+      (space) =>
+        space.id === "agent-space" && gate.entered !== undefined && gate.release !== undefined
+          ? Deferred.succeed(gate.entered, undefined).pipe(
+              Effect.andThen(Deferred.await(gate.release)),
+              Effect.as(undefined),
+            )
+          : Effect.succeed(undefined),
+    );
+    harness.seedThread();
+    const turnThreads = () =>
+      harness.dispatched.flatMap((command) =>
+        command.type === "thread.turn.start" ? [command.threadId] : [],
+      );
+    return Effect.gen(function* () {
+      gate.entered = yield* Deferred.make<void>();
+      gate.release = yield* Deferred.make<void>();
+      const spaceAgent = yield* SpaceAgent.SpaceAgent;
+      const stalled = yield* spaceAgent
+        .sendTurn("agent-space", { text: "Wake.", reason: "wake" })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(gate.entered);
+
+      // agent-space's Google read is stalled; another Space's turn is not held behind it.
+      const other = yield* spaceAgent.sendTurn("second-space", { text: "Wake.", reason: "wake" });
+      expect(other).toMatchObject({ spaceId: "second-space", created: true });
+      expect(turnThreads()).toEqual([ThreadId.make("cc-space-agent-second-space")]);
+
+      yield* Deferred.succeed(gate.release, undefined);
+      expect(yield* Fiber.join(stalled)).toMatchObject({ spaceId: "agent-space", created: false });
+      expect(turnThreads()).toEqual([ThreadId.make("cc-space-agent-second-space"), agentThreadId]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("skips the Google read for a busy agent and an existing thread", () => {
+    const harness = makeHarness();
+    harness.seedThread({
+      session: { activeTurnId: "turn-1" } as OrchestrationThreadShell["session"],
+    });
+    return Effect.gen(function* () {
+      const spaceAgent = yield* SpaceAgent.SpaceAgent;
+      const busy = yield* spaceAgent
+        .sendTurn("agent-space", { text: "Hello.", reason: "manual" })
+        .pipe(Effect.flip);
+      const ensured = yield* spaceAgent.ensureThread("agent-space");
+
+      expect(busy.reason).toBe("conflict");
+      expect(ensured).toEqual({ threadId: agentThreadId, created: false });
+      expect(harness.briefSections).toEqual([]);
+      expect(harness.dispatched).toEqual([]);
     }).pipe(Effect.provide(harness.layer));
   });
 

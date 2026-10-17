@@ -309,11 +309,29 @@ export const layer = Layer.effect(
             connection.kind === "google" &&
             connection.capabilities.includes("cc.connections.google.calendar.read"),
         );
+        let warned = false;
         for (const connection of candidates) {
-          // A connection whose account cannot be resolved is simply not this account.
+          // A connection whose account cannot be resolved is treated as another
+          // account; the first such failure per setup is logged, since it can
+          // also be a config storage error that withholds calendar.read.
           const account = yield* commandCenterConfig
             .resolveGoogleAccount({ spaceId: input.spaceId, connectionId: connection.id })
-            .pipe(Effect.option);
+            .pipe(
+              Effect.tapError((error) => {
+                if (warned) return Effect.void;
+                warned = true;
+                return Effect.logWarning(
+                  "google setup could not resolve a declared Calendar connection's account",
+                  {
+                    spaceId: input.spaceId,
+                    connectionId: connection.id,
+                    reason: error.reason,
+                    message: error.message.slice(0, 300),
+                  },
+                );
+              }),
+              Effect.option,
+            );
           if (
             Option.isSome(account) &&
             account.value.accountAlias.toLowerCase() === input.email.toLowerCase()

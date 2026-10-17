@@ -338,7 +338,9 @@ export interface GoogleActivityBriefShape {
   /**
    * The Space's "Mail + calendar" brief input, or undefined when the Space
    * reads neither feed. Never fails: a feed that cannot be read within
-   * `BRIEF_FETCH_TIMEOUT` comes back `unavailable` with a short reason.
+   * `BRIEF_FETCH_TIMEOUT` comes back `unavailable` with a short reason, and
+   * so does every feed the policy allows when the Space's connections cannot
+   * be listed.
    */
   readonly section: (space: SpaceType) => Effect.Effect<SpaceBriefMailCalendar | undefined>;
 }
@@ -461,21 +463,37 @@ const make = Effect.gen(function* () {
 
   const section: GoogleActivityBriefShape["section"] = (space) =>
     Effect.gen(function* () {
+      const timezone = space.agent === undefined ? "UTC" : spaceAgentTimezone(space.agent);
       const connections = yield* service.queryConnections({ spaceId: space.id }).pipe(
         Effect.map((result) => result.connections),
-        Effect.catch((error) =>
+        Effect.tapError((error) =>
           Effect.logWarning("space brief Google connections unavailable", {
             spaceId: space.id,
             message: error.message,
-          }).pipe(Effect.as([] as ReadonlyArray<ConnectionType>)),
+          }),
         ),
+        Effect.option,
       );
-      const sources = selectSpaceGoogleSources(space, connections);
+      if (Option.isNone(connections)) {
+        // Which connection would serve a feed is unknown, so every feed the
+        // policy allows is reported unavailable rather than silently dropped.
+        const failed = unavailable("the Google connections could not be read");
+        const allows = (capability: CapabilityName) =>
+          space.policy.allowedCapabilities.includes(capability);
+        if (!allows(GMAIL_READ) && !allows(CALENDAR_READ)) return undefined;
+        return {
+          nowMs: yield* Clock.currentTimeMillis,
+          timezone,
+          ...(allows(GMAIL_READ) ? { mail: failed } : {}),
+          ...(allows(CALENDAR_READ) ? { calendar: failed } : {}),
+        } satisfies SpaceBriefMailCalendar;
+      }
+      const sources = selectSpaceGoogleSources(space, connections.value);
       if (sources.mail === undefined && sources.calendar === undefined) return undefined;
       const feeds = yield* Cache.get(cache, briefCacheKey(space.id, sources));
       return {
         nowMs: yield* Clock.currentTimeMillis,
-        timezone: space.agent === undefined ? "UTC" : spaceAgentTimezone(space.agent),
+        timezone,
         ...feeds,
       } satisfies SpaceBriefMailCalendar;
     });

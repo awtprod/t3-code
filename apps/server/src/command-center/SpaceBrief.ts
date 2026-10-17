@@ -439,7 +439,10 @@ export const loadSpaceBriefInput = Effect.fn("SpaceBrief.loadInput")(function* (
   `;
   // The activity feed spans every repository in the Space, so (like the
   // `cc_space_activity` tool) a repository-scoped brief leaves it out. A feed
-  // that cannot be read drops the section rather than the brief.
+  // that cannot be read drops the section rather than the brief. Mail and
+  // calendar rows stay out (the query's default): this brief also reaches
+  // callers without a Google capability, and the Space agent already gets them
+  // in its wake delta and the "Mail + calendar" section.
   const activity =
     input.repositoryId === undefined
       ? yield* queryRecentSpaceActivity({
