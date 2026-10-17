@@ -401,44 +401,18 @@ const make = Effect.gen(function* () {
             })
             .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
         }
-        let startRef = input.workspaceStrategy.baseRef;
-        // "Start from origin" is a stored default; repos without the requested
-        // remote branch fall back to the local base branch.
-        const startFromOrigin =
-          input.workspaceStrategy.startFromOrigin === true &&
-          (yield* git
-            .remoteExists({ cwd: project.workspaceRoot, remoteName: "origin" })
-            .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId))));
-        yield* setupTracker.stageStatus(threadId, "fetch", startFromOrigin ? "running" : "skipped");
-        if (startFromOrigin) {
-          yield* git
-            .fetchRemote({
-              cwd: project.workspaceRoot,
-              remoteName: "origin",
-              refName: input.workspaceStrategy.baseRef,
-            })
-            .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
-          const remoteBaseExists = yield* git
-            .remoteBranchExists({
-              cwd: project.workspaceRoot,
-              refName: input.workspaceStrategy.baseRef,
-              remoteName: "origin",
-            })
-            .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
-          if (remoteBaseExists) {
-            startRef = yield* git
-              .resolveRemoteTrackingCommit({
-                cwd: project.workspaceRoot,
-                refName: input.workspaceStrategy.baseRef,
-                fallbackRemoteName: "origin",
-              })
-              .pipe(
-                Effect.map((resolved) => resolved.commitSha),
-                Effect.mapError(mapError(input, "provision-worktree", threadId)),
-              );
-          }
-        }
-        if (startFromOrigin) yield* setupTracker.stageStatus(threadId, "fetch", "done");
+        // "Start from origin" is a stored default; repos without origin or the
+        // remote branch, and an origin that cannot be fetched, start from the
+        // local base branch (GitWorkflow.resolveWorktreeBaseRef).
+        const wantsOrigin = input.workspaceStrategy.startFromOrigin === true;
+        yield* setupTracker.stageStatus(threadId, "fetch", wantsOrigin ? "running" : "skipped");
+        const base = yield* GitWorkflow.resolveWorktreeBaseRef(git, {
+          projectCwd: project.workspaceRoot,
+          baseRef: input.workspaceStrategy.baseRef,
+          startFromOrigin: wantsOrigin,
+        }).pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
+        const startRef = base.ref;
+        if (wantsOrigin) yield* setupTracker.stageStatus(threadId, "fetch", base.fetch);
         if (
           branch !== null &&
           isTemporaryWorktreeBranch(branch) &&
