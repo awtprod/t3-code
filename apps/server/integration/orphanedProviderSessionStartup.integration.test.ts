@@ -47,6 +47,7 @@ import * as WorktreeCleanup from "../src/worktreeCleanup.ts";
 import * as HostUsage from "../src/resourceTelemetry/HostUsage.ts";
 import * as AutomationScheduleRunner from "../src/command-center/automation/ScheduleRunner.ts";
 import * as SpaceAgentWaker from "../src/command-center/SpaceAgentWaker.ts";
+import * as GoogleActivityPoller from "../src/command-center/GoogleActivityPoller.ts";
 import * as AutomationRecoveryCoordinator from "../src/command-center/automation/RecoveryCoordinator.ts";
 import * as RunRecoveryCoordinator from "../src/command-center/RunRecoveryCoordinator.ts";
 import * as CommandCenterService from "../src/command-center/Service.ts";
@@ -101,6 +102,7 @@ const startupDependencies = Layer.mergeAll(
   Layer.mock(HostUsage.HostUsage)({ start: () => Effect.void }),
   Layer.mock(AutomationScheduleRunner.AutomationScheduleRunner)({ start: () => Effect.void }),
   Layer.mock(SpaceAgentWaker.SpaceAgentWaker)({ start: () => Effect.void }),
+  Layer.mock(GoogleActivityPoller.GoogleActivityPoller)({ start: () => Effect.void }),
   Layer.mock(AutomationRecoveryCoordinator.AutomationRecoveryCoordinator)({}),
   Layer.mock(RunRecoveryCoordinator.RunRecoveryCoordinator)({}),
   Layer.mock(CommandCenterService.CommandCenterService)({}),

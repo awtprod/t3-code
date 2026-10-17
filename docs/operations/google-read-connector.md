@@ -84,6 +84,36 @@ The OAuth scopes are the first boundary, the exact read or draft command allowli
 MCP credential is the third. A Command thread must have `cc.connections.google.read`, be bound to a
 Space, and select an enabled connection configured for that same Space.
 
+## Space agent mail and calendar
+
+A Space agent sees Gmail and Calendar when its Space policy allows
+`cc.connections.google.gmail.read` or `cc.connections.google.calendar.read` and an enabled Google
+connection of that Space carries the same capability (the checks `cc_google_read` makes). The
+first such connection by id is used per feed.
+
+- Brief: every server-authored Space agent turn includes a "Mail + calendar" section after Open
+  Items: up to 10 unread inbox threads from the last day (sender, subject, age, message count;
+  promotions and social tabs left out) and the next 48 hours of events in the agent's timezone,
+  with overlapping timed events marked `conflict`. The section is capped at 2,500 characters,
+  marked untrusted, fetched with a 10-second limit per feed (both feeds run concurrently), and
+  cached for five minutes per Space (one minute after a failure). A feed that cannot be read
+  becomes one "unavailable" line naming only the failure category, never gog's stderr. The
+  `cc_space_brief` MCP tool and Run briefs do not include this section, because they cannot check
+  the caller's Google read scope.
+- Activity: `GoogleActivityPoller` runs every 10 minutes (first poll one minute after startup) for
+  each Space with an enabled agent. It searches `is:unread is:important newer_than:1d` (at most 20
+  threads) and lists timed events starting in the next 60 minutes (at most 10), and records at
+  most 20 new Space activity rows per Space per poll, calendar first. The activity table's
+  unique key is the dedupe: mail rows use source id `gmail:<threadId>:<messageCount>` (a new reply
+  is announced again), event rows `calendar:<eventId>:<startIso>` (a moved event is announced
+  again). These rows use source kind `run` and event sequence 0, which keeps them out of the
+  activity reactor's resume cursors. Quiet hours, debounce, and the daily wake cap stay with the
+  wake loop. A failing feed (gog missing, connection unavailable, timeout) is logged once per
+  failure streak and skipped.
+
+gog v0.15.0's `gmail search` returns threads (thread id, newest date, first sender, subject,
+labels, message count) without a snippet, so neither surface shows message text.
+
 Live smoke tests are deliberately opt-in. They should cover only search, retrieval, agenda,
 availability, conflict detection, listing, and metadata/export reads, plus negative checks proving
 that send, update, share, and delete commands are unavailable.

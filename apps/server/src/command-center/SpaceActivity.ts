@@ -24,6 +24,16 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 const SPACE_ACTIVITY_SUMMARY_CHARS = 1_000;
 const SPACE_ACTIVITY_TITLE_CHARS = 200;
+/** The table's `url` CHECK; a longer URL is dropped rather than clipped into a broken link. */
+const SPACE_ACTIVITY_URL_CHARS = 500;
+/**
+ * Event sequence of rows observed outside the orchestration and audit event
+ * logs (Google mail and calendar, `GoogleActivityPoller`). Those rows reuse the
+ * `run` source kind (the table's CHECK allows only `thread` and `run`) with a
+ * namespaced source id such as `gmail:<threadId>:<count>`, so the unique key
+ * still dedupes them; sequence 0 keeps them out of every reactor cursor.
+ */
+export const SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE = 0;
 /** Rows kept per Space; older rows are pruned on insert. */
 export const SPACE_ACTIVITY_RETENTION = 500;
 export const SPACE_ACTIVITY_MAX_LIMIT = 50;
@@ -117,6 +127,8 @@ export interface SpaceActivityRecord {
   /** Raw message text; clipped and searched for a PR URL here. */
   readonly text: string | null;
   readonly eventSequence: number;
+  /** A link the source supplies itself; otherwise the newest PR URL in `text` is used. */
+  readonly url?: string;
 }
 
 export interface SpaceActivityQuery {
@@ -137,7 +149,10 @@ export interface SpaceActivityShape {
    * then prune the Space to its newest rows. Returns whether a row was added.
    */
   readonly record: (input: SpaceActivityRecord) => Effect.Effect<boolean, CommandCenterError>;
-  /** Highest event sequence recorded for a source kind; the reactor's resume cursor. */
+  /**
+   * Highest event sequence recorded for a source kind; the reactor's resume
+   * cursor. Externally observed rows (sequence 0) never count.
+   */
   readonly latestEventSequence: (
     sourceKind: SpaceActivitySourceKind,
   ) => Effect.Effect<number | undefined, CommandCenterError>;
@@ -211,7 +226,12 @@ const make = Effect.gen(function* () {
 
   const record: SpaceActivityShape["record"] = (input) => {
     const text = input.text ?? "";
-    const url = findPullRequestUrl(text) ?? null;
+    const url =
+      input.url === undefined
+        ? (findPullRequestUrl(text) ?? null)
+        : input.url.length <= SPACE_ACTIVITY_URL_CHARS
+          ? input.url
+          : null;
     return sql
       .withTransaction(
         Effect.gen(function* () {
@@ -249,6 +269,7 @@ const make = Effect.gen(function* () {
       SELECT MAX(event_sequence) AS sequence
       FROM command_center_space_activity
       WHERE source_kind = ${sourceKind}
+        AND event_sequence > ${SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE}
     `.pipe(
       Effect.map((rows) => rows[0]?.sequence ?? undefined),
       Effect.mapError(persistenceError("Could not read the Space activity cursor.")),

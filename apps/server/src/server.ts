@@ -238,6 +238,7 @@ import * as RunRecoveryCoordinator from "./command-center/RunRecoveryCoordinator
 import * as SpaceAgent from "./command-center/SpaceAgent.ts";
 import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
 import * as GoogleActivity from "./command-center/GoogleActivity.ts";
+import * as GoogleActivityPoller from "./command-center/GoogleActivityPoller.ts";
 import * as RunLifecycle from "./command-center/RunLifecycle.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import { webhookHttpRouteLayer } from "./command-center/WebhookHttp.ts";
@@ -811,6 +812,10 @@ const SpaceAgentLayerLive = SpaceAgent.layer.pipe(
   Layer.provide(PersistenceLayerLive),
 );
 
+const GoogleActivityPollerLayerLive = GoogleActivityPoller.layer.pipe(
+  Layer.provide(CommandCenterBaseLayerLive),
+);
+
 const SpaceAgentWakerLayerLive = SpaceAgentWaker.layer.pipe(
   Layer.provide(SpaceAgentLayerLive),
   Layer.provide(PersistenceLayerLive),
@@ -839,6 +844,7 @@ const CommandCenterLayerLive = Layer.mergeAll(
   RunLifecycleLayerLive,
   SpaceAgentLayerLive,
   SpaceAgentWakerLayerLive,
+  GoogleActivityPollerLayerLive,
 ).pipe(Layer.provide(OrchestrationProjectionSnapshotQueryLive));
 
 const PreviewLayerLive = Layer.empty.pipe(
