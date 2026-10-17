@@ -1130,17 +1130,41 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  /**
+   * The persisted routes of one environment, preferred first. Only that
+   * environment's targets are returned; never another environment's.
+   */
+  const persistedRoutesOf = Effect.fn("EnvironmentRegistry.persistedRoutesOf")(function* (
+    environmentId: EnvironmentId,
+  ) {
+    return (yield* storage.list).filter(
+      (target): target is PersistedConnectionTarget =>
+        target._tag !== "PrimaryConnectionTarget" && target.environmentId === environmentId,
+    );
+  });
+
   const readSavedBearer = Effect.fn("EnvironmentRegistry.readSavedBearer")(function* (
     environmentId: EnvironmentId,
   ) {
-    // Any of the environment's routes may hold the saved bearer; the preferred
-    // route can be the platform primary while a bearer route is kept for recovery.
+    // Any of the environment's routes may hold the saved bearer.
     const entry = (yield* SubscriptionRef.get(entries)).get(environmentId);
-    const target = entry
+    let target = entry
       ? connectionRoutes(entry)
           .map((route) => route.target)
           .find((candidate) => candidate._tag === "BearerConnectionTarget")
       : undefined;
+    // Command Center: a desktop remote primary replaces the live entry with its
+    // platform route, so its preserved recovery bearer survives only in the
+    // persisted catalog. Read it from there (this environment's targets only),
+    // as the fork read its persisted targets, so renewal still finds it.
+    if (
+      target?._tag !== "BearerConnectionTarget" &&
+      (yield* Ref.get(preservedPrimaryBearerIds)).has(environmentId)
+    ) {
+      target = (yield* persistedRoutesOf(environmentId)).find(
+        (candidate) => candidate._tag === "BearerConnectionTarget",
+      );
+    }
     if (target?._tag !== "BearerConnectionTarget") {
       return Option.none();
     }
@@ -1210,14 +1234,28 @@ export const make = Effect.gen(function* () {
             return false;
           }
           // Re-saving the credential keeps the environment's route list as it is.
+          // A desktop remote primary's live entry holds only its platform route,
+          // so its preserved bearer keeps the persisted route list instead.
           const current = (yield* SubscriptionRef.get(entries)).get(input.environmentId);
+          const liveRoutes = current ? persistedRoutes(current) : [];
+          const savedConnectionId = saved.value.target.connectionId;
+          const holdsSavedRoute = (routes: ReadonlyArray<PersistedConnectionTarget>) =>
+            routes.some(
+              (route) =>
+                route._tag === "BearerConnectionTarget" && route.connectionId === savedConnectionId,
+            );
+          const storedRoutes = holdsSavedRoute(liveRoutes)
+            ? liveRoutes
+            : yield* persistedRoutesOf(input.environmentId).pipe(
+                Effect.map((routes) => (holdsSavedRoute(routes) ? routes : [saved.value.target])),
+              );
           yield* registrations.register(
             new BearerConnectionRegistration({
               target: saved.value.target,
               profile: saved.value.profile,
               credential: new BearerConnectionCredential({ token: input.token }),
             }),
-            current ? persistedRoutes(current) : [saved.value.target],
+            storedRoutes,
           );
           return true;
         }),

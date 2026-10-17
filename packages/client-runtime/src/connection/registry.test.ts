@@ -1869,6 +1869,93 @@ describe("EnvironmentRegistry", () => {
     }),
   );
 
+  it.effect("renews a desktop remote primary's preserved bearer from the persisted catalog", () =>
+    Effect.gen(function* () {
+      const remotePrimary = new PrimaryConnectionTarget({
+        environmentId: BEARER_TARGET.environmentId,
+        label: BEARER_TARGET.label,
+        httpBaseUrl: BEARER_PROFILE.httpBaseUrl,
+        wsBaseUrl: BEARER_PROFILE.wsBaseUrl,
+      });
+      // Another environment's bearer at the same address, persisted first: the
+      // fallback must never hand it out for the primary's environment.
+      const otherTarget = new BearerConnectionTarget({
+        environmentId: EnvironmentId.make("environment-other-bearer"),
+        label: "Other bearer environment",
+        connectionId: "other-bearer-connection",
+      });
+      const otherProfile = new BearerConnectionProfile({
+        connectionId: otherTarget.connectionId,
+        environmentId: otherTarget.environmentId,
+        label: otherTarget.label,
+        httpBaseUrl: BEARER_PROFILE.httpBaseUrl,
+        wsBaseUrl: BEARER_PROFILE.wsBaseUrl,
+      });
+      const otherCredential = new BearerConnectionCredential({ token: "other-token" });
+      const harness = yield* makeHarness(
+        [otherTarget, BEARER_TARGET],
+        [otherProfile, BEARER_PROFILE],
+        [
+          [otherTarget.connectionId, otherCredential],
+          [BEARER_TARGET.connectionId, BEARER_CREDENTIAL],
+        ],
+      );
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.registerPlatform(
+          new PrimaryConnectionRegistration({ target: remotePrimary }),
+        );
+        // The live entry is the platform primary; the bearer is only persisted.
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(remotePrimary.environmentId)?.target,
+        ).toEqual(remotePrimary);
+
+        const saved = yield* registry.savedBearerCredential(remotePrimary.environmentId);
+        expect(Option.getOrUndefined(saved)).toEqual({
+          environmentId: remotePrimary.environmentId,
+          connectionId: BEARER_TARGET.connectionId,
+          httpBaseUrl: BEARER_PROFILE.httpBaseUrl,
+          token: BEARER_CREDENTIAL.token,
+        });
+
+        const replaced = yield* registry.replaceBearerCredential({
+          environmentId: remotePrimary.environmentId,
+          connectionId: BEARER_TARGET.connectionId,
+          previousToken: BEARER_CREDENTIAL.token,
+          token: "renewed-token",
+        });
+        expect(replaced).toBe(true);
+        // The renewed token is saved under the bearer route, which stays persisted
+        // for the primary's environment; the other environment is untouched.
+        expect((yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId)).toEqual(
+          new BearerConnectionCredential({ token: "renewed-token" }),
+        );
+        expect((yield* Ref.get(harness.storedCredentials)).get(otherTarget.connectionId)).toEqual(
+          otherCredential,
+        );
+        expect(
+          (yield* Ref.get(harness.storedTargets)).filter(
+            (target) => target.environmentId === remotePrimary.environmentId,
+          ),
+        ).toEqual([BEARER_TARGET]);
+        expect(
+          (yield* Ref.get(harness.storedTargets)).filter(
+            (target) => target.environmentId === otherTarget.environmentId,
+          ),
+        ).toEqual([otherTarget]);
+        expect(
+          Option.map(
+            yield* registry.savedBearerCredential(remotePrimary.environmentId),
+            (credential) => credential.token,
+          ),
+        ).toEqual(Option.some("renewed-token"));
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(remotePrimary.environmentId)?.target,
+        ).toEqual(remotePrimary);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
   it.effect("reports failed primary bearer persistence without changing the active primary", () =>
     Effect.gen(function* () {
       const primary = new PrimaryConnectionTarget({
