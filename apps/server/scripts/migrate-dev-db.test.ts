@@ -88,6 +88,9 @@ const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(functio
           'full-access', 'default', 'user', 'user', '2026-08-01', '2026-08-01', 'never', 0)`;
       yield* sql`INSERT INTO auth_sessions (session_id, subject, scopes, method, issued_at, expires_at)
         VALUES ('session-1', 'user', '[]', 'pairing', '2026-08-01', '2027-08-01')`;
+      // FTS5 (Memory search): its shadow tables cannot be written under defensive mode.
+      yield* sql`INSERT INTO command_center_memory_search_fts (rowid, memory_id, content)
+        VALUES (7, 'memory-acme', 'acme quarterly ledger')`;
     }),
   );
   return databasePath;
@@ -123,8 +126,15 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
               (SELECT COUNT(*) FROM auth_sessions) AS auth,
               (SELECT COUNT(*) FROM scheduled_tasks) AS tasks,
               (SELECT COUNT(*) FROM orchestration_v2_projection_context_transfers) AS transfers`;
-          return { threads, events, sessions, leftovers };
+          const memories = yield* sql<{ rowid: number; memory_id: string }>`
+            SELECT rowid, memory_id FROM command_center_memory_search_fts
+            WHERE command_center_memory_search_fts MATCH 'ledger'`;
+          return { threads, events, sessions, leftovers, memories };
         }),
+      );
+      assert.deepStrictEqual(
+        kept.memories.map((row) => ({ rowid: row.rowid, memoryId: row.memory_id })),
+        [{ rowid: 7, memoryId: "memory-acme" }],
       );
       assert.deepStrictEqual(
         kept.threads.map((row) => row.thread_id),

@@ -91,6 +91,7 @@ function bindSessionToOpeningThread(
   runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
 ): ProviderAdapter.ProviderAdapterV2SessionRuntime {
   const owner = opened.threadId;
+  const compactThread = runtime.compactThread;
   const refusal = (threadId: ThreadId) =>
     new CommandCenterProviderAdmissionError({
       threadId: String(threadId),
@@ -146,7 +147,35 @@ function bindSessionToOpeningThread(
               }),
             )
           : runtime.forkThread(input),
+      steerTurn: (input: ProviderAdapter.ProviderAdapterV2SteerInput) =>
+        commandCenterSessionMismatch(owner, input.threadId)
+          ? Effect.fail(
+              new ProviderAdapter.ProviderAdapterSteerRunError({
+                driver,
+                providerThreadId: input.providerThread.id,
+                providerTurnId: input.providerTurnId,
+                cause: refusal(input.threadId),
+              }),
+            )
+          : runtime.steerTurn(input),
     },
+    // Compaction runs a model turn, so it is guarded like startTurn when present.
+    compactThread === undefined
+      ? {}
+      : {
+          compactThread: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+            commandCenterSessionMismatch(owner, input.threadId)
+              ? Effect.fail(
+                  new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver,
+                    threadId: input.threadId,
+                    providerThreadId: input.providerThread.id,
+                    runId: input.runId,
+                    cause: refusal(input.threadId),
+                  }),
+                )
+              : compactThread(input),
+        },
   );
   return bound;
 }

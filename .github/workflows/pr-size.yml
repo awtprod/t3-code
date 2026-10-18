@@ -229,17 +229,18 @@ jobs:
               `${baseSha}...${resolvedHeadSha}`,
             ];
 
+            // A re-platform-sized diff prints one numstat line per file (tens of
+            // thousands); the 1 MiB default buffer fails with ENOBUFS.
+            const numstatOptions = { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 };
             const totalChangedLines = sumNumstat(
-              execFileSync(
-                "git",
-                diffArgs,
-                { encoding: "utf8" },
-              ),
+              execFileSync("git", diffArgs, numstatOptions),
             );
             const nonTestChangedLines = sumNumstat(
-              execFileSync("git", [...diffArgs, "--", ".", ...testExcludePathspecs], {
-                encoding: "utf8",
-              }),
+              execFileSync(
+                "git",
+                [...diffArgs, "--", ".", ...testExcludePathspecs],
+                numstatOptions,
+              ),
             );
             const testChangedLines = Math.max(0, totalChangedLines - nonTestChangedLines);
 
