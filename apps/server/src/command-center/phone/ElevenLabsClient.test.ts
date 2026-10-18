@@ -137,7 +137,9 @@ describe("ElevenLabsClient.startOutboundCall", () => {
       );
       expect(error).toBeInstanceOf(ElevenLabsCallError);
       expect(error.reason).toBe("http");
+      // A 4xx proves ElevenLabs did not start the call.
       expect(callMayHaveStarted(error)).toBe(false);
+      expect(error.message).toBe("ElevenLabs refused the call (HTTP 422).");
       expect(error.status).toBe(422);
       expect(error.body?.length).toBeLessThanOrEqual(300);
       expect(error.body).toContain("…0000");
@@ -169,22 +171,65 @@ describe("ElevenLabsClient.startOutboundCall", () => {
     }),
   );
 
-  it.effect("reports an HTTP error status as a definite refusal even if its body fails", () =>
+  it.effect("reports a 4xx or 503 status as a definite refusal even if its body fails", () =>
     Effect.gen(function* () {
-      const broken = new ReadableStream<Uint8Array>({
-        pull(controller) {
-          controller.error(new TypeError("terminated"));
-        },
-      });
-      const { fetchImpl } = capturing(() => new Response(broken, { status: 503 }));
-      const error = yield* Effect.flip(
-        makeElevenLabsClient({ fetchImpl }).startOutboundCall(request),
-      );
-      expect(error.reason).toBe("http");
-      expect(error.status).toBe(503);
-      expect(callMayHaveStarted(error)).toBe(false);
+      for (const status of [429, 503]) {
+        const broken = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.error(new TypeError("terminated"));
+          },
+        });
+        const { fetchImpl } = capturing(() => new Response(broken, { status }));
+        const error = yield* Effect.flip(
+          makeElevenLabsClient({ fetchImpl }).startOutboundCall(request),
+        );
+        expect(error.reason).toBe("http");
+        expect(error.status).toBe(status);
+        expect(callMayHaveStarted(error)).toBe(false);
+      }
     }),
   );
+
+  it.effect(
+    "treats 4xx and 503 as not started, and any other 5xx as a call that may be ringing",
+    () =>
+      Effect.gen(function* () {
+        const cases: ReadonlyArray<readonly [number, boolean]> = [
+          [400, false],
+          [401, false],
+          [429, false],
+          [503, false],
+          [500, true],
+          [502, true],
+          [504, true],
+        ];
+        for (const [status, mayHaveStarted] of cases) {
+          const { fetchImpl } = capturing(() =>
+            jsonResponse(status, { detail: "call to +15550100000" }),
+          );
+          const error = yield* Effect.flip(
+            makeElevenLabsClient({ fetchImpl }).startOutboundCall(request),
+          );
+          expect(error.reason).toBe("http");
+          expect(error.status).toBe(status);
+          expect(callMayHaveStarted(error)).toBe(mayHaveStarted);
+          // The message only says "refused" when the status proves the call was not started.
+          expect(error.message).toBe(
+            mayHaveStarted
+              ? `ElevenLabs failed while starting the call (HTTP ${status}); it may have started.`
+              : `ElevenLabs refused the call (HTTP ${status}).`,
+          );
+          // The redacted body stays on the error either way.
+          expect(error.body).toContain("…0000");
+          expect(error.body).not.toContain("+15550100000");
+        }
+      }),
+  );
+
+  it("treats an http error without a status as uncertain", () => {
+    const error = new ElevenLabsCallError({ reason: "http", message: "ElevenLabs failed." });
+    expect(callMayHaveStarted(error)).toBe(true);
+  });
 
   it.effect("stops reading an oversized response body instead of buffering it", () =>
     Effect.gen(function* () {

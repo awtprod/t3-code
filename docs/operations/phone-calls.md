@@ -34,11 +34,12 @@ The day and quiet hours use one timezone: `agent.quietHours.timezone`, then
 `agent.checkIns.timezone`, then `America/New_York`. Counts come from the activity rows (phone rows
 are exempt from the 500-row activity retention), so a call that ElevenLabs refused does not count.
 A refused call returns the reason to the agent; an approved call that cannot be placed leaves a
-`Phone: not placed …` row. If ElevenLabs gives no usable answer (timeout, connection failure, or an
-unreadable success response), the call may already be ringing: it leaves a
-`Phone: outcome unknown …` row that counts toward the daily cap, and the tool or the Inbox accept
-reports "outcome unknown — do not retry" instead of "not placed" (no end-of-call row follows, so
-check the ElevenLabs conversation history).
+`Phone: not placed …` row. A 4xx or 503 status, or an explicit `success: false`, proves the call was
+not started. If ElevenLabs gives no usable answer (timeout, connection failure, an unreadable
+success response, or any other 5xx such as 500, 502, or 504), the call may already be ringing: it
+leaves a `Phone: outcome unknown …` row that counts toward the daily cap, and the tool or the Inbox
+accept reports "outcome unknown — do not retry" instead of "not placed" (no end-of-call row follows,
+so check the ElevenLabs conversation history).
 
 ## Space policy
 

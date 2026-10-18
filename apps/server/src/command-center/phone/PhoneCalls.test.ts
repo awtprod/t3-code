@@ -383,6 +383,41 @@ describe("PhoneCalls", () => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect("records an HTTP 502 as outcome unknown and counts it toward the cap", () => {
+    const { harness, layer } = makeLayer();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(epoch(DAYTIME));
+      yield* seedSpace;
+      const calls = yield* PhoneCalls.PhoneCalls;
+      harness.failures.push(
+        new ElevenLabsCallError({
+          reason: "http",
+          status: 502,
+          message: "ElevenLabs failed while starting the call (HTTP 502); it may have started.",
+          body: "bad gateway",
+        }),
+      );
+      const error = yield* Effect.flip(calls.callOwner(ownerCall()));
+      expect(error.reason).toBe("connector");
+      expect(error.message).toMatch(/^Call outcome unknown — do not retry\./u);
+      expect(error.message).toContain("HTTP 502");
+      expect(error.message).toContain("It counts toward today's call limit.");
+      expect(PhoneCalls.phoneCallMayBeLive(error)).toBe(true);
+      const rows = yield* phoneRows;
+      expect(rows.map((row) => row.status)).toEqual(["outcome-unknown"]);
+      expect(rows[0]).toMatchObject({
+        sourceId: expect.stringMatching(/^phone-uncertain:owner:acme:[0-9a-f-]{36}$/u),
+      });
+      // The 502 counts like a placed call: two more are allowed, the fourth is refused.
+      expect((yield* calls.callOwner(ownerCall())).placed).toBe(true);
+      expect((yield* calls.callOwner(ownerCall())).placed).toBe(true);
+      const fourth = yield* calls.callOwner(ownerCall());
+      expect(fourth.placed).toBe(false);
+      expect(fourth.reason).toMatch(/called 3 times today .*limit 3/u);
+      expect(harness.requested).toHaveLength(3);
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("re-checks quiet hours under the lock for a call queued behind another", () => {
     const { harness, layer } = makeLayer();
     return Effect.gen(function* () {

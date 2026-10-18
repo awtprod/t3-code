@@ -16,11 +16,12 @@
  * fiber aborts the request. Errors carry the HTTP status and a short, redacted
  * body; the API key is never part of an error.
  *
- * Only an HTTP error status (`http`) or an explicit `success: false`
- * (`rejected`) proves the call was not started. A timeout or transport failure
- * has no answer at all, and an unusable 2xx answer (`invalid-response`) may
- * belong to a call that is already ringing; `callMayHaveStarted` tells them
- * apart.
+ * Only a 4xx or 503 HTTP status (`http`) or an explicit `success: false`
+ * (`rejected`) proves the call was not started. Any other 5xx (500, 502, 504,
+ * ...) can arrive after ElevenLabs already asked Twilio to dial, a timeout or
+ * transport failure has no answer at all, and an unusable 2xx answer
+ * (`invalid-response`) may belong to a call that is already ringing;
+ * `callMayHaveStarted` tells them apart.
  *
  * @module ElevenLabsClient
  */
@@ -99,9 +100,22 @@ const OutboundCallResponse = Schema.Struct({
 });
 const isElevenLabsCallError = Schema.is(ElevenLabsCallError);
 
-/** False only when ElevenLabs answered that it did not start the call (HTTP error or `success: false`). */
-export const callMayHaveStarted = (error: ElevenLabsCallError): boolean =>
-  error.reason !== "http" && error.reason !== "rejected";
+/** An HTTP status that proves no call was started: a 4xx refusal, or 503 (unavailable before any work). */
+const isDefiniteRefusalStatus = (status: number): boolean =>
+  (status >= 400 && status <= 499) || status === 503;
+
+/**
+ * False only when ElevenLabs answered that it did not start the call (`success: false`,
+ * HTTP 4xx, or HTTP 503). Any other 5xx, a missing status, and every no-answer or unusable
+ * answer may belong to a call that is already ringing.
+ */
+export const callMayHaveStarted = (error: ElevenLabsCallError): boolean => {
+  if (error.reason === "rejected") return false;
+  if (error.reason === "http") {
+    return error.status === undefined || !isDefiniteRefusalStatus(error.status);
+  }
+  return true;
+};
 const decodeResponse = Schema.decodeUnknownOption(Schema.fromJsonString(OutboundCallResponse));
 const isConversationId = Schema.is(ElevenLabsConversationId);
 
@@ -192,11 +206,14 @@ export const makeElevenLabsClient = (
         signal,
       });
       if (!response.ok) {
-        // An error status is a definite refusal even when its body cannot be read.
+        // 4xx and 503 prove the call was not started even when the body cannot be read;
+        // any other 5xx may have been sent after ElevenLabs asked Twilio to dial.
         const text = await readBoundedText(response, RESPONSE_MAX_BYTES).catch(() => "");
         throw new ElevenLabsCallError({
           reason: "http",
-          message: `ElevenLabs refused the call (HTTP ${response.status}).`,
+          message: isDefiniteRefusalStatus(response.status)
+            ? `ElevenLabs refused the call (HTTP ${response.status}).`
+            : `ElevenLabs failed while starting the call (HTTP ${response.status}); it may have started.`,
           status: response.status,
           body: redactProviderText(text),
         });
