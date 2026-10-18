@@ -782,7 +782,15 @@ const invokePhoneTool = (
               Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
               Layer.mock(ProviderRegistry.ProviderRegistry)({}),
               Layer.mock(SpaceActivity.SpaceActivity)({}),
-              Layer.mock(ThreadManagement.ThreadManagementService)({}),
+              // Write tools check that the calling thread's run is live.
+              Layer.mock(ThreadManagement.ThreadManagementService)({
+                getThreadShell: (id) =>
+                  Effect.succeed({
+                    ...liveThreadShell(id),
+                    providerInstanceId:
+                      scope.thread?.providerInstanceId ?? ProviderInstanceId.make("codex"),
+                  }),
+              }),
               // Any dial records a call; cc_phone_call must never reach it.
               Layer.mock(PhoneCalls)({
                 callOwner: (request) =>
