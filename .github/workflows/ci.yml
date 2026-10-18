@@ -120,6 +120,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          # Full history: scripts/public-leak-scan.test.ts borrows this checkout's
+          # objects and needs the pinned upstream commits it verifies provenance against.
+          fetch-depth: 0
           sparse-checkout: |
             /*
             !/.repos/
@@ -181,11 +184,13 @@ jobs:
   test_server:
     name: Test Server ${{ matrix.shard }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Six shards as upstream runs them; GitHub-hosted runners are slower than
+    # upstream's, so each shard gets a 15-minute budget.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
