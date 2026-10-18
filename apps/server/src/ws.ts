@@ -2,7 +2,7 @@ import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
 } from "@t3tools/shared/usageLimits";
-import { INSTAGRAM_REEL_METHODS } from "@t3tools/contracts";
+import { AuthCommandCenterApproveScope, INSTAGRAM_REEL_METHODS } from "@t3tools/contracts";
 import { InstagramPublish } from "./command-center/publish/instagram/InstagramPublish.ts";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
@@ -224,6 +224,7 @@ import { DESKTOP_RENDERER_ORIGINS } from "./httpCors.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import * as CommandCenterService from "./command-center/Service.ts";
 import * as CommandCenterInbox from "./command-center/Inbox.ts";
+import * as PhoneCallProposals from "./command-center/phone/PhoneCallProposals.ts";
 import * as SprintPlan from "./command-center/SprintPlan.ts";
 import * as CommandCenterDigest from "./command-center/Digest.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
@@ -757,6 +758,7 @@ const makeWsRpcLayer = (
       const relayClient = yield* RelayClient.RelayClient;
       const commandCenter = yield* CommandCenterService.CommandCenterService;
       const commandCenterInbox = yield* Effect.serviceOption(CommandCenterInbox.CommandCenterInbox);
+      const phoneCallProposals = yield* Effect.serviceOption(PhoneCallProposals.PhoneCallProposals);
       const sprintPlan = yield* Effect.serviceOption(SprintPlan.SprintPlanService);
       const commandCenterDigest = yield* Effect.serviceOption(
         CommandCenterDigest.CommandCenterDigest,
@@ -2847,7 +2849,16 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.inboxCandidateAccept,
             withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
-              inbox.acceptCandidate(input, { subject: currentSession.subject }),
+              Option.match(phoneCallProposals, {
+                // Without the phone module an accepted `phone.call` plan just stays accepted.
+                onNone: () => inbox.acceptCandidate(input, { subject: currentSession.subject }),
+                // Accepting a `phone.call` candidate places the call, so it needs approve scope.
+                onSome: (proposals) =>
+                  proposals.acceptCandidate(input, {
+                    subject: currentSession.subject,
+                    canApprove: currentSession.scopes.includes(AuthCommandCenterApproveScope),
+                  }),
+              }),
             ),
             { "rpc.aggregate": "command-center" },
           ),

@@ -137,7 +137,7 @@ const epochOf = (iso: string): number | undefined => {
 };
 
 /** Whether `epochMs` falls inside the agent's quiet hours (local clock). */
-const isSpaceAgentQuietTime = (
+export const isSpaceAgentQuietTime = (
   agent: Pick<SpaceAgentConfigType, "checkIns" | "quietHours">,
   epochMs: number,
 ): boolean =>

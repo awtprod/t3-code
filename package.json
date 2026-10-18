@@ -56,6 +56,7 @@
     "operations:rollback-manifest": "node scripts/command-center/rollback-manifest.ts",
     "operations:preflight": "node scripts/command-center/deployment-preflight.ts",
     "credentials:webhooks:provision": "node apps/server/src/command-center/provisionWebhookCredentials.ts",
+    "credentials:phone": "node apps/server/src/command-center/phone/provisionPhoneConnection.ts",
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules apps/*/dist apps/*/dist-electron packages/*/dist .vite-plus apps/*/.vite-plus packages/*/.vite-plus",
     "sync:repos": "node scripts/sync-reference-repos.ts"
   },

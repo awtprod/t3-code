@@ -242,6 +242,11 @@ import * as GoogleActivityPoller from "./command-center/GoogleActivityPoller.ts"
 import * as RunLifecycle from "./command-center/RunLifecycle.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import { webhookHttpRouteLayer } from "./command-center/WebhookHttp.ts";
+import * as ElevenLabsClient from "./command-center/phone/ElevenLabsClient.ts";
+import * as PhoneCallProposals from "./command-center/phone/PhoneCallProposals.ts";
+import * as PhoneCalls from "./command-center/phone/PhoneCalls.ts";
+import * as PhoneConnection from "./command-center/phone/PhoneConnection.ts";
+import * as PhoneWebhook from "./command-center/phone/PhoneWebhook.ts";
 import { forkParked, ServerActivation } from "./serverActivation.ts";
 
 // MCP handoff thread IDs include escaped provenance and can exceed find-my-way's
@@ -821,6 +826,22 @@ const SpaceAgentWakerLayerLive = SpaceAgentWaker.layer.pipe(
   Layer.provide(PersistenceLayerLive),
 );
 
+const PhoneConnectionLayerLive = PhoneConnection.layer.pipe(Layer.provide(ServerSecretStore.layer));
+
+const PhoneCallsLayerLive = PhoneCalls.layer.pipe(
+  Layer.provideMerge(PhoneConnectionLayerLive),
+  Layer.provide(ElevenLabsClient.layer),
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
+/** Outbound calls and approval-gated third-party calls (the webhook route builds its own service). */
+const PhoneLayerLive = PhoneCallProposals.layer.pipe(
+  Layer.provideMerge(PhoneCallsLayerLive),
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
 const InstagramPublishLayerLive = InstagramPublishLive.layer.pipe(
   Layer.provide(InstagramTokenStore.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provide(OrchestrationProjectionSnapshotQueryLive),
@@ -844,6 +865,7 @@ const CommandCenterLayerLive = Layer.mergeAll(
   RunLifecycleLayerLive,
   SpaceAgentLayerLive,
   SpaceAgentWakerLayerLive,
+  PhoneLayerLive,
   GoogleActivityPollerLayerLive,
 ).pipe(Layer.provide(OrchestrationProjectionSnapshotQueryLive));
 
@@ -1090,6 +1112,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     deviceHubProxyRouteLayer,
     staticAndDevRouteLayer,
     webhookHttpRouteLayer,
+    PhoneWebhook.phoneWebhookHttpRouteLayer,
     websocketRpcRouteLayer,
   ),
   McpHttpServer.layer.pipe(

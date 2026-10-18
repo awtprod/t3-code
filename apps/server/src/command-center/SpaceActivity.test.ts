@@ -168,6 +168,46 @@ it.layer(testLayer)("SpaceActivity service", (it) => {
     }),
   );
 
+  it.effect("shows phone rows in recent, unlike mail rows, and keeps them out of the cursor", () =>
+    Effect.gen(function* () {
+      yield* insertSpace("phones");
+      const activity = yield* SpaceActivity;
+      expect(
+        yield* activity.record({
+          ...row({ sequence: SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE }),
+          spaceId: "phones",
+          sourceKind: "run",
+          sourceId: "phone-start:conv_1",
+          url: "https://api.elevenlabs.io/v1/convai/conversations/conv_1",
+        }),
+      ).toBe(true);
+      // A newer mail row with the same sequence 0: hidden unless asked for.
+      expect(
+        yield* activity.record({
+          ...row({
+            sequence: SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
+            occurredAt: secondsAfterNow(1),
+          }),
+          spaceId: "phones",
+          sourceKind: "run",
+          sourceId: "gmail:thread-9:1",
+        }),
+      ).toBe(true);
+      // The layer's database is shared and the next test asserts no Run cursor
+      // yet, so no run row with a real sequence is written here.
+      expect(yield* activity.latestEventSequence("run")).toBeUndefined();
+      const visible = yield* activity.recent({ spaceId: "phones" });
+      expect(visible.map((entry) => [entry.sourceId, entry.url])).toEqual([
+        ["phone-start:conv_1", "https://api.elevenlabs.io/v1/convai/conversations/conv_1"],
+      ]);
+      const all = yield* activity.recent({ spaceId: "phones", includeExternal: true });
+      expect(all.map((entry) => entry.sourceId)).toEqual([
+        "gmail:thread-9:1",
+        "phone-start:conv_1",
+      ]);
+    }),
+  );
+
   it.effect("keeps a source-supplied link and leaves external rows out of the cursors", () =>
     Effect.gen(function* () {
       yield* insertSpace("personal");
@@ -288,6 +328,39 @@ it.layer(testLayer)("SpaceActivity service", (it) => {
       expect(yield* activity.recent({ spaceId: "command-center" })).toHaveLength(1);
       const invalid = yield* Effect.flip(activity.recent({ spaceId: "acme", since: "soon" }));
       expect(invalid.reason).toBe("validation");
+    }),
+  );
+
+  it.effect("never prunes phone rows, which daily call caps and the webhook read", () =>
+    Effect.gen(function* () {
+      yield* insertSpace("dialer");
+      const activity = yield* SpaceActivity;
+      const oldest = {
+        ...row({ sequence: SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE }),
+        spaceId: "dialer",
+        sourceKind: "run" as const,
+      };
+      yield* activity.record({ ...oldest, sourceId: "phone-start:conv_old" });
+      yield* activity.record({ ...oldest, sourceId: "phone-uncertain:owner:dialer:a1" });
+      // Only run rows are phone rows; a thread whose id looks similar is pruned as usual.
+      yield* activity.record({ ...oldest, sourceKind: "thread", sourceId: "phone-lookalike" });
+      for (let index = 0; index < SPACE_ACTIVITY_RETENTION + 5; index += 1) {
+        yield* activity.record({
+          ...row({ sequence: 100 + index }),
+          spaceId: "dialer",
+          occurredAt: secondsAfterNow(index + 1),
+        });
+      }
+      const sql = yield* SqlClient.SqlClient;
+      const kept = yield* sql<{ readonly sourceId: string; readonly n: number }>`
+        SELECT source_id AS "sourceId", COUNT(*) AS n FROM command_center_space_activity
+        WHERE space_id = 'dialer' GROUP BY source_id ORDER BY source_id
+      `;
+      expect(kept).toEqual([
+        { sourceId: "phone-start:conv_old", n: 1 },
+        { sourceId: "phone-uncertain:owner:dialer:a1", n: 1 },
+        { sourceId: "thread-1", n: SPACE_ACTIVITY_RETENTION },
+      ]);
     }),
   );
 });

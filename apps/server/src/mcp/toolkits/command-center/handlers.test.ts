@@ -14,6 +14,8 @@ import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
 import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
+import { PhoneCalls } from "../../../command-center/phone/PhoneCalls.ts";
+import { PhoneCallProposals } from "../../../command-center/phone/PhoneCallProposals.ts";
 import { SqlitePersistenceMemory } from "../../../persistence/Layers/Sqlite.ts";
 import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -295,6 +297,8 @@ const invokeSpaceActivity = (
               Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
               Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
               Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+              Layer.mock(PhoneCalls)({}),
+              Layer.mock(PhoneCallProposals)({}),
               Layer.succeed(
                 ReadinessGate.CommandCenterReadinessGate,
                 ReadinessGate.CommandCenterReadinessGate.of({
@@ -496,6 +500,8 @@ const invokeItemTool = (
               Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
               Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
               Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+              Layer.mock(PhoneCalls)({}),
+              Layer.mock(PhoneCallProposals)({}),
               Layer.mock(SpaceActivity.SpaceActivity)({}),
               Layer.succeed(
                 ReadinessGate.CommandCenterReadinessGate,
@@ -591,6 +597,178 @@ describe("Command Center MCP Item writes", () => {
       const user = yield* invokeItemTool(userScope, "cc_items_create", createInput);
       expect(user.outputs).toEqual([false]);
       expect(user.calls[0]?.actor).toBeUndefined();
+    }),
+  );
+});
+
+const PHONE_CAPABILITIES = ["cc.phone.call-owner", "cc.phone.call"] as const;
+
+const invokePhoneTool = (
+  scope: McpInvocationContext.McpInvocationScope,
+  name: "cc_phone_call_me" | "cc_phone_call",
+  input: unknown,
+  allowedCapabilities: ReadonlyArray<string> = PHONE_CAPABILITIES,
+) =>
+  Effect.gen(function* () {
+    const calls: Array<{ readonly method: string; readonly input: unknown }> = [];
+    const outputs = yield* Effect.gen(function* () {
+      const toolkit = yield* CommandCenterToolkit;
+      const stream = yield* toolkit.handle(name, input as never);
+      return Array.from(yield* Stream.runCollect(stream)).map((output) => output.isFailure);
+    }).pipe(
+      Effect.catch(() => Effect.succeed([true])),
+      Effect.provide(
+        CommandCenterToolkitHandlersLive.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+              Layer.mock(CommandCenterService.CommandCenterService)({
+                getConfiguredSpace: () =>
+                  Effect.succeed({
+                    agent: { enabled: true },
+                    policy: { allowedCapabilities },
+                  } as never),
+              }),
+              Layer.mock(AutomationRuns.AutomationRuns)({}),
+              Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+              Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+              Layer.mock(SpaceActivity.SpaceActivity)({}),
+              // Any dial records a call; cc_phone_call must never reach it.
+              Layer.mock(PhoneCalls)({
+                callOwner: (request) =>
+                  Effect.sync(() => {
+                    calls.push({ method: "callOwner", input: request });
+                    return { placed: true, conversationId: "conv_1" };
+                  }),
+                callThirdParty: (plan) =>
+                  Effect.sync(() => {
+                    calls.push({ method: "callThirdParty", input: plan });
+                    return { placed: true, conversationId: "conv_2" };
+                  }),
+              }),
+              Layer.mock(PhoneCallProposals)({
+                file: (request) =>
+                  Effect.sync(() => {
+                    calls.push({ method: "file", input: request });
+                    return {
+                      status: "awaiting-approval" as const,
+                      itemId: "phone-call:1",
+                      candidateRevisionId: "revision:1",
+                    };
+                  }),
+              }),
+              Layer.succeed(
+                ReadinessGate.CommandCenterReadinessGate,
+                ReadinessGate.CommandCenterReadinessGate.of({
+                  state: Effect.succeed("ready"),
+                  requireReady: Effect.void,
+                  markReady: Effect.void,
+                  markFailed: Effect.void,
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    return { outputs, calls };
+  });
+
+const phoneScope = (overrides: Partial<McpInvocationContext.McpInvocationScope> = {}) =>
+  itemScope({ capabilities: new Set(PHONE_CAPABILITIES), ...overrides });
+
+const thirdPartyCall = {
+  requestId: "dentist-1",
+  to: "+15550100123",
+  calleeName: "Acme Dental",
+  purpose: "Move the cleaning",
+  brief: "Move Tuesday's cleaning to Thursday morning.",
+  allowedOutcomes: ["Thursday before noon"],
+};
+
+describe("Command Center MCP phone tools", () => {
+  it.effect("cc_phone_call only files the plan for approval and never dials", () =>
+    Effect.gen(function* () {
+      const { outputs, calls } = yield* invokePhoneTool(phoneScope(), "cc_phone_call", {
+        ...thirdPartyCall,
+        spaceId: "acme",
+      });
+      expect(outputs).toEqual([false]);
+      expect(calls).toEqual([
+        {
+          method: "file",
+          input: {
+            spaceId: "acme",
+            threadId: "cc-space-agent-acme",
+            requestId: "dentist-1",
+            plan: {
+              spaceId: "acme",
+              to: "+15550100123",
+              calleeName: "Acme Dental",
+              purpose: "Move the cleaning",
+              brief: "Move Tuesday's cleaning to Thursday morning.",
+              allowedOutcomes: ["Thursday before noon"],
+            },
+          },
+        },
+      ]);
+    }),
+  );
+
+  it.effect("cc_phone_call_me places the owner call in the credential's Space", () =>
+    Effect.gen(function* () {
+      const { outputs, calls } = yield* invokePhoneTool(phoneScope(), "cc_phone_call_me", {
+        purpose: "Vendor switch",
+        brief: "Example Parts quotes 10% lower.",
+        question: "Switch vendors?",
+      });
+      expect(outputs).toEqual([false]);
+      expect(calls).toEqual([
+        {
+          method: "callOwner",
+          input: {
+            spaceId: "acme",
+            purpose: "Vendor switch",
+            brief: "Example Parts quotes 10% lower.",
+            question: "Switch vendors?",
+          },
+        },
+      ]);
+    }),
+  );
+
+  it.effect("refuses other Spaces, non-agent credentials, a narrowed policy, and bad input", () =>
+    Effect.gen(function* () {
+      const { role: _role, ...userScope } = phoneScope();
+      for (const [scope, name, input, allowed] of [
+        [
+          phoneScope(),
+          "cc_phone_call",
+          { ...thirdPartyCall, spaceId: "example" },
+          PHONE_CAPABILITIES,
+        ],
+        [userScope, "cc_phone_call", thirdPartyCall, PHONE_CAPABILITIES],
+        [userScope, "cc_phone_call_me", { purpose: "p", brief: "b" }, PHONE_CAPABILITIES],
+        [phoneScope(), "cc_phone_call", thirdPartyCall, ["cc.phone.call-owner"]],
+        [
+          phoneScope({ capabilities: new Set(["cc.phone.call-owner"]) }),
+          "cc_phone_call",
+          thirdPartyCall,
+          PHONE_CAPABILITIES,
+        ],
+        [phoneScope(), "cc_phone_call", { ...thirdPartyCall, to: "555-0100" }, PHONE_CAPABILITIES],
+        [
+          phoneScope(),
+          "cc_phone_call_me",
+          { purpose: "p", brief: "x".repeat(1_501) },
+          PHONE_CAPABILITIES,
+        ],
+      ] as const) {
+        const { outputs, calls } = yield* invokePhoneTool(scope, name, input, allowed);
+        expect(outputs).toEqual([true]);
+        expect(calls).toEqual([]);
+      }
     }),
   );
 });
