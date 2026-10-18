@@ -2,9 +2,9 @@ import { SpaceId } from "@command-center/core";
 import { CommandCenterError } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import {
   makeClosedPullRequestReconciler,
   makeRepositoryCheckRecorder,

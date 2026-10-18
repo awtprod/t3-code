@@ -37,32 +37,9 @@ credentials. Install and sign in to one or more providers before starting your f
 | [Cursor CLI](https://cursor.com/cli)                  | `cursor-agent` | `agent login`         |
 | [Grok Build](https://x.ai/cli)                        | `grok`         | `grok login`          |
 | [OpenCode](https://opencode.ai)                       | `opencode`     | `opencode auth login` |
-| [Kimi K3](https://github.com/MoonshotAI/kimi-code)    | `kimi`         | `/login` inside Kimi  |
 
 See [provider setup](./docs/user/install.md#providers) for binary discovery and multi-account
 guidance.
-
-#### Kimi K3 setup
-
-Command Center supports Kimi K3 through Kimi Code `0.31.1` or newer. Because Node.js is already a
-prerequisite for this repository, the npm installation is the shortest setup path:
-
-```bash
-npm install --global @moonshot-ai/kimi-code@latest
-kimi --version
-kimi
-```
-
-At the Kimi prompt, run `/login` and choose Kimi Code OAuth or a Kimi Platform API key. Then open
-**Settings** → **Providers** in Command Center, enable Kimi, and verify that the `kimi` binary is
-detected. New Kimi threads default to the `kimi-code/k3` model.
-
-Set a separate `KIMI_CODE_HOME` on each provider instance when using multiple Kimi accounts.
-Interactive Kimi sessions can use the npm installation. Scheduled or unattended Command Center
-automation requires Linux, Kimi Code `0.31.1` or newer as a native non-writable ELF executable, and
-Bubblewrap at `/usr/bin/bwrap`; npm and script launchers remain interactive-only. See
-[Kimi provider details](./docs/user/providers-kimi.md) for session, caching, subagent, and isolation
-behavior.
 
 ### 2. Clone and install
 
@@ -97,11 +74,13 @@ For a production-like local build where the server also serves the compiled web 
 pnpm serve --home-dir /absolute/path/to/command-center-data
 ```
 
-`pnpm serve` rebuilds the web client before starting. Use `pnpm serve:fast` on later starts when the
-web source has not changed. An explicit home directory keeps both modes on the same isolated runtime
-database; without it, development and serve mode intentionally use different data directories.
+#### Windows (`scoop`)
 
-To run the Electron desktop app during development:
+```bash
+scoop install extras/t3code
+```
+
+#### macOS (Homebrew)
 
 ```bash
 pnpm dev:desktop
@@ -183,10 +162,17 @@ pnpm dist:desktop:artifact -- --platform linux --target AppImage --arch arm64
 Install Visual Studio 2022 Build Tools with **Desktop development with C++**, Python 3, and Rust's
 MSVC toolchain. In PowerShell, add the desired Rust target and build the installer:
 
-```powershell
-rustup target add x86_64-pc-windows-msvc
-pnpm dist:desktop:win:x64
-```
+- [Install and first run](./docs/user/install.md)
+- [Permission modes](./docs/user/permission-modes.md)
+- [Keyboard shortcuts](./docs/user/keybindings.md)
+- [Project settings](./docs/user/project-settings.md)
+- [Appearance preferences](./docs/user/appearance.md)
+- [Remote access from a phone or another machine](./docs/user/remote-access.md)
+- [Connect Claude Code, Codex, ChatGPT and other agents over MCP](./docs/user/outside-agents.md)
+- [Keeping app and server in sync](./docs/user/updating.md)
+- [Source control integrations](./docs/user/source-control.md)
+- Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
+- [Run T3 Code as a background service](./docs/user/background-service.md)
 
 Windows ARM64 is also supported when the ARM64 MSVC toolchain is installed:
 

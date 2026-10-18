@@ -7,10 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       upstream_ref:
-        description: Exact fetched ref (refs/tags/... or refs/remotes/upstream/...)
+        description: Exact fetched ref (refs/tags/... or refs/remotes/upstream/...). Empty = newest upstream stable release tag.
         required: false
-        # Upstream deleted v1 orchestration after v0.0.45; Command Center still runs on it.
-        default: refs/tags/v0.0.45
+        # Command Center re-platformed onto upstream orchestration v2 at tag v0.1.0
+        # (2026-10). An empty ref follows upstream's newest stable vX.Y.Z tag
+        # (never nightly/preview, never below v0.1.0), so the daily run cannot
+        # sit green on a stale pin while upstream releases move on.
+        default: ""
         type: string
       expected_commit:
         description: Optional full 40-character commit the ref must resolve to
@@ -28,8 +31,9 @@ permissions:
   pull-requests: write
 
 env:
-  # Pinned to the last upstream tag that still ships v1 orchestration (see the input default).
-  UPSTREAM_REF: ${{ inputs.upstream_ref || 'refs/tags/v0.0.45' }}
+  # Empty unless dispatched with an explicit ref; the "Choose the upstream release"
+  # step then resolves the newest upstream stable tag and its commit.
+  UPSTREAM_REF: ${{ inputs.upstream_ref || '' }}
   EXPECTED_COMMIT: ${{ inputs.expected_commit || '' }}
   SYNC_BOT_NAME: github-actions[bot]
   SYNC_BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
@@ -56,6 +60,15 @@ jobs:
           git fetch --prune --force upstream \
             '+refs/heads/*:refs/remotes/upstream/*' \
             '+refs/tags/*:refs/tags/*'
+
+      - name: Choose the upstream release
+        if: env.UPSTREAM_REF == ''
+        run: |
+          read -r ref commit < <(node scripts/command-center/upstream-sync.ts latest-stable-tag --remote upstream)
+          # The fork has release tags of its own; pin the commit upstream publishes for this tag.
+          echo "UPSTREAM_REF=$ref" >> "$GITHUB_ENV"
+          echo "EXPECTED_COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "Tracking upstream stable release $ref at $commit." | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Validate the target and its ancestry
         id: plan

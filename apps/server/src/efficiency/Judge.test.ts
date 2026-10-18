@@ -1,5 +1,9 @@
 import { describe, expect, it } from "@effect/vitest";
+import { DEFAULT_USAGE_PRICE_OVERRIDES } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+
+import { createOverrideRateTable } from "../usage/usagePricing.ts";
+import type { UsageRateTables } from "../usage/UsageService.ts";
 
 import {
   argmaxIndex,
@@ -7,6 +11,7 @@ import {
   buildAnswersFromTypesafe,
   confidenceFromDistribution,
   JudgeError,
+  judgeCostMicroUsd,
   makeTestJudge,
   normalizeDistribution,
   resolveJudgeConfig,
@@ -352,6 +357,62 @@ describe("Judge.ask", () => {
       });
       expect(calls).toBe(2);
       expect(asScore(result.answers.complexity).score).toBe(0);
+    }),
+  );
+});
+
+describe("Judge pricing (one price path: UsageService.readRateTables)", () => {
+  const seededTables: UsageRateTables = {
+    rates: new Map(),
+    overrides: createOverrideRateTable(DEFAULT_USAGE_PRICE_OVERRIDES),
+    aliases: new Map(),
+  };
+
+  it("prices jev-latest from the seeded usagePriceOverrides", () => {
+    // $0.042 per 1M input, output free: 1M input + 1M output = 42_000 micro-USD.
+    expect(
+      judgeCostMicroUsd(seededTables, "jev-latest", {
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+      }),
+    ).toBe(42_000);
+  });
+
+  it("leaves an unknown model unpriced (null, never $0)", () => {
+    expect(
+      judgeCostMicroUsd(seededTables, "acme-unknown-judge", { inputTokens: 100, outputTokens: 5 }),
+    ).toBeNull();
+  });
+
+  it("leaves a call unpriced when the rate tables are unavailable", () => {
+    expect(judgeCostMicroUsd(undefined, "jev-latest", { inputTokens: 100, outputTokens: 5 })).toBe(
+      null,
+    );
+  });
+
+  it.effect("records the priced cost on the judge usage row", () =>
+    Effect.gen(function* () {
+      const rows: Array<{ readonly model: string; readonly costMicroUsd: number | null }> = [];
+      const judge = makeTestJudge(
+        config({ transport: "typesafe", model: "jev-latest" }),
+        jsonResponse(LIVE_TYPESAFE_RESPONSE),
+        {
+          rateTables: Effect.succeed(seededTables),
+          sideEffects: {
+            recordUsage: (row) => Effect.sync(() => void rows.push(row)),
+            appendDecision: () => Effect.void,
+          },
+        },
+      );
+      yield* judge.ask({
+        operation: "tier-judgment",
+        state: { message: "add a feature" },
+        questions: { complexity: scoreQuestion },
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.model).toBe("jev-latest");
+      // 326 input tokens at $0.042/1M rounds to 14 micro-USD; output is free.
+      expect(rows[0]?.costMicroUsd).toBe(14);
     }),
   );
 });

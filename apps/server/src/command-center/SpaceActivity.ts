@@ -24,7 +24,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 const SPACE_ACTIVITY_SUMMARY_CHARS = 1_000;
 const SPACE_ACTIVITY_TITLE_CHARS = 200;
@@ -199,6 +199,16 @@ export interface SpaceActivityShape {
     threadId: string,
     since: string,
   ) => Effect.Effect<boolean, CommandCenterError>;
+  /**
+   * Whether any row for this source already occurred at exactly `occurredAt`.
+   * A V2 run can report the same terminal status more than once; its rows use
+   * the run's completion time, so a repeat finds the first row and skips.
+   */
+  readonly hasRowAt: (
+    sourceKind: SpaceActivitySourceKind,
+    sourceId: string,
+    occurredAt: string,
+  ) => Effect.Effect<boolean, CommandCenterError>;
 }
 
 export class SpaceActivity extends Context.Service<SpaceActivity, SpaceActivityShape>()(
@@ -336,7 +346,19 @@ export const make = Effect.gen(function* () {
       Effect.mapError(persistenceError("Could not read Space activity.")),
     );
 
-  return SpaceActivity.of({ recent, record, latestEventSequence, hasRecentTurnRow });
+  const hasRowAt: SpaceActivityShape["hasRowAt"] = (sourceKind, sourceId, occurredAt) =>
+    sql<{ readonly found: number }>`
+      SELECT 1 AS found
+      FROM command_center_space_activity
+      WHERE source_kind = ${sourceKind} AND source_id = ${sourceId}
+        AND occurred_at = ${occurredAt}
+      LIMIT 1
+    `.pipe(
+      Effect.map((rows) => rows.length > 0),
+      Effect.mapError(persistenceError("Could not read Space activity.")),
+    );
+
+  return SpaceActivity.of({ recent, record, latestEventSequence, hasRecentTurnRow, hasRowAt });
 });
 
 export const layer = Layer.effect(SpaceActivity, make);

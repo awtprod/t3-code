@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Command Center module that predates the Effect platform port.
 import * as NodeCrypto from "node:crypto";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -10,9 +11,9 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import { CommandCenterEventStream, layer as eventStreamLayer } from "./EventStream.ts";
 
 type Sql = SqlClient.SqlClient;
@@ -439,14 +440,33 @@ it.effect("reconstructs the durable Command timeline with route and thread links
       threadId: "thread-timeline",
       startedAt: "2026-01-01T01:00:00.000Z",
     });
+    // The excerpt comes from the V2 message projection, as the V2 event sink
+    // writes it (payload_json is the encoded conversation message).
     yield* sql`
-      INSERT INTO projection_thread_messages (
-        message_id, thread_id, turn_id, role, text, attachments_json,
-        is_streaming, created_at, updated_at
+      INSERT INTO orchestration_v2_projection_messages (
+        message_id, thread_id, run_id, node_id, role, streaming,
+        created_at, updated_at, payload_json
       ) VALUES (
-        'message-timeline-one', 'thread-timeline', 'turn-timeline-one', 'assistant',
-        'The first example is open.', '[]', 0,
-        '2026-01-01T01:01:00.000Z', '2026-01-01T01:01:00.000Z'
+        'message-timeline-one', 'thread-timeline', 'run-timeline-one', NULL, 'assistant', 0,
+        '2026-01-01T01:01:00.000Z', '2026-01-01T01:01:00.000Z',
+        ${JSON.stringify({
+          id: "message-timeline-one",
+          threadId: "thread-timeline",
+          role: "assistant",
+          text: "The first example is open.",
+          streaming: false,
+        })}
+      )
+    `;
+    // A message still streaming is not an excerpt.
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_messages (
+        message_id, thread_id, run_id, node_id, role, streaming,
+        created_at, updated_at, payload_json
+      ) VALUES (
+        'message-timeline-streaming', 'thread-timeline', 'run-timeline-two', NULL, 'assistant', 1,
+        '2026-01-01T01:02:00.000Z', '2026-01-01T01:02:00.000Z',
+        ${JSON.stringify({ text: "Still typ", streaming: true })}
       )
     `;
     yield* sql`

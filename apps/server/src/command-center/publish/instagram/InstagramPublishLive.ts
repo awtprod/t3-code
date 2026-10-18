@@ -11,7 +11,7 @@ import * as Config from "effect/Config";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as OrchestrationBridge from "../../OrchestrationBridge.ts";
 import * as WorkspacePaths from "../../../workspace/WorkspacePaths.ts";
 import { InstagramTokenStore } from "./InstagramTokenStore.ts";
 import { InstagramClient } from "./client.ts";
@@ -93,7 +93,7 @@ export const layer = Layer.effect(
   InstagramPublish,
   Effect.gen(function* () {
     const tokens = yield* InstagramTokenStore;
-    const projection = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+    const projection = yield* OrchestrationBridge.OrchestrationBridge;
     const paths = yield* WorkspacePaths.WorkspacePaths;
     const inspect: InstagramPublishPorts["inspect"] = Effect.fn("InstagramPublishLive.inspect")(
       function* (b) {

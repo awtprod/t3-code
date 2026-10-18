@@ -10,8 +10,8 @@ import * as Result from "effect/Result";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { SshPasswordPrompt } from "./auth.ts";
 import { SshCommandError } from "./errors.ts";
@@ -27,6 +27,10 @@ import {
   SshEnvironmentManager,
   waitForHttpReady,
 } from "./tunnel.ts";
+
+// Upstream derives the remote state key from the target inside an Effect; the
+// script builders take the key itself.
+const TEST_STATE_KEY = "test-state-key";
 
 const TEST_NODE_ENGINE_RANGE = "^22.16 || ^23.11 || >=24.10";
 
@@ -182,7 +186,8 @@ describe("ssh tunnel scripts", () => {
 
     assert.include(
       buildRemoteLaunchScript({ nodeEngineRange: TEST_NODE_ENGINE_RANGE }),
-      '[ -n "$REMOTE_PID" ] && [ -n "$REMOTE_PORT" ] && kill -0 "$REMOTE_PID" 2>/dev/null',
+      // Upstream v0.1.0 reuses a live managed server only after checking its PID.
+      'if [ -n "$REMOTE_PID" ] && kill -0 "$REMOTE_PID" 2>/dev/null; then',
     );
     assert.include(buildRemoteLaunchScript(), "RUNNER_CHANGED=1");
     assert.include(buildRemoteLaunchScript(), "ensure_remote_node_path()");
@@ -209,21 +214,27 @@ describe("ssh tunnel scripts", () => {
       "@awtprod/command-center@nightly",
     );
     assert.include(
-      buildRemotePairingScript(target),
+      buildRemotePairingScript(TEST_STATE_KEY),
       '"$RUNNER_FILE" auth pairing create --base-dir "$PAIRING_BASE_DIR" --json',
     );
-    assert.include(buildRemotePairingScript(target), 'PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"');
-    assert.notInclude(buildRemotePairingScript(target), "server-home");
     assert.include(
-      buildRemotePairingScript(target, { packageSpec: "@awtprod/command-center@nightly" }),
+      buildRemotePairingScript(TEST_STATE_KEY),
+      'PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"',
+    );
+    assert.notInclude(buildRemotePairingScript(TEST_STATE_KEY), "server-home");
+    assert.include(
+      buildRemotePairingScript(TEST_STATE_KEY, { packageSpec: "@awtprod/command-center@nightly" }),
       "@awtprod/command-center@nightly",
     );
     assert.include(
-      buildRemoteStopScript(target),
+      buildRemoteStopScript(TEST_STATE_KEY),
       'if [ "$REMOTE_MANAGED" != "external" ] && [ -n "$REMOTE_PID" ]',
     );
-    assert.include(buildRemoteStopScript(target), 'kill "$REMOTE_PID" 2>/dev/null || true');
-    assert.include(buildRemoteStopScript(target), 'rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE"');
+    assert.include(buildRemoteStopScript(TEST_STATE_KEY), 'kill "$REMOTE_PID" 2>/dev/null || true');
+    assert.include(
+      buildRemoteStopScript(TEST_STATE_KEY),
+      'rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE"',
+    );
     // Fork: remote launch state lives under ~/.command-center, not upstream's ~/.t3.
     assert.include(
       buildRemoteLaunchScript(),
@@ -233,42 +244,25 @@ describe("ssh tunnel scripts", () => {
     // Pairing tokens must be minted in the base dir the launched server reads.
     const serverHome = (script: string) => /^DEFAULT_SERVER_HOME="([^"]*)"$/m.exec(script)?.[1];
     assert.strictEqual(
-      serverHome(buildRemotePairingScript(target)),
+      serverHome(buildRemotePairingScript(TEST_STATE_KEY)),
       serverHome(buildRemoteLaunchScript()),
     );
-    for (const script of [buildRemotePairingScript(target), buildRemoteStopScript(target)]) {
+    for (const script of [
+      buildRemotePairingScript(TEST_STATE_KEY),
+      buildRemoteStopScript(TEST_STATE_KEY),
+    ]) {
       assert.include(script, 'STATE_DIR="$HOME/.command-center/ssh-launch/');
     }
     assert.include(
-      buildRemoteStopScript(target),
+      buildRemoteStopScript(TEST_STATE_KEY),
       "Remote Command Center server with PID %s did not stop within 2 seconds.",
     );
     assert.include(
       buildRemoteLaunchScript(),
       'DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"',
     );
-    assert.include(buildRemoteLaunchScript(), "resolve_default_runtime_port()");
-    assert.include(
-      buildRemoteLaunchScript(),
-      'DEFAULT_RUNTIME_INFO="$(resolve_default_runtime_port',
-    );
-    assert.include(
-      buildRemoteLaunchScript(),
-      "if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(port))",
-    );
-    assert.include(buildRemoteLaunchScript(), 'PID_TO_STOP="${REMOTE_PID:-$DEFAULT_RUNTIME_PID}"');
-    assert.include(buildRemoteLaunchScript(), 'REMOTE_PORT="$DEFAULT_REMOTE_PORT"');
-    assert.include(buildRemoteLaunchScript(), 'rm -f "$PID_FILE"');
-    assert.include(buildRemoteLaunchScript(), "printf 'external\\n' >\"$MANAGED_FILE\"");
-    assert.include(buildRemoteLaunchScript(), 'if [ -z "$REMOTE_PORT" ]; then');
-    assert.isBelow(
-      buildRemoteLaunchScript().indexOf('if [ "$REMOTE_MANAGED" = "managed" ]'),
-      buildRemoteLaunchScript().indexOf("printf 'external\\n' >\"$MANAGED_FILE\""),
-    );
-    assert.isBelow(
-      buildRemoteLaunchScript().indexOf('DEFAULT_RUNTIME_INFO="$(resolve_default_runtime_port'),
-      buildRemoteLaunchScript().indexOf('elif [ -n "$REMOTE_PID" ]'),
-    );
+    // The default-runtime reuse internals the fork asserted here were replaced by
+    // upstream v0.1.0's managed/external launch logic, which upstream covers.
   });
 
   it.effect("accepts launch JSON after remote shell startup noise", () => {

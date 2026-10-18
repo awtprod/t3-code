@@ -1,27 +1,32 @@
-import type {
-  CommandCenterEventEnvelope,
-  EnvironmentId,
-  OrchestrationProjectShell,
-  OrchestrationThreadShell,
+import {
+  type CommandCenterEventEnvelope,
+  type EnvironmentId,
+  type OrchestrationProjectShell,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2ThreadShell,
+  ProjectId,
+  ProviderInstanceId,
+  RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { CommandCenterEventStream } from "../command-center/EventStream.ts";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { make as makeNotifier } from "./LocalWebPushNotifier.ts";
+import * as OrchestrationBridge from "../command-center/OrchestrationBridge.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
+import { layer as notifierLayer, make as makeNotifier } from "./LocalWebPushNotifier.ts";
 import { WebPushConfig } from "./WebPushConfig.ts";
 import type { WebPushDeliveryResult, WebPushSendInput } from "./WebPushSender.ts";
 import { WebPushSender } from "./WebPushSender.ts";
@@ -31,7 +36,8 @@ import {
 } from "./WebPushSubscriptions.ts";
 
 const ENV_ID = "env-1" as EnvironmentId;
-const THREAD_ID = "thread-1" as ThreadId;
+const THREAD_ID = ThreadId.make("thread-1");
+const PROJECT_ID = ProjectId.make("project-1");
 
 const PROJECT = {
   id: "project-1",
@@ -42,19 +48,52 @@ const PROJECT = {
 // terminal-freshness out of the picture while staying deterministic.
 const FIXED_UPDATED_AT = "2026-01-01T00:00:00.000Z";
 
-function threadForPhase(phase: "approval" | "completed" | "running"): OrchestrationThreadShell {
-  const shape: Record<string, unknown> = {
+function threadForPhase(phase: "approval" | "completed" | "running"): OrchestrationV2ThreadShell {
+  const at = DateTime.makeUnsafe(FIXED_UPDATED_AT);
+  return {
     id: THREAD_ID,
-    projectId: "project-1",
+    projectId: PROJECT_ID,
     title: "Fix the widget",
-    modelSelection: { model: "opus" },
-    updatedAt: FIXED_UPDATED_AT,
-    hasPendingApprovals: phase === "approval",
-    hasPendingUserInput: false,
-    session: phase === "completed" ? { status: "ready" } : { status: "running" },
-    latestTurn: null,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "opus" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    worktreePath: null,
+    activeProviderThreadId: null,
+    lineage: { rootThreadId: THREAD_ID, parentThreadId: null, relationshipToParent: null },
+    forkedFrom: null,
+    createdBy: "user",
+    creationSource: "web",
+    activeRunId: null,
+    latestVisibleMessage: null,
+    hasActionableProposedPlan: false,
+    itemCount: 0,
+    visibleItemCount: 0,
+    lastVisitedAt: null,
+    deletedAt: null,
+    branch: null,
+    linkedPullRequest: null,
+    status: phase === "completed" ? "completed" : "running",
+    activityRunStatus: null,
+    pendingRuntimeRequest:
+      phase === "approval"
+        ? { id: RuntimeRequestId.make("request-1"), kind: "command", createdAt: at }
+        : null,
+    pendingBackgroundTasks: [],
+    latestRunId: null,
+    latestRunRequestedAt: null,
+    latestRunStartedAt: null,
+    latestRunCompletedAt: null,
+    latestUserMessageAt: null,
+    createdAt: at,
+    updatedAt: at,
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    snoozedUntil: null,
+    snoozedAt: null,
+    pinnedAt: null,
   };
-  return shape as unknown as OrchestrationThreadShell;
 }
 
 const PREFERENCES = {
@@ -73,7 +112,7 @@ const SUBSCRIPTION = {
 };
 
 interface Harness {
-  readonly threadRef: Ref.Ref<Option.Option<OrchestrationThreadShell>>;
+  readonly threadRef: Ref.Ref<Option.Option<OrchestrationV2ThreadShell>>;
   readonly sends: Ref.Ref<ReadonlyArray<WebPushSendInput>>;
   readonly resultRef: Ref.Ref<WebPushDeliveryResult>;
 }
@@ -84,7 +123,10 @@ const okResult: WebPushDeliveryResult = { ok: true, status: 201, permanentFailur
 // when omitted the seed reflects the current threadRef (used by the transition
 // tests). Passing an explicit list lets a test seed a baseline that differs
 // from the live thread state, modelling boot-time transitions.
-const makeHarness = Effect.fn(function* (seedThreads?: readonly OrchestrationThreadShell[]) {
+const makeHarness = Effect.fn(function* (
+  seedThreads?: readonly OrchestrationV2ThreadShell[],
+  threadEvents: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty,
+) {
   const threadRef = yield* Ref.make(Option.some(threadForPhase("running")));
   const sends = yield* Ref.make<ReadonlyArray<WebPushSendInput>>([]);
   const resultRef = yield* Ref.make<WebPushDeliveryResult>(okResult);
@@ -113,7 +155,7 @@ const makeHarness = Effect.fn(function* (seedThreads?: readonly OrchestrationThr
       getEnvironmentId: Effect.succeed(ENV_ID),
       getDescriptor: Effect.die("unused"),
     }),
-    Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
+    Layer.mock(OrchestrationBridge.OrchestrationBridge)({
       getThreadShellById: () => Ref.get(threadRef),
       getProjectShellById: () => Effect.succeed(Option.some(PROJECT)),
       getShellSnapshot: () =>
@@ -122,12 +164,9 @@ const makeHarness = Effect.fn(function* (seedThreads?: readonly OrchestrationThr
             snapshotSequence: 0,
             projects: [PROJECT],
             threads,
-            updatedAt: FIXED_UPDATED_AT,
           })),
         ),
-    }),
-    Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
-      streamDomainEvents: Stream.empty,
+      streamThreadEvents: threadEvents,
     }),
     Layer.mock(CommandCenterEventStream)({ changes: () => Stream.empty }),
   ).pipe(
@@ -370,6 +409,39 @@ it.effect("stays quiet for the agent's non-decision Items, user Items, and updat
         yield* notifier.processItemEvent(itemCreated("agent-decision", "agent", "updated"));
         yield* notifier.processItemEvent(itemCreated("missing"));
         assert.equal((yield* Ref.get(harness.sends)).length, 0);
+      }).pipe(Effect.provide(depsLayer));
+    }),
+  ),
+);
+
+it.effect("the server layer starts the notifier and pushes on a v2 thread event", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+      const { harness, depsLayer } = yield* makeHarness(undefined, Stream.fromQueue(events));
+      yield* Effect.gen(function* () {
+        const store = yield* WebPushSubscriptions;
+        yield* store.upsert(SUBSCRIPTION);
+        // Building the production layer must start the event follower and
+        // the startup seed; nothing else calls start() on v2.
+        yield* Layer.build(notifierLayer);
+        // Let the forked seed record the running baseline.
+        yield* Effect.forEach(Array.from({ length: 50 }), () => Effect.yieldNow, {
+          discard: true,
+        });
+        yield* Ref.set(harness.threadRef, Option.some(threadForPhase("approval")));
+        yield* Queue.offer(events, {
+          type: "thread.created",
+          threadId: THREAD_ID,
+          payload: {},
+        } as unknown as OrchestrationV2DomainEvent);
+        let sends: ReadonlyArray<WebPushSendInput> = [];
+        for (let attempt = 0; attempt < 200 && sends.length === 0; attempt++) {
+          yield* Effect.yieldNow;
+          sends = yield* Ref.get(harness.sends);
+        }
+        assert.equal(sends.length, 1);
+        assert.equal(sends[0]?.payload.deepLink, "/threads/env-1/thread-1");
       }).pipe(Effect.provide(depsLayer));
     }),
   ),

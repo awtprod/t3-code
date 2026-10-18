@@ -17,12 +17,11 @@ sudo -u commandcenter env HOME=/var/lib/command-center \
 Set the required repository coordinates, branch, and expected GitHub logins in the environment, then run `sudo --preserve-env=COMMAND_CENTER_CONFIG_REPOSITORY,COMMAND_CENTER_CONFIG_BRANCH,COMMAND_CENTER_PRIMARY_REPOSITORY,COMMAND_CENTER_SECONDARY_REPOSITORY,COMMAND_CENTER_PRIMARY_GITHUB_LOGIN,COMMAND_CENTER_SECONDARY_GITHUB_LOGIN ./bootstrap-data.sh`. The bootstrapper fails before cloning if any value is absent.
 
 Validate it offline with its checked-in command before starting the candidate. Provider logins must
-be performed separately through the six identity-specific wrappers; do not copy the existing users'
+be performed separately through the four identity-specific wrappers; do not copy the existing users'
 provider homes. Install the pinned service-owned CLIs with `sudo ./install-provider-clis.sh`, then
-authenticate `codex-primary`, `codex-secondary`, `claude-primary`, `claude-secondary`, `kimi-primary`, and
-`kimi-secondary` deliberately. The wrappers put the matching GitHub profile and provider home in the
+authenticate `codex-primary`, `codex-secondary`, `claude-primary`, and `claude-secondary`
+deliberately. The wrappers put the matching GitHub profile and provider home in the
 process environment and fail closed when an instance name is not mapped.
-Keep the host installer and workspace sandbox image on the same provider CLI versions when updating them.
 
 The provisioner installs `command-center.candidate.service`, not the live unit. Promoting it,
 stopping legacy services, and changing the Tailscale root route are cutover actions and require the

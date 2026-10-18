@@ -11,8 +11,6 @@ import {
   type EfficiencyDecision,
   type EfficiencySettings,
   type ModelSelection,
-  type OrchestrationCommand,
-  type OrchestrationThreadShell,
   type ServerProvider,
   type TaskKind,
 } from "@t3tools/contracts";
@@ -23,6 +21,7 @@ import {
   resolveInteractiveEfficiency,
   routedSelectionNeedsSubagent,
   toCommandCenterSelection,
+  type TurnStartCommand,
 } from "./EfficiencyRouting.ts";
 
 const modelSelection: ModelSelection = {
@@ -41,7 +40,7 @@ const command = {
   runtimeMode: "full-access",
   interactionMode: "default",
   createdAt: "2026-08-03T00:00:00.000Z",
-} satisfies Extract<OrchestrationCommand, { type: "thread.turn.start" }>;
+} satisfies TurnStartCommand;
 
 const codex = {
   instanceId: ProviderInstanceId.make("codex"),
@@ -613,66 +612,32 @@ describe("sticky continuation routing", () => {
   });
 });
 
+// Restored from the fork's V1 suite against the V2 seam: the thread's bound
+// provider is `providerInstanceId`, and "bound" means it has a provider thread.
 describe("routedSelectionNeedsSubagent", () => {
   const astra: ModelSelection = {
     instanceId: ProviderInstanceId.make("codex"),
     model: "gpt-6-astra",
   };
-  const boundThread = (session: OrchestrationThreadShell["session"]): OrchestrationThreadShell => ({
-    id: ThreadId.make("thread"),
-    projectId: ProjectId.make("project"),
-    title: "Review plan",
-    modelSelection: astra,
-    routingMode: "auto",
-    runtimeMode: "full-access",
-    interactionMode: "default",
-    branch: null,
-    worktreePath: null,
-    latestTurn: null,
-    createdAt: "2026-09-28T00:00:00.000Z",
-    updatedAt: "2026-09-28T00:00:00.000Z",
-    archivedAt: null,
-    settledOverride: null,
-    settledAt: null,
-    pullRequests: [],
-    session,
-    latestUserMessageAt: null,
-    hasPendingApprovals: false,
-    hasPendingUserInput: false,
-    hasActionableProposedPlan: false,
-  });
   const opus: ModelSelection = {
     instanceId: ProviderInstanceId.make("claudeAgent"),
     model: "claude-opus-5-5",
   };
-  const codexSession: OrchestrationThreadShell["session"] = {
-    threadId: ThreadId.make("thread"),
-    status: "ready",
-    providerName: "codex",
+  const boundThread = (bound: boolean) => ({
     providerInstanceId: ProviderInstanceId.make("codex"),
-    runtimeMode: "full-access",
-    activeTurnId: null,
-    lastError: null,
-    updatedAt: "2026-09-28T00:00:00.000Z",
-  };
+    modelSelection: astra,
+    bound,
+  });
 
-  it("sends a routed turn on another driver to a subagent once the session is bound", () => {
+  it("sends a routed turn on another driver to a child once the thread is bound", () => {
     expect(
-      routedSelectionNeedsSubagent({
-        thread: boundThread(codexSession),
-        selection: opus,
-        providers,
-      }),
+      routedSelectionNeedsSubagent({ thread: boundThread(true), selection: opus, providers }),
     ).toBe(true);
   });
 
-  it("lets a thread with no session yet switch drivers in place", () => {
+  it("lets a thread with no provider thread yet switch drivers in place", () => {
     expect(
-      routedSelectionNeedsSubagent({
-        thread: boundThread(null),
-        selection: opus,
-        providers,
-      }),
+      routedSelectionNeedsSubagent({ thread: boundThread(false), selection: opus, providers }),
     ).toBe(false);
   });
 
@@ -681,7 +646,7 @@ describe("routedSelectionNeedsSubagent", () => {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-6-sol",
     };
-    const thread = boundThread(codexSession);
+    const thread = boundThread(true);
     expect(routedSelectionNeedsSubagent({ thread, selection: sol, providers })).toBe(false);
     expect(
       routedSelectionNeedsSubagent({
@@ -702,7 +667,7 @@ describe("routedSelectionNeedsSubagent", () => {
   it("leaves unknown provider instances to the existing error path", () => {
     expect(
       routedSelectionNeedsSubagent({
-        thread: boundThread(codexSession),
+        thread: boundThread(true),
         selection: { instanceId: ProviderInstanceId.make("gone"), model: "x" },
         providers,
       }),

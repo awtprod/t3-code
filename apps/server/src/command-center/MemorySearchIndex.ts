@@ -2,11 +2,11 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 export class MemorySearchIndexError extends Schema.TaggedError<MemorySearchIndexError>()(
   "MemorySearchIndexError",
@@ -141,7 +141,7 @@ export const layer = Layer.effect(
 
     const digest = Effect.fn("MemorySearchIndex.digest")(function* (content: string) {
       const value = yield* crypto.digest("SHA-256", textEncoder.encode(content));
-      return `sha256:${Encoding.encodeHex(value)}`;
+      return `sha256:${Hex.encode(value)}`;
     });
 
     const rebuild = Effect.fn("MemorySearchIndex.rebuild")(function* () {

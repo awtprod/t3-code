@@ -2,11 +2,12 @@ import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { McpSchema, McpServer } from "effect/unstable/ai";
+import { McpSchema, McpServer } from "effect/ai";
 
 import * as SupabaseMcpConnector from "../../../database/SupabaseMcpConnector.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
 
 it.effect("routes a Supabase tool through the credential-bound project scope", () => {
   // The whole input, not just the tool name: the credential-bound scope this
@@ -39,9 +40,13 @@ it.effect("routes a Supabase tool through the credential-bound project scope", (
   });
   const invocation = McpInvocationContext.McpInvocationContext.of({
     environmentId: EnvironmentId.make("environment-a"),
-    threadId: ThreadId.make("thread-a"),
-    providerSessionId: "provider-session-a",
-    providerInstanceId: ProviderInstanceId.make("codex"),
+    requestNamespace: "provider-session-a",
+    thread: {
+      threadId: ThreadId.make("thread-a"),
+      providerSessionId: "provider-session-a",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    },
+    client: undefined,
     projectId: ProjectId.make("project-a"),
     cwd: "/work/project-a-worktree",
     capabilities: new Set(["preview", "database.read"]),
@@ -59,8 +64,9 @@ it.effect("routes a Supabase tool through the credential-bound project scope", (
     },
     getClient: Effect.die("unused"),
   });
-  const testLayer = McpHttpServer.SupabaseToolkitRegistrationLive.pipe(
+  const testLayer = McpHttpServer.layerSupabaseToolkit.pipe(
     Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
     Layer.provide(Layer.succeed(SupabaseMcpConnector.SupabaseMcpConnector, connector)),
   );
 

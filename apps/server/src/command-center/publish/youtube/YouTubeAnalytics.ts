@@ -1,4 +1,4 @@
-// @effect-diagnostics globalDate:off
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off
 import * as NodeCrypto from "node:crypto";
 
 import {
@@ -11,7 +11,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { ObservationService } from "../../Observations.ts";
 import { canonicalJson } from "../../automation/Digest.ts";

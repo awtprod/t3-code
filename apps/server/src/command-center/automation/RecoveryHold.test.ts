@@ -19,23 +19,21 @@ import {
 const withEnv = (env: Readonly<Record<string, string>>) =>
   ConfigProvider.layer(ConfigProvider.fromEnv({ env }));
 
-for (const value of [undefined, "", "false", "False", "0", "no", "OFF", "n"]) {
-  it.effect(`does not hold for ${JSON.stringify(value)}`, () =>
+it.effect.each([undefined, "", "false", "False", "0", "no", "OFF", "n"])(
+  "does not hold for %j",
+  (value) =>
     Effect.gen(function* () {
       expect(yield* readAutomationRecoveryHold).toBe(false);
     }).pipe(
       Effect.provide(withEnv(value === undefined ? {} : { [AUTOMATION_RECOVERY_HOLD_ENV]: value })),
     ),
-  );
-}
+);
 
-for (const value of ["true", "1", "TRUE", "yes", "enabled", "hold-please"]) {
-  it.effect(`holds for ${JSON.stringify(value)}`, () =>
-    Effect.gen(function* () {
-      expect(yield* readAutomationRecoveryHold).toBe(true);
-    }).pipe(Effect.provide(withEnv({ [AUTOMATION_RECOVERY_HOLD_ENV]: value }))),
-  );
-}
+it.effect.each(["true", "1", "TRUE", "yes", "enabled", "hold-please"])("holds for %j", (value) =>
+  Effect.gen(function* () {
+    expect(yield* readAutomationRecoveryHold).toBe(true);
+  }).pipe(Effect.provide(withEnv({ [AUTOMATION_RECOVERY_HOLD_ENV]: value }))),
+);
 
 it.effect("keeps ticking while held so work created after start still recovers", () => {
   const calls = { recoverDue: 0 };

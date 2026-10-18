@@ -27,7 +27,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { ServerConfig } from "../config.ts";
-import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { ProcessRunner } from "../processRunner.ts";
 import { loadCommittedAutomations } from "./automation/index.ts";
 import {

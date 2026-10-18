@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 // Bearer session renewal lineage. `renewed_from_session_id` links a renewed
 // session to the one it replaced; `renewed_at` marks a session as already

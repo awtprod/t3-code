@@ -3,7 +3,7 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, expect, it } from "@effect/vitest";
-import { HostProcessWorkingDirectory } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -13,9 +13,10 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import {
   VcsProcessExitError,
@@ -23,7 +24,7 @@ import {
   VcsProcessTimeoutError,
 } from "@t3tools/contracts";
 import * as ProcessRunner from "../processRunner.ts";
-import { HOST_GIT_HARDENED_CONFIG_ARGS } from "./HostGitSecurity.ts";
+import { HOST_GIT_HARDENED_CONFIG_ARGS, inheritedGitConfigPins } from "./HostGitSecurity.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
 const encodeExitError = Schema.encodeEffect(Schema.fromJsonString(VcsProcessExitError));
@@ -34,10 +35,10 @@ const run = (input: VcsProcess.VcsProcessInput) =>
     return yield* process.run(input);
   });
 
-const liveLayer = VcsProcess.layer.pipe(Layer.provide(NodeServices.layer));
+const layerLive = VcsProcess.layer.pipe(Layer.provide(NodeServices.layer));
 
 const provideLive = <A, E, R>(effect: Effect.Effect<A, E, R | VcsProcess.VcsProcess>) =>
-  effect.pipe(Effect.provide(liveLayer));
+  effect.pipe(Effect.provide(layerLive));
 
 const baseInput = {
   operation: "test.process-boundary",
@@ -57,6 +58,178 @@ const captureProcessResult = (
     Effect.flatMap((service) => service.run(baseInput)),
     Effect.flip,
   );
+
+const recordingService = (calls: ProcessRunner.ProcessRunInput[]) =>
+  VcsProcess.make.pipe(
+    Effect.provideService(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({
+        run: (input) => {
+          calls.push(input);
+          return Effect.succeed({
+            stdout: "",
+            stderr: "",
+            code: 0 as ProcessRunner.ProcessRunOutput["code"],
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          });
+        },
+      }),
+    ),
+  );
+
+/** The `GIT_CONFIG_*` entries of a spawn environment, in order. */
+const gitConfigEntries = (env: NodeJS.ProcessEnv | undefined) =>
+  Array.from({ length: Number(env?.GIT_CONFIG_COUNT ?? "0") }, (_, index) => [
+    env?.[`GIT_CONFIG_KEY_${index}`],
+    env?.[`GIT_CONFIG_VALUE_${index}`],
+  ]);
+/** Exact pins the suite setup exports (testUtils/gitConfig.setup.ts), if honoured. */
+const inheritedPins = () => inheritedGitConfigPins(process.env).map(([key, value]) => [key, value]);
+
+const ACME_REMOTE = "https://github.com/acme/web.git";
+const remoteWithUserInfo = (() => {
+  const url = new URL(ACME_REMOTE);
+  url.username = "acme";
+  url.password = "placeholder";
+  return url.href;
+})();
+const accessTokenHeader = (token: string) =>
+  `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")}`;
+const trustedHeader = (overrides: Partial<VcsProcess.VcsProcessInput["trustedConfig"]> = {}) => ({
+  remoteUrl: ACME_REMOTE,
+  key: `http.${ACME_REMOTE}.extraheader`,
+  value: Redacted.make(accessTokenHeader("acme-token")),
+  ...overrides,
+});
+
+describe("VcsProcess.run trusted Git config", () => {
+  it.effect("passes a validated remote authorization header to git as GIT_CONFIG_* only", () =>
+    Effect.gen(function* () {
+      const calls: ProcessRunner.ProcessRunInput[] = [];
+      const service = yield* recordingService(calls);
+      yield* service.run({
+        ...baseInput,
+        args: ["fetch", "origin"],
+        // Raw caller GIT_CONFIG_* never survives, even next to a trusted entry.
+        env: {
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "http.sslVerify",
+          GIT_CONFIG_VALUE_0: "false",
+        },
+        trustedConfig: trustedHeader(),
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.extendEnv).toBe(false);
+      expect(calls[0]?.env?.GIT_TERMINAL_PROMPT).toBe("0");
+      expect(gitConfigEntries(calls[0]?.env)).toEqual([
+        ...inheritedPins(),
+        [`http.${ACME_REMOTE}.extraheader`, accessTokenHeader("acme-token")],
+      ]);
+      // The hardening -c flags still come first and win over env config.
+      expect(calls[0]?.args.slice(0, HOST_GIT_HARDENED_CONFIG_ARGS.length)).toEqual([
+        ...HOST_GIT_HARDENED_CONFIG_ARGS,
+      ]);
+    }),
+  );
+
+  it.effect.each([
+    ["url insteadOf", { key: "url.https://evil.example/.insteadOf" }],
+    ["http proxy", { key: "http.proxy" }],
+    ["sslVerify", { key: `http.${ACME_REMOTE}.sslVerify` }],
+    ["credential helper", { key: "credential.helper" }],
+    ["mismatched remote URL", { key: "http.https://evil.example/acme/web.git.extraheader" }],
+    [
+      "non-https remote",
+      {
+        remoteUrl: "http://github.com/acme/web.git",
+        key: "http.http://github.com/acme/web.git.extraheader",
+      },
+    ],
+    [
+      "credentials in the remote URL",
+      { remoteUrl: remoteWithUserInfo, key: `http.${remoteWithUserInfo}.extraheader` },
+    ],
+    [
+      "header that is not an access token",
+      { value: Redacted.make("AUTHORIZATION: bearer acme-token") },
+    ],
+    [
+      "header with a smuggled newline",
+      { value: Redacted.make(`${accessTokenHeader("acme")}\nX-Evil: 1`) },
+    ],
+    ["access token with a space", { value: Redacted.make(accessTokenHeader("acme token")) }],
+  ] as const)("refuses trusted config with a %s", ([, overrides]) =>
+    Effect.gen(function* () {
+      const calls: ProcessRunner.ProcessRunInput[] = [];
+      const service = yield* recordingService(calls);
+      const error = yield* Effect.flip(
+        service.run({
+          ...baseInput,
+          args: ["fetch", "origin"],
+          trustedConfig: trustedHeader(overrides),
+        }),
+      );
+      expect(error._tag).toBe("VcsProcessSpawnError");
+      expect((error as { readonly cause?: { readonly _tag?: string } }).cause?._tag).toBe(
+        "HostGitTrustedConfigError",
+      );
+      expect(calls).toHaveLength(0);
+    }),
+  );
+
+  it.effect("carries only exact inherited test pins into hardened git", () =>
+    Effect.gen(function* () {
+      const pins = {
+        GIT_CONFIG_COUNT: "2",
+        GIT_CONFIG_KEY_0: "core.autocrlf",
+        GIT_CONFIG_VALUE_0: "false",
+        GIT_CONFIG_KEY_1: "init.defaultBranch",
+        GIT_CONFIG_VALUE_1: "main",
+      };
+      expect(inheritedGitConfigPins(pins)).toEqual([
+        ["core.autocrlf", "false"],
+        ["init.defaultBranch", "main"],
+      ]);
+      // Any non-pin entry, a pin with another value, or a malformed count drops the whole set.
+      for (const poisoned of [
+        { ...pins, GIT_CONFIG_KEY_1: "core.sshCommand", GIT_CONFIG_VALUE_1: "touch /tmp/pwned" },
+        { ...pins, GIT_CONFIG_VALUE_0: "true" },
+        { ...pins, GIT_CONFIG_KEY_1: "url.https://evil.example/.insteadOf" },
+        { ...pins, GIT_CONFIG_COUNT: "3" },
+        { ...pins, GIT_CONFIG_COUNT: "1e1" },
+      ]) {
+        expect(inheritedGitConfigPins(poisoned)).toEqual([]);
+      }
+      // The pins come from the server's own environment, never from the caller.
+      const calls: ProcessRunner.ProcessRunInput[] = [];
+      const service = yield* recordingService(calls);
+      yield* service.run({ ...baseInput, env: pins });
+      expect(gitConfigEntries(calls[0]?.env)).toEqual(inheritedPins());
+    }),
+  );
+
+  it.effect("refuses trusted config on a connector CLI", () =>
+    Effect.gen(function* () {
+      const calls: ProcessRunner.ProcessRunInput[] = [];
+      const service = yield* recordingService(calls);
+      const error = yield* Effect.flip(
+        service.run({
+          operation: "GitHubCli.execute",
+          command: "gh",
+          args: ["pr", "list"],
+          cwd: "/workspace",
+          trustedConfig: trustedHeader(),
+        }),
+      );
+      expect(error._tag).toBe("VcsProcessSpawnError");
+      expect(calls).toHaveLength(0);
+    }),
+  );
+});
 
 describe("VcsProcess.run", () => {
   it.effect("applies the host Git boundary at the generic process sink", () =>
@@ -113,7 +286,8 @@ describe("VcsProcess.run", () => {
         ...baseInput.args,
       ]);
       expect(calls[0]?.extendEnv).toBe(false);
-      expect(calls[0]?.env).not.toHaveProperty("GIT_CONFIG_COUNT");
+      // The caller's raw GIT_CONFIG_COUNT never survives; only inherited exact pins may.
+      expect(gitConfigEntries(calls[0]?.env)).toEqual(inheritedPins());
       expect(calls[0]?.env).not.toHaveProperty("GIT_DIR");
       expect(calls[0]?.env).not.toHaveProperty("GIT_INDEX_FILE");
       expect(calls[1]?.env?.GIT_INDEX_FILE).toBe("/tmp/checkpoint-index");
@@ -610,7 +784,7 @@ describe("VcsProcess.run", () => {
         operation: "test.output-limit",
         command: "node",
         args: ["-e", "process.stdout.write('x'.repeat(2048))"],
-        cwd: yield* HostProcessWorkingDirectory,
+        cwd: yield* HostProcess.WorkingDirectory,
         maxOutputBytes: 128,
         outputMode: "error",
       }).pipe(Effect.flip);

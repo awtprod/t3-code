@@ -3,7 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Base64Url from "effect/encoding/Base64Url";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -11,7 +11,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as TestClock from "effect/testing/TestClock";
 
-import { remoteHttpClientLayer } from "../rpc/http.ts";
+import { layerRemoteHttpClient } from "../rpc/http.ts";
 import type { ConnectionCatalogEntry } from "./catalog.ts";
 import {
   BEARER_RENEWAL_RETRY_DELAY,
@@ -32,7 +32,7 @@ const ENVIRONMENT_ID = EnvironmentId.make("environment-remote");
 const HTTP_BASE_URL = "https://remote.example.test";
 
 const sessionToken = (expMs: number, label = "token") =>
-  `${Encoding.encodeBase64Url(JSON.stringify({ v: 1, kind: "session", exp: expMs }))}.${label}`;
+  `${Base64Url.encode(JSON.stringify({ v: 1, kind: "session", exp: expMs }))}.${label}`;
 
 const CONNECTED: SupervisorConnectionState = {
   ...AVAILABLE_CONNECTION_STATE,
@@ -81,6 +81,8 @@ const makeHarness = Effect.fn("test.bearerRenewal.makeHarness")(function* (input
     registerPlatform: () => Effect.die("unused"),
     reconcilePlatform: () => Effect.die("unused"),
     remove: () => Effect.die("unused"),
+    removeRoute: () => Effect.die("unused"),
+    reorderRoutes: () => Effect.die("unused"),
     removeRelayEnvironments: () => Effect.die("unused"),
     retryNow: () => Effect.void,
     savedBearerCredential: (environmentId, options) =>
@@ -129,7 +131,7 @@ const makeHarness = Effect.fn("test.bearerRenewal.makeHarness")(function* (input
       ConnectionWakeups.ConnectionWakeups,
       ConnectionWakeups.ConnectionWakeups.of({ changes: Stream.fromQueue(wakeups) }),
     ),
-    Effect.provide(remoteHttpClientLayer(fetchFn)),
+    Effect.provide(layerRemoteHttpClient(fetchFn)),
     Effect.forkScoped,
   );
 
@@ -166,9 +168,7 @@ describe("bearer session renewal policy", () => {
     expect(readSessionTokenExpiry("opaque-token")).toBeNull();
     expect(readSessionTokenExpiry(".signature")).toBeNull();
     expect(readSessionTokenExpiry("not-base64!.signature")).toBeNull();
-    expect(
-      readSessionTokenExpiry(`${Encoding.encodeBase64Url('{"exp":"soon"}')}.signature`),
-    ).toBeNull();
+    expect(readSessionTokenExpiry(`${Base64Url.encode('{"exp":"soon"}')}.signature`)).toBeNull();
   });
 
   it("renews only inside the window and leaves expired tokens alone", () => {

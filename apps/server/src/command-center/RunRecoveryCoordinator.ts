@@ -6,11 +6,11 @@ import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
 import type * as Scope from "effect/Scope";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
-import * as OrchestrationCommandDispatcher from "../orchestration/CommandDispatcher.ts";
-import * as ProviderRegistry from "../provider/Services/ProviderRegistry.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { commandCenterProviderAvailability } from "./ProviderAvailability.ts";
+import * as OrchestrationBridge from "./OrchestrationBridge.ts";
 import * as RunDispatcher from "./RunDispatcher.ts";
 import * as CommandCenterService from "./Service.ts";
 
@@ -232,7 +232,7 @@ const make = Effect.gen(function* () {
   const commandCenter = yield* CommandCenterService.CommandCenterService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const runDispatcher = yield* RunDispatcher.RunDispatcher;
-  const commandDispatcher = yield* OrchestrationCommandDispatcher.OrchestrationCommandDispatcher;
+  const orchestration = yield* OrchestrationBridge.OrchestrationBridge;
 
   const listCandidates: RunRecoveryDependencies["listCandidates"] = (limit) =>
     sql<{ readonly runId: string; readonly state: RecoverableRunCandidate["state"] }>`
@@ -277,7 +277,7 @@ const make = Effect.gen(function* () {
     dispatch: (runId) =>
       runDispatcher.dispatch({
         runId,
-        dispatchCommand: commandDispatcher.dispatch,
+        dispatchCommand: orchestration.dispatchCommand,
       }),
   });
 });

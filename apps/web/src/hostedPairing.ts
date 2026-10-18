@@ -14,7 +14,8 @@ export function isRemoteOnlyBuild(): boolean {
   return import.meta.env.VITE_REMOTE_ONLY?.trim() === "1";
 }
 
-function configuredHostedAppUrl(): string {
+/** The hosted app origin shared links point at. */
+export function configuredHostedAppUrl(): string {
   return import.meta.env.VITE_HOSTED_APP_URL?.trim() || DEFAULT_HOSTED_APP_URL;
 }
 

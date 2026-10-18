@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /** In-app digest preferences and immutable per-recipient daily snapshots. */
 export default Effect.gen(function* () {

@@ -2,7 +2,7 @@ import { COMMAND_CENTER_WEBHOOK_MAX_PAYLOAD_BYTES } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { WebhookAdmissionError, make as makeWebhookAdmission } from "./WebhookAdmission.ts";
 import { CommandCenterNotReadyError, CommandCenterReadinessGate } from "./ReadinessGate.ts";

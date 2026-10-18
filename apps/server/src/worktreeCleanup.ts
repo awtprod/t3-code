@@ -1,6 +1,6 @@
 import {
   type OrchestrationProjectShell,
-  type OrchestrationThreadShell,
+  type OrchestrationV2ThreadShell,
   type WorktreeCleanupNotice,
   type WorktreeCleanupNoticeReason,
 } from "@t3tools/contracts";
@@ -19,10 +19,10 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
-import { writeFileStringAtomically } from "./atomicWrite.ts";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as ServerConfig from "./config.ts";
 import { GitVcsDriver } from "./vcs/GitVcsDriver.ts";
-import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+import { OrchestrationBridge as ProjectionSnapshotQuery } from "./command-center/OrchestrationBridge.ts";
 import { ProjectSetupScriptRunner } from "./project/ProjectSetupScriptRunner.ts";
 import { ServerSettingsService } from "./serverSettings.ts";
 import { forkParked } from "./serverActivation.ts";
@@ -176,16 +176,16 @@ export const findIgnoredArtifactDirectories = Effect.fn("findIgnoredArtifactDire
 interface WorktreeGroup {
   readonly path: string;
   readonly project: OrchestrationProjectShell;
-  readonly threads: ReadonlyArray<OrchestrationThreadShell>;
+  readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
   readonly lastUpdatedAt: string;
 }
 
 export function groupManagedWorktrees(input: {
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
-  readonly threads: ReadonlyArray<OrchestrationThreadShell>;
+  readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
 }): ReadonlyArray<WorktreeGroup> {
   const projects = new Map(input.projects.map((project) => [project.id, project] as const));
-  const groups = new Map<string, Array<OrchestrationThreadShell>>();
+  const groups = new Map<string, Array<OrchestrationV2ThreadShell>>();
   for (const thread of input.threads) {
     if (!thread.worktreePath) continue;
     const existing = groups.get(thread.worktreePath) ?? [];
@@ -198,10 +198,11 @@ export function groupManagedWorktrees(input: {
     if (!firstThread) return [];
     const project = projects.get(firstThread.projectId);
     if (!project) return [];
-    const lastUpdatedAt = threads.reduce(
-      (latest, thread) => (thread.updatedAt > latest ? thread.updatedAt : latest),
-      threads[0]?.updatedAt ?? project.updatedAt,
-    );
+    // V2 shells carry DateTime values; compare the ISO strings like project timestamps.
+    const lastUpdatedAt = threads.reduce((latest, thread) => {
+      const updatedAt = DateTime.formatIso(thread.updatedAt);
+      return updatedAt > latest ? updatedAt : latest;
+    }, DateTime.formatIso(firstThread.updatedAt));
     return [{ path: worktreePath, project, threads, lastUpdatedAt }];
   });
 }
@@ -249,13 +250,15 @@ function noticeId(worktreePath: string, reason: WorktreeCleanupNoticeReason): st
 }
 
 export function threadIsBusy(
-  thread: OrchestrationThreadShell,
+  thread: OrchestrationV2ThreadShell,
   runningTerminalThreadIds: ReadonlySet<string>,
 ) {
   return (
     runningTerminalThreadIds.has(thread.id) ||
-    (thread.backgroundLiveness ?? null) != null ||
-    (thread.session !== null && thread.session.status !== "stopped")
+    // V2: a run in flight, or background work the agent left running (V1's
+    // background liveness and live provider session).
+    thread.activeRunId !== null ||
+    (thread.pendingBackgroundTasks ?? []).length > 0
   );
 }
 

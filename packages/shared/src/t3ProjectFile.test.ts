@@ -35,7 +35,6 @@ describe("buildT3ProjectFileJsonSchema", () => {
       "$schema",
       "defaultThreadEnvMode",
       "iconPath",
-      "sandbox",
       "scripts",
       "worktreeSubmodules",
     ]);
@@ -52,6 +51,7 @@ describe("buildT3ProjectFileJsonSchema", () => {
       "icon",
       "name",
       "previewUrl",
+      "runOnSettle",
       "runOnWorktreeCreate",
     ]);
   });

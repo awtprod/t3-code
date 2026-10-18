@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /** Durable discussion and proposal state layered onto legacy Command Center items. */
 export default Effect.gen(function* () {

@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as AuthSessions from "./AuthSessions.ts";
-import { SqlitePersistenceMemory } from "./Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "./Sqlite.ts";
 
 const issuedAt = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
 const renewedAt = DateTime.makeUnsafe("2026-07-12T00:00:00.000Z");

@@ -1,36 +1,34 @@
+// @effect-diagnostics nodeBuiltinImport:off - Command Center module that predates the Effect platform port.
 import * as NodeCrypto from "node:crypto";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
-  CommandId,
   EventId,
-  type OrchestrationEvent,
-  ProviderRuntimeEvent,
-  type OrchestrationThreadShell,
-  type ProviderSession,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadShell,
   ProjectId,
-  ProviderDriverKind,
   ProviderInstanceId,
+  RunId as OrchestrationRunId,
   ThreadId,
-  TurnId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import { CommandCenterEventStream, layer as eventStreamLayer } from "./EventStream.ts";
 import {
   makeRunLifecyclePersistence,
   makeWithDependencies,
-  transitionForProviderEvent,
+  transitionForRunStatus,
 } from "./RunLifecycle.ts";
 
 const fixtureTime = "2026-01-01T00:00:00.000Z";
 const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
-const decodeProviderEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
 const testLayer = eventStreamLayer.pipe(
   Layer.provideMerge(SqlitePersistenceMemory),
@@ -87,98 +85,88 @@ const appendSeedAudit = (
   `;
 };
 
-const completedEvent = (input: {
+/** A V2 `run.updated` event, as the orchestrator stores it, with the fields Run lifecycle reads. */
+const runUpdated = (input: {
   readonly eventId: string;
   readonly threadId: string;
-  readonly state: "completed" | "failed" | "interrupted" | "cancelled";
-  readonly errorMessage?: string;
-}) =>
-  decodeProviderEvent({
-    eventId: input.eventId,
-    provider: "codex",
-    providerInstanceId: "codex",
-    threadId: input.threadId,
-    turnId: `turn-${input.eventId}`,
-    type: "turn.completed",
-    payload: {
-      state: input.state,
-      ...(input.errorMessage === undefined ? {} : { errorMessage: input.errorMessage }),
-    },
-    createdAt: fixtureTime,
-  });
-
-const startedEvent = (input: { readonly eventId: string; readonly threadId: string }) =>
-  decodeProviderEvent({
-    eventId: input.eventId,
-    provider: "codex",
-    providerInstanceId: "codex",
-    threadId: input.threadId,
-    turnId: `turn-${input.eventId}`,
-    type: "turn.started",
-    payload: { model: "example-model" },
-    createdAt: fixtureTime,
-  });
-
-const failedSessionEvent = (input: {
-  readonly eventId: string;
-  readonly threadId: string;
-  readonly errorMessage: string;
-}): OrchestrationEvent => ({
-  sequence: 1,
-  eventId: EventId.make(input.eventId),
-  type: "thread.session-set",
-  aggregateKind: "thread",
-  aggregateId: ThreadId.make(input.threadId),
-  occurredAt: fixtureTime,
-  commandId: CommandId.make(`command-${input.eventId}`),
-  causationEventId: null,
-  correlationId: null,
-  metadata: {},
-  payload: {
+  readonly runId: string;
+  readonly status: OrchestrationV2Run["status"];
+  readonly occurredAt?: string;
+}): OrchestrationV2DomainEvent =>
+  ({
+    id: EventId.make(input.eventId),
+    type: "run.updated",
     threadId: ThreadId.make(input.threadId),
-    session: {
+    runId: OrchestrationRunId.make(input.runId),
+    occurredAt: DateTime.makeUnsafe(input.occurredAt ?? fixtureTime),
+    payload: {
+      id: OrchestrationRunId.make(input.runId),
       threadId: ThreadId.make(input.threadId),
-      status: "error",
-      providerName: "codex",
-      providerInstanceId: ProviderInstanceId.make("codex"),
-      runtimeMode: "approval-required",
-      activeTurnId: null,
-      lastError: input.errorMessage,
-      updatedAt: fixtureTime,
+      status: input.status,
+      completedAt: null,
     },
-  },
-});
+  }) as unknown as OrchestrationV2DomainEvent;
 
-it.effect("projects provider completion, preserves the audit chain, and revokes MCP scope", () =>
+const lifecycleFor = (
+  persistence: Effect.Success<typeof makeRunLifecyclePersistence>,
+  options: {
+    readonly revoked: Array<string>;
+    readonly threads?: ReadonlyMap<string, OrchestrationV2ThreadShell>;
+    readonly failures?: ReadonlyMap<string, string>;
+  },
+) =>
+  makeWithDependencies({
+    persistence,
+    getThread: (threadId) => Effect.succeed(options.threads?.get(threadId)),
+    getRunFailureMessage: ({ runId }) => Effect.succeed(options.failures?.get(runId)),
+    revokeThread: (threadId) =>
+      Effect.sync(() => {
+        options.revoked.push(threadId);
+      }),
+  });
+
+it.effect("projects V2 run completion once, preserves the audit chain, and revokes MCP scope", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const events = yield* CommandCenterEventStream;
     const persistence = yield* makeRunLifecyclePersistence;
-    yield* insertRun(sql, { id: "run-success", threadId: "thread-success" });
+    const threadId = "cc:automation:thread-success";
+    yield* insertRun(sql, { id: "run-success", threadId });
     yield* appendSeedAudit(sql, {
       runId: "run-success",
       spaceId: "space-run-success",
     });
 
     const revoked: Array<string> = [];
-    const lifecycle = makeWithDependencies({
-      persistence,
-      getThread: () => Effect.sync((): OrchestrationThreadShell | undefined => undefined),
-      listProviderSessions: Effect.succeed([]),
-      revokeThread: (threadId) =>
-        Effect.sync(() => {
-          revoked.push(threadId);
-        }),
-    });
-    const started = yield* lifecycle.handleProviderEvent(
-      startedEvent({ eventId: "provider-start", threadId: "thread-success" }),
+    const lifecycle = lifecycleFor(persistence, { revoked });
+    const started = yield* lifecycle.handleThreadEvent(
+      runUpdated({ eventId: "v2-1", threadId, runId: "v2-run-a", status: "starting" }),
     );
-    const transition = yield* lifecycle.handleProviderEvent(
-      completedEvent({
-        eventId: "provider-success",
-        threadId: "thread-success",
-        state: "completed",
+    // Further updates of the same run while it works add no audit rows. V2
+    // stamps each one with its own time, so they are not byte-identical replays.
+    const running = yield* lifecycle.handleThreadEvent(
+      runUpdated({
+        eventId: "v2-1b",
+        threadId,
+        runId: "v2-run-a",
+        status: "running",
+        occurredAt: "2026-01-01T00:00:05.000Z",
       }),
+    );
+    const restarted = yield* lifecycle.handleThreadEvent(
+      runUpdated({
+        eventId: "v2-2",
+        threadId,
+        runId: "v2-run-a",
+        status: "waiting",
+        occurredAt: "2026-01-01T00:00:19.000Z",
+      }),
+    );
+    const transition = yield* lifecycle.handleThreadEvent(
+      runUpdated({ eventId: "v2-3", threadId, runId: "v2-run-a", status: "completed" }),
+    );
+    const repeated = yield* lifecycle.handleThreadEvent(
+      runUpdated({ eventId: "v2-4", threadId, runId: "v2-run-a", status: "completed" }),
     );
 
     const rows = yield* sql<{ readonly state: string; readonly finishedAt: string | null }>`
@@ -187,9 +175,12 @@ it.effect("projects provider completion, preserves the audit chain, and revokes 
       WHERE id = 'run-success'
     `;
     expect(started?.status).toBe("running");
+    expect(running).toBeUndefined();
+    expect(restarted).toBeUndefined();
     expect(transition?.status).toBe("succeeded");
+    expect(repeated).toBeUndefined();
     expect(rows[0]).toEqual({ state: "succeeded", finishedAt: fixtureTime });
-    expect(revoked).toEqual(["thread-success"]);
+    expect(revoked).toEqual([threadId]);
 
     const replay = yield* events.replay({ afterSequence: 0, limit: 20 });
     expect(replay.events.map((event) => event._tag)).toEqual([
@@ -215,26 +206,22 @@ it.effect("records one actionable failure and one urgent Needs You alert under r
     const sql = yield* SqlClient.SqlClient;
     const events = yield* CommandCenterEventStream;
     const persistence = yield* makeRunLifecyclePersistence;
-    yield* insertRun(sql, { id: "run-failure", threadId: "thread-failure" });
+    const threadId = "cc:automation:thread-failure";
+    yield* insertRun(sql, { id: "run-failure", threadId });
 
     const revoked: Array<string> = [];
-    const lifecycle = makeWithDependencies({
-      persistence,
-      getThread: () => Effect.sync((): OrchestrationThreadShell | undefined => undefined),
-      listProviderSessions: Effect.succeed([]),
-      revokeThread: (threadId) =>
-        Effect.sync(() => {
-          revoked.push(threadId);
-        }),
+    const lifecycle = lifecycleFor(persistence, {
+      revoked,
+      failures: new Map([["v2-run-failed", "Example provider failure"]]),
     });
-    const event = completedEvent({
-      eventId: "provider-failure",
-      threadId: "thread-failure",
-      state: "failed",
-      errorMessage: "Example provider failure",
+    const event = runUpdated({
+      eventId: "v2-failed",
+      threadId,
+      runId: "v2-run-failed",
+      status: "failed",
     });
-    const first = yield* lifecycle.handleProviderEvent(event);
-    const duplicate = yield* lifecycle.handleProviderEvent(event);
+    const first = yield* lifecycle.handleThreadEvent(event);
+    const duplicate = yield* lifecycle.handleThreadEvent(event);
 
     const runRows = yield* sql<{ readonly state: string; readonly error: string | null }>`
       SELECT state, error FROM command_center_runs WHERE id = 'run-failure'
@@ -258,7 +245,7 @@ it.effect("records one actionable failure and one urgent Needs You alert under r
       priority: "urgent",
       body: "Example provider failure",
     });
-    expect(revoked).toEqual(["thread-failure"]);
+    expect(revoked).toEqual([threadId]);
 
     const replay = yield* events.replay({ afterSequence: 0, limit: 20 });
     expect(replay.events.map((entry) => entry._tag)).toEqual([
@@ -281,139 +268,167 @@ it.effect("records one actionable failure and one urgent Needs You alert under r
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect(
-  "fails a running command-center run when provider startup sets the session to error",
-  () =>
+it.effect.each(["cancelled", "interrupted"] as const)(
+  "terminalizes a %s V2 run as canceled without a failure or Needs You alert",
+  (status) =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
+      const events = yield* CommandCenterEventStream;
       const persistence = yield* makeRunLifecyclePersistence;
-      yield* insertRun(sql, { id: "run-startup-error", threadId: "thread-startup-error" });
-
+      const threadId = `cc:automation:thread-${status}`;
+      yield* insertRun(sql, { id: `run-${status}`, threadId });
       const revoked: Array<string> = [];
-      const lifecycle = makeWithDependencies({
-        persistence,
-        getThread: () => Effect.sync((): OrchestrationThreadShell | undefined => undefined),
-        listProviderSessions: Effect.succeed([]),
-        revokeThread: (threadId) =>
-          Effect.sync(() => {
-            revoked.push(threadId);
-          }),
-      });
-      const event = failedSessionEvent({
-        eventId: "session-startup-error",
-        threadId: "thread-startup-error",
-        errorMessage: "The Windows sandbox could not be initialized.",
+      const lifecycle = lifecycleFor(persistence, {
+        revoked,
+        // A failure message must not be consulted or recorded for a cancellation.
+        failures: new Map([[`v2-run-${status}`, "Example failure that must not be used"]]),
       });
 
-      const first = yield* lifecycle.handleOrchestrationEvent(event);
-      const duplicate = yield* lifecycle.handleOrchestrationEvent(event);
-      const rows = yield* sql<{ readonly state: string; readonly error: string | null }>`
-      SELECT state, error FROM command_center_runs WHERE id = 'run-startup-error'
-    `;
+      const transition = yield* lifecycle.handleThreadEvent(
+        runUpdated({ eventId: `v2-${status}`, threadId, runId: `v2-run-${status}`, status }),
+      );
 
-      expect(first?.status).toBe("failed");
-      expect(duplicate).toBeUndefined();
-      expect(rows[0]).toEqual({
-        state: "failed",
-        error: "The Windows sandbox could not be initialized.",
-      });
-      expect(revoked).toEqual(["thread-startup-error"]);
+      const runRows = yield* sql<{ readonly state: string; readonly error: string | null }>`
+        SELECT state, error FROM command_center_runs WHERE id = ${`run-${status}`}
+      `;
+      const itemRows = yield* sql<{ readonly id: string }>`
+        SELECT id FROM command_center_items
+      `;
+      expect(transition?.status).toBe("canceled");
+      expect(runRows[0]?.state).toBe("canceled");
+      expect(runRows[0]?.error).not.toBe("Example failure that must not be used");
+      expect(itemRows).toEqual([]);
+      expect(revoked).toEqual([threadId]);
+      const replay = yield* events.replay({ afterSequence: 0, limit: 20 });
+      expect(replay.events.map((event) => event._tag)).toEqual(["RunStateChanged"]);
+      expect(replay.events[0]).toMatchObject({ payload: { status: "canceled" } });
     }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect("ignores V2 events outside Command Center Run threads", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const persistence = yield* makeRunLifecyclePersistence;
+    // A Run row whose thread id is not a `cc:` thread is never touched by V2 events.
+    yield* insertRun(sql, { id: "run-plain", threadId: "thread-plain" });
+    const revoked: Array<string> = [];
+    const lifecycle = lifecycleFor(persistence, { revoked });
+
+    const plain = yield* lifecycle.handleThreadEvent(
+      runUpdated({ eventId: "v2-plain", threadId: "thread-plain", runId: "r", status: "failed" }),
+    );
+    const rows = yield* sql<{ readonly state: string }>`
+      SELECT state FROM command_center_runs WHERE id = 'run-plain'
+    `;
+    expect(plain).toBeUndefined();
+    expect(rows[0]?.state).toBe("running");
+    expect(revoked).toEqual([]);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+const v2StatusForLegacyTurnState = {
+  running: "running",
+  interrupted: "interrupted",
+  completed: "completed",
+  error: "failed",
+} as const;
 
 const threadShell = (input: {
   readonly threadId: string;
   readonly state: "running" | "interrupted" | "completed" | "error";
-}): OrchestrationThreadShell => ({
-  id: ThreadId.make(input.threadId),
-  projectId: ProjectId.make("project-example"),
-  title: "Example thread",
-  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "example-model" },
-  runtimeMode: "auto-accept-edits",
-  interactionMode: "default",
-  branch: null,
-  worktreePath: null,
-  latestTurn: {
-    turnId: TurnId.make(`turn-${input.threadId}`),
-    state: input.state,
-    requestedAt: fixtureTime,
-    startedAt: fixtureTime,
-    completedAt: input.state === "running" ? null : fixtureTime,
-    assistantMessageId: null,
-  },
-  createdAt: fixtureTime,
-  updatedAt: fixtureTime,
-  archivedAt: null,
-  settledOverride: null,
-  settledAt: null,
-  pullRequests: [],
-  session: null,
-  latestUserMessageAt: fixtureTime,
-  hasPendingApprovals: false,
-  hasPendingUserInput: false,
-  hasActionableProposedPlan: false,
-});
+}): OrchestrationV2ThreadShell =>
+  ({
+    id: ThreadId.make(input.threadId),
+    projectId: ProjectId.make("project-example"),
+    title: "Example thread",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "example-model" },
+    runtimeMode: "auto-accept-edits",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    latestRunId: OrchestrationRunId.make(`run-${input.threadId}`),
+    activeRunId:
+      input.state === "running" ? OrchestrationRunId.make(`run-${input.threadId}`) : null,
+    status: v2StatusForLegacyTurnState[input.state],
+    latestRunCompletedAt: input.state === "running" ? null : DateTime.makeUnsafe(fixtureTime),
+    createdAt: DateTime.makeUnsafe(fixtureTime),
+    updatedAt: DateTime.makeUnsafe(fixtureTime),
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    pendingRuntimeRequest: null,
+    latestVisibleMessage: null,
+    latestUserMessageAt: null,
+    hasActionableProposedPlan: false,
+  }) as unknown as OrchestrationV2ThreadShell;
 
-it.effect("reconciles completed and orphaned Runs while preserving a live in-flight session", () =>
+it.effect("reconciles finished and orphaned Runs and leaves active V2 runs to V2 recovery", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const persistence = yield* makeRunLifecyclePersistence;
     yield* insertRun(sql, { id: "run-recovered", threadId: "thread-recovered" });
-    yield* insertRun(sql, { id: "run-orphaned", threadId: "thread-orphaned" });
+    yield* insertRun(sql, { id: "run-failed", threadId: "thread-failed" });
     yield* insertRun(sql, { id: "run-live", threadId: "thread-live" });
+    yield* insertRun(sql, { id: "run-missing", threadId: "thread-missing" });
+    yield* insertRun(sql, { id: "run-unlinked", threadId: null });
 
-    const threads = new Map<string, OrchestrationThreadShell>([
+    const threads = new Map<string, OrchestrationV2ThreadShell>([
       ["thread-recovered", threadShell({ threadId: "thread-recovered", state: "completed" })],
-      ["thread-orphaned", threadShell({ threadId: "thread-orphaned", state: "running" })],
+      ["thread-failed", threadShell({ threadId: "thread-failed", state: "error" })],
       ["thread-live", threadShell({ threadId: "thread-live", state: "running" })],
     ]);
-    const liveSession: ProviderSession = {
-      provider: ProviderDriverKind.make("codex"),
-      providerInstanceId: ProviderInstanceId.make("codex"),
-      status: "running",
-      runtimeMode: "auto-accept-edits",
-      model: "example-model",
-      threadId: ThreadId.make("thread-live"),
-      activeTurnId: TurnId.make("turn-thread-live"),
-      createdAt: fixtureTime,
-      updatedAt: fixtureTime,
-    };
     const revoked: Array<string> = [];
-    const lifecycle = makeWithDependencies({
-      persistence,
-      getThread: (threadId) => Effect.succeed(threads.get(threadId)),
-      listProviderSessions: Effect.succeed([liveSession]),
-      revokeThread: (threadId) =>
-        Effect.sync(() => {
-          revoked.push(threadId);
-        }),
+    const lifecycle = lifecycleFor(persistence, {
+      revoked,
+      threads,
+      failures: new Map([["run-thread-failed", "Example usage limit reached"]]),
     });
 
     const transitions = yield* lifecycle.reconcile;
-    const rows = yield* sql<{ readonly id: string; readonly state: string }>`
-      SELECT id, state FROM command_center_runs ORDER BY id
+    const rows = yield* sql<{
+      readonly id: string;
+      readonly state: string;
+      readonly error: string | null;
+    }>`
+      SELECT id, state, error FROM command_center_runs ORDER BY id
     `;
     expect(rows).toEqual([
-      { id: "run-live", state: "running" },
-      { id: "run-orphaned", state: "failed" },
-      { id: "run-recovered", state: "succeeded" },
+      { id: "run-failed", state: "failed", error: "Example usage limit reached" },
+      { id: "run-live", state: "running", error: null },
+      {
+        id: "run-missing",
+        state: "failed",
+        error: "The server restarted before this Run's thread was created.",
+      },
+      { id: "run-recovered", state: "succeeded", error: null },
+      {
+        id: "run-unlinked",
+        state: "failed",
+        error: "The server restarted before this Run was linked to a provider thread.",
+      },
     ]);
     expect(transitions.map((transition) => transition.status).sort()).toEqual([
       "failed",
+      "failed",
+      "failed",
       "succeeded",
     ]);
-    expect(revoked.sort()).toEqual(["thread-orphaned", "thread-recovered"]);
+    expect(revoked.sort()).toEqual(["thread-failed", "thread-missing", "thread-recovered"]);
+
+    // The live run's terminal event later settles it through the same path.
+    const later = yield* lifecycle.reconcile;
+    expect(later).toEqual([]);
   }).pipe(Effect.provide(testLayer)),
 );
 
-it("maps cancellation events without escalating them as failures", () => {
-  expect(
-    transitionForProviderEvent(
-      completedEvent({
-        eventId: "provider-canceled",
-        threadId: "thread-canceled",
-        state: "cancelled",
-      }),
-    ),
-  ).toMatchObject({ status: "canceled" });
+it("maps V2 run statuses onto the Run lifecycle", () => {
+  expect(transitionForRunStatus("completed")).toEqual({ status: "succeeded" });
+  expect(transitionForRunStatus("cancelled")).toMatchObject({ status: "canceled" });
+  expect(transitionForRunStatus("interrupted")).toMatchObject({ status: "canceled" });
+  expect(transitionForRunStatus("failed")).toMatchObject({ status: "failed" });
+  expect(transitionForRunStatus("rolled_back")).toMatchObject({ status: "failed" });
+  expect(transitionForRunStatus("running")).toEqual({ status: "running" });
+  expect(transitionForRunStatus("queued")).toBeUndefined();
+  expect(transitionForRunStatus("preparing")).toBeUndefined();
 });

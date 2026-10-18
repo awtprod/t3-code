@@ -1,15 +1,25 @@
-import { DatabaseToolError, SupabaseToolProxyResult } from "@t3tools/contracts";
+import {
+  DatabaseToolError,
+  OrchestratorMcpFailure,
+  SupabaseToolProxyResult,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 
 import * as SupabaseMcpConnector from "../../../database/SupabaseMcpConnector.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { requireCapability } from "../../ToolCapability.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
+  ThreadManagementService.ThreadManagementService,
   SupabaseMcpConnector.SupabaseMcpConnector,
 ];
+
+// `McpToolAccess` refuses a write from a read-only client or a caller whose run
+// is not live with `OrchestratorMcpFailure`.
+const failure = Schema.Union([DatabaseToolError, OrchestratorMcpFailure]);
 
 const readonlyTool = <T extends Tool.Any>(tool: T): T =>
   tool
@@ -50,7 +60,7 @@ const makeTool = <Name extends string, Fields extends Schema.Struct.Fields>(
     description,
     parameters: Schema.Struct({ ...fields, ...DatabaseSelectorFields }),
     success: SupabaseToolProxyResult,
-    failure: DatabaseToolError,
+    failure,
     dependencies,
   }).annotate(Tool.Title, title);
   return mode === "read"

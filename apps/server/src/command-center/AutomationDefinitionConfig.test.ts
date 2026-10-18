@@ -6,7 +6,7 @@ import {
   CommandCenterAutomationDefinitionGetInput,
   CommandCenterAutomationDefinitionSaveInput,
 } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -183,7 +183,7 @@ const makeFixtureWithOptions = Effect.fn("AutomationDefinitionConfigTest.makeFix
   });
   const dependencies = Layer.mergeAll(
     Layer.succeed(CommandCenterConfig, configService),
-    Layer.succeed(HostProcessPlatform, options.hostPlatform ?? "linux"),
+    Layer.succeed(HostProcess.Platform, options.hostPlatform ?? "linux"),
     Layer.succeed(
       ProcessRunner.ProcessRunner,
       ProcessRunner.ProcessRunner.of({

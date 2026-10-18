@@ -90,8 +90,8 @@ import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as FileSystem from "effect/FileSystem";
-import { HttpClient } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { HttpClient } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
@@ -99,9 +99,11 @@ import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import { isRemoteOnlyDesktopBuild } from "../app/remoteOnlyBuild.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
+import * as DesktopBrowserHost from "../preview/DesktopBrowserHost.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
 
 const { logWarning: logBackendPoolWarning } =
   DesktopObservability.makeComponentLogger("desktop-backend-pool");
@@ -147,7 +149,9 @@ export class DesktopBackendPool extends Context.Service<
     // Snapshot of all currently-registered instances. Order is unspecified;
     // callers that need a canonical "primary first" view should sort by id.
     readonly list: Effect.Effect<readonly DesktopBackendInstance[]>;
-    // Remote-only desktop mode deliberately has no local primary instance.
+    // The local primary instance. None in remote-only builds and when the
+    // primary backend is a remote server: those launches deliberately have
+    // no local primary.
     readonly primary: Effect.Effect<Option.Option<DesktopBackendInstance>>;
     // Build a fresh DesktopBackendInstance from `spec` and add it to the
     // registry. The pool owns the instance's scope: unregister(id) or pool
@@ -178,6 +182,7 @@ export type BackendInstanceFactoryRequirements =
   | HttpClient.HttpClient
   | DesktopObservability.DesktopBackendOutputLogFactory
   | DesktopTelemetryPublisher.DesktopTelemetryPublisher
+  | DesktopBrowserHost.DesktopBrowserHost
   | DesktopWslEnvironment.DesktopWslEnvironment;
 
 interface ActiveRegisteredInstance {
@@ -211,6 +216,7 @@ export const layer = Layer.effect(
     const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
     const desktopWindow = yield* DesktopWindow.DesktopWindow;
     const electronDialog = yield* ElectronDialog.ElectronDialog;
+    const electronApp = yield* ElectronApp.ElectronApp;
     const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
     const loadedSettings = yield* appSettings.load;
     const startupPlan = DesktopAppSettings.resolveDesktopStartupPlan(loadedSettings);
@@ -305,6 +311,13 @@ export const layer = Layer.effect(
                 ),
               onShutdown: () => desktopWindow.handleBackendNotReady,
               onPreflightFailed: handlePrimaryPreflightFailure,
+              onStateDirOwned: () =>
+                electronDialog
+                  .showErrorBox(
+                    "This Command Center home is unavailable",
+                    "Another Command Center server, such as the background service, is using this data directory. Stop that server and reopen Command Center, or set a separate COMMAND_CENTER_HOME and pair with the running server.",
+                  )
+                  .pipe(Effect.andThen(electronApp.quit)),
             }),
           );
 

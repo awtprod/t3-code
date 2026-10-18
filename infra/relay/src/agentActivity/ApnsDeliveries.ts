@@ -1199,17 +1199,18 @@ export const make = Effect.gen(function* () {
               notification: input.notification,
             })
             .pipe(
-              Effect.catchTag("ApnsDeliveryQueueSendError", (error) =>
-                Effect.succeed({
-                  deviceId: target.deviceId,
-                  kind: "web_push" as const,
-                  ok: false,
-                  queued: false,
-                  apnsStatus: null,
-                  apnsReason: `queue_failed:${error.operation}`,
-                  apnsId: null,
-                }),
-              ),
+              Effect.catchTags({
+                ApnsDeliveryQueueSendError: (error) =>
+                  Effect.succeed({
+                    deviceId: target.deviceId,
+                    kind: "web_push" as const,
+                    ok: false,
+                    queued: false,
+                    apnsStatus: null,
+                    apnsReason: `queue_failed:${error.operation}`,
+                    apnsId: null,
+                  }),
+              }),
             ),
         { concurrency: 4 },
       );

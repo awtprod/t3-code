@@ -24,6 +24,7 @@ function ChatIndexRouteView() {
   return <InboxRedirect />;
 }
 
+/** Command Center lands on the inbox; `/new` owns the draft auto-start. */
 function InboxRedirect() {
   const navigate = useNavigate();
   useEffect(() => {

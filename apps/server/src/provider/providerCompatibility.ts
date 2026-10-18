@@ -26,7 +26,7 @@ const VersionRange = TrimmedNonEmptyString.pipe(
 // Command Center keeps its own server release numbering (package.json), but the
 // bundled and remote compatibility policies are keyed on the upstream T3 Code
 // release whose provider integrations this fork carries. Bump on upstream syncs.
-export const T3_CODE_COMPATIBILITY_VERSION = "0.0.45";
+export const T3_CODE_COMPATIBILITY_VERSION = "0.1.0";
 
 const Policy = Schema.Struct({
   driver: TrimmedNonEmptyString,
@@ -71,14 +71,17 @@ export function resolveProviderCompatibility(
   );
   if (!policy) return undefined;
   const unprefixed = version?.replace(/^v/, "");
-  // Cursor appends a build hash to its date; Google's ACP runtime uses a release prefix.
-  // Strip only these driver-specific forms, keeping semver prereleases unknown.
+  // Cursor appends a build hash to its date; Google's ACP runtime uses a release prefix;
+  // Muse appends a release revision. Strip only these driver-specific forms, keeping
+  // semver prereleases unknown.
   const stable =
     driver === "cursor"
       ? unprefixed?.replace(/^(\d{4}\.\d{2}\.\d{2})-[a-f0-9]+$/, "$1")
       : driver === "antigravity"
         ? unprefixed?.replace(/^agy_acp_server_(\d+\.\d+\.\d+)$/, "$1")
-        : unprefixed;
+        : driver === "muse"
+          ? unprefixed?.replace(/^(\d+\.\d+\.\d+)-R\d+(?:\.\d+)?$/, "$1")
+          : unprefixed;
   const status =
     stable && /^\d+\.\d+\.\d+$/.test(stable)
       ? (policy.ranges.find((entry) => satisfiesSemverRange(stable, entry.range))?.status ??

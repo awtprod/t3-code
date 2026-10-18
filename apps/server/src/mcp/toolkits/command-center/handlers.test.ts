@@ -5,8 +5,9 @@ import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts"
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
-import { Tool } from "effect/unstable/ai";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as Schema from "effect/Schema";
+import { McpSchema, Tool } from "effect/ai";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
@@ -16,9 +17,12 @@ import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
 import { PhoneCalls } from "../../../command-center/phone/PhoneCalls.ts";
 import { PhoneCallProposals } from "../../../command-center/phone/PhoneCallProposals.ts";
-import { SqlitePersistenceMemory } from "../../../persistence/Layers/Sqlite.ts";
-import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../../../persistence/Sqlite.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
+import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
+import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 
 import {
   automationDefinitionFitsScope,
@@ -258,9 +262,13 @@ const activityScope = (
   overrides: Partial<McpInvocationContext.McpInvocationScope> = {},
 ): McpInvocationContext.McpInvocationScope => ({
   environmentId: EnvironmentId.make("environment-1"),
-  threadId: ThreadId.make("cc-space-agent-command-center"),
-  providerSessionId: "session-1",
-  providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  requestNamespace: "session-1",
+  thread: {
+    threadId: ThreadId.make("cc-space-agent-command-center"),
+    providerSessionId: "session-1",
+    providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  },
+  client: undefined,
   capabilities: new Set(["cc.items.read"]),
   spaceId: SpaceId.make("command-center"),
   issuedAt: 0,
@@ -287,10 +295,19 @@ const invokeSpaceActivity = (
       // Typed tool failures surface as a failed effect.
       Effect.catch(() => Effect.succeed([true])),
       Effect.provide(
-        CommandCenterToolkitHandlersLive.pipe(
+        McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
           Layer.provideMerge(
             Layer.mergeAll(
               Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+              // Write tools check that the calling thread's run is live.
+              Layer.mock(ThreadManagement.ThreadManagementService)({
+                getThreadShell: (id) =>
+                  Effect.succeed({
+                    ...liveThreadShell(id),
+                    providerInstanceId:
+                      scope.thread?.providerInstanceId ?? ProviderInstanceId.make("codex"),
+                  }),
+              }),
               // Unused by this tool; the toolkit still requires them.
               Layer.mock(CommandCenterService.CommandCenterService)({}),
               Layer.mock(AutomationRuns.AutomationRuns)({}),
@@ -432,9 +449,13 @@ const itemScope = (
   overrides: Partial<McpInvocationContext.McpInvocationScope> = {},
 ): McpInvocationContext.McpInvocationScope => ({
   environmentId: EnvironmentId.make("environment-1"),
-  threadId: ThreadId.make("cc-space-agent-acme"),
-  providerSessionId: "session-1",
-  providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  requestNamespace: "session-1",
+  thread: {
+    threadId: ThreadId.make("cc-space-agent-acme"),
+    providerSessionId: "session-1",
+    providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  },
+  client: undefined,
   capabilities: new Set(["cc.items.write"]),
   spaceId: SpaceId.make("acme"),
   role: "space-agent",
@@ -475,10 +496,19 @@ const invokeItemTool = (
     }).pipe(
       Effect.catch(() => Effect.succeed([true])),
       Effect.provide(
-        CommandCenterToolkitHandlersLive.pipe(
+        McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
           Layer.provideMerge(
             Layer.mergeAll(
               Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+              // Write tools check that the calling thread's run is live.
+              Layer.mock(ThreadManagement.ThreadManagementService)({
+                getThreadShell: (id) =>
+                  Effect.succeed({
+                    ...liveThreadShell(id),
+                    providerInstanceId:
+                      scope.thread?.providerInstanceId ?? ProviderInstanceId.make("codex"),
+                  }),
+              }),
               Layer.mock(CommandCenterService.CommandCenterService)({
                 getConfiguredSpace: () =>
                   Effect.succeed({
@@ -601,6 +631,124 @@ describe("Command Center MCP Item writes", () => {
   );
 });
 
+const listScope = itemScope({
+  capabilities: new Set(["cc.items.read", "cc.runs.start"]),
+});
+
+/** Records as the Command Center service returns them: optional fields present as `undefined`. */
+const bootstrapWithUndefinedFields = {
+  spaces: [],
+  connections: [],
+  items: [
+    {
+      id: "item-1",
+      spaceId: "acme",
+      kind: "decision",
+      status: "review",
+      priority: "normal",
+      title: "Pick a vendor",
+      description: undefined,
+      dueAt: undefined,
+      artifactIds: [],
+      provenance: { kind: "agent", capturedAt: ITEM_UPDATED_AT },
+      metadata: {},
+      createdAt: ITEM_UPDATED_AT,
+      updatedAt: ITEM_UPDATED_AT,
+    },
+  ],
+  runs: [
+    {
+      id: "run-1",
+      spaceId: "acme",
+      kind: "agent",
+      status: "running",
+      commandId: undefined,
+      parentRunId: undefined,
+      automationId: undefined,
+      repositoryId: undefined,
+      projectId: undefined,
+      threadId: undefined,
+      providerId: undefined,
+      modelId: undefined,
+      artifactIds: [],
+      createdAt: ITEM_UPDATED_AT,
+      startedAt: undefined,
+      finishedAt: undefined,
+    },
+  ],
+  approvals: [],
+};
+
+const isJson = Schema.is(Schema.Json);
+
+const callListTool = (name: "cc_items_list" | "cc_runs_list") =>
+  Effect.gen(function* () {
+    const toolkit = yield* CommandCenterToolkit;
+    const stream = yield* toolkit.handle(name, {} as never);
+    return Array.from(yield* Stream.runCollect(stream));
+  }).pipe(
+    Effect.provide(
+      McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
+        Layer.provideMerge(
+          Layer.mergeAll(
+            Layer.succeed(McpInvocationContext.McpInvocationContext, listScope),
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: (id) => Effect.succeed(liveThreadShell(id)),
+            }),
+            Layer.mock(CommandCenterService.CommandCenterService)({
+              getConfiguredSpace: () =>
+                Effect.succeed({
+                  agent: { enabled: true },
+                  policy: { allowedCapabilities: ["cc.items.read", "cc.runs.start"] },
+                } as never),
+              bootstrap: Effect.succeed({
+                ...bootstrapWithUndefinedFields,
+                needsYou: bootstrapWithUndefinedFields.items,
+              } as never),
+            }),
+            Layer.mock(AutomationRuns.AutomationRuns)({}),
+            Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+            Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+            Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+            Layer.mock(SpaceActivity.SpaceActivity)({}),
+            Layer.succeed(
+              ReadinessGate.CommandCenterReadinessGate,
+              ReadinessGate.CommandCenterReadinessGate.of({
+                state: Effect.succeed("ready"),
+                requireReady: Effect.void,
+                markReady: Effect.void,
+                markFailed: Effect.void,
+              }),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+describe("Command Center MCP list results", () => {
+  it.effect.each(["cc_items_list", "cc_runs_list"] as const)(
+    "%s returns a result the MCP CallToolResult schema accepts",
+    (name) =>
+      Effect.gen(function* () {
+        const outputs = yield* callListTool(name);
+        expect(outputs.map((output) => output.isFailure)).toEqual([false]);
+        const structuredContent = outputs[0]!.encodedResult;
+        expect(isJson(structuredContent)).toBe(true);
+        // effect's MCP server builds exactly this; it throws on non-JSON content.
+        const result = new McpSchema.CallToolResult({
+          content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+          structuredContent: structuredContent as Schema.Json,
+        });
+        expect(result.structuredContent).toEqual(structuredContent);
+        const listed = structuredContent as Record<string, ReadonlyArray<Record<string, unknown>>>;
+        const record = name === "cc_items_list" ? listed.items![0]! : listed.runs![0]!;
+        expect(record.id).toBe(name === "cc_items_list" ? "item-1" : "run-1");
+        expect(Object.values(record)).not.toContain(undefined);
+      }),
+  );
+});
+
 const PHONE_CAPABILITIES = ["cc.phone.call-owner", "cc.phone.call"] as const;
 
 const invokePhoneTool = (
@@ -618,7 +766,7 @@ const invokePhoneTool = (
     }).pipe(
       Effect.catch(() => Effect.succeed([true])),
       Effect.provide(
-        CommandCenterToolkitHandlersLive.pipe(
+        McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
           Layer.provideMerge(
             Layer.mergeAll(
               Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
@@ -634,6 +782,15 @@ const invokePhoneTool = (
               Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
               Layer.mock(ProviderRegistry.ProviderRegistry)({}),
               Layer.mock(SpaceActivity.SpaceActivity)({}),
+              // Write tools check that the calling thread's run is live.
+              Layer.mock(ThreadManagement.ThreadManagementService)({
+                getThreadShell: (id) =>
+                  Effect.succeed({
+                    ...liveThreadShell(id),
+                    providerInstanceId:
+                      scope.thread?.providerInstanceId ?? ProviderInstanceId.make("codex"),
+                  }),
+              }),
               // Any dial records a call; cc_phone_call must never reach it.
               Layer.mock(PhoneCalls)({
                 callOwner: (request) =>

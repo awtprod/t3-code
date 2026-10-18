@@ -5,7 +5,7 @@ import * as NodeProcess from "node:process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -183,7 +183,7 @@ it.layer(NodeServices.layer)("Verified scoped shell admission", (it) => {
   it.effect("fails closed on unsupported platforms before inspecting paths", () =>
     Effect.gen(function* () {
       const service = yield* makeVerifiedLinuxScopedShell().pipe(
-        Effect.provideService(HostProcessPlatform, "darwin"),
+        Effect.provideService(HostProcess.Platform, "darwin"),
       );
       const error = yield* service
         .execute({

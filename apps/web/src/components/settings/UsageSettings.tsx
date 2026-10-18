@@ -1,10 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import {
-  ProviderDriverKind,
-  ProviderInstanceId,
   type InternalGenerationUsageBreakdown,
   type UsageBreakdown,
-  type UsagePricingOverride,
   type UsageQuerySummary,
   type UsageQueryTokenTotals,
 } from "@t3tools/contracts";
@@ -19,7 +16,6 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
-import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 
 const RANGES = [1, 7, 30, 90] as const;
 
@@ -113,20 +109,9 @@ function InternalGenerationBreakdown({
 
 export function UsageSettingsPanel() {
   const environment = usePrimaryEnvironment();
-  const pricingOverrides = usePrimarySettings((settings) => settings.usagePricingOverrides);
-  const updateSettings = useUpdatePrimarySettings();
   const [days, setDays] = useState<(typeof RANGES)[number] | "custom">(1);
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
-  const [priceDraft, setPriceDraft] = useState({
-    driver: "kimi",
-    instanceId: "",
-    model: "kimi-code/k3",
-    uncached: "3.00",
-    cached: "0.30",
-    cacheWrite: "3.00",
-    output: "15.00",
-  });
   const input = useMemo(() => {
     const custom = days === "custom" && customFrom && customTo;
     const to = custom ? new Date(`${customTo}T23:59:59.999Z`) : new Date();
@@ -411,127 +396,15 @@ export function UsageSettingsPanel() {
           </div>
 
           <div className="rounded-xl border border-border/60 bg-card/35 p-4">
-            <h3 className="text-sm font-medium">Price overrides</h3>
+            <h3 className="text-sm font-medium">Prices</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              Rates are USD per million tokens. Instance + model overrides take precedence over
-              driver + model and built-in prices.
+              Costs are estimated from LiteLLM list prices and the per-model price overrides set on
+              the{" "}
+              <Link to="/usage" className="underline underline-offset-2">
+                Usage page
+              </Link>
+              , the same rates the Usage page uses.
             </p>
-            <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-              <Input
-                value={priceDraft.driver}
-                onChange={(event) =>
-                  setPriceDraft((value) => ({ ...value, driver: event.target.value }))
-                }
-                placeholder="Provider driver"
-              />
-              <Input
-                value={priceDraft.instanceId}
-                onChange={(event) =>
-                  setPriceDraft((value) => ({ ...value, instanceId: event.target.value }))
-                }
-                placeholder="Instance (optional)"
-              />
-              <Input
-                value={priceDraft.model}
-                onChange={(event) =>
-                  setPriceDraft((value) => ({ ...value, model: event.target.value }))
-                }
-                placeholder="Model"
-              />
-              <Input
-                value={priceDraft.uncached}
-                onChange={(event) =>
-                  setPriceDraft((value) => ({ ...value, uncached: event.target.value }))
-                }
-                inputMode="decimal"
-                placeholder="Uncached input"
-              />
-              <Input
-                value={priceDraft.cached}
-                onChange={(event) =>
-                  setPriceDraft((value) => ({ ...value, cached: event.target.value }))
-                }
-                inputMode="decimal"
-                placeholder="Cache read"
-              />
-              <Input
-                value={priceDraft.cacheWrite}
-                onChange={(event) =>
-                  setPriceDraft((value) => ({ ...value, cacheWrite: event.target.value }))
-                }
-                inputMode="decimal"
-                placeholder="Cache write"
-              />
-              <Input
-                value={priceDraft.output}
-                onChange={(event) =>
-                  setPriceDraft((value) => ({ ...value, output: event.target.value }))
-                }
-                inputMode="decimal"
-                placeholder="Output"
-              />
-              <Button
-                onClick={() => {
-                  const micro = (value: string) =>
-                    Math.max(0, Math.round(Number(value) * 1_000_000));
-                  if (
-                    !priceDraft.model.trim() ||
-                    (!priceDraft.instanceId.trim() && !priceDraft.driver.trim()) ||
-                    !Number.isFinite(Number(priceDraft.uncached)) ||
-                    !Number.isFinite(Number(priceDraft.output))
-                  )
-                    return;
-                  const override: UsagePricingOverride = {
-                    ...(priceDraft.instanceId.trim()
-                      ? {
-                          providerInstanceId: ProviderInstanceId.make(priceDraft.instanceId.trim()),
-                        }
-                      : { driver: ProviderDriverKind.make(priceDraft.driver.trim()) }),
-                    model: priceDraft.model.trim(),
-                    effectiveAt: new Date().toISOString(),
-                    uncachedInputMicroUsdPerMillion: micro(priceDraft.uncached),
-                    ...(priceDraft.cached.trim()
-                      ? { cacheReadInputMicroUsdPerMillion: micro(priceDraft.cached) }
-                      : {}),
-                    ...(priceDraft.cacheWrite.trim()
-                      ? { cacheWriteInputMicroUsdPerMillion: micro(priceDraft.cacheWrite) }
-                      : {}),
-                    outputMicroUsdPerMillion: micro(priceDraft.output),
-                  };
-                  void updateSettings({ usagePricingOverrides: [...pricingOverrides, override] });
-                }}
-              >
-                Add override
-              </Button>
-            </div>
-            <div className="mt-4 divide-y divide-border/50">
-              {pricingOverrides.map((override, index) => (
-                <div
-                  key={`${override.providerInstanceId ?? override.driver}:${override.model}:${override.effectiveAt}`}
-                  className="flex items-center justify-between gap-3 py-2 text-xs"
-                >
-                  <span className="truncate text-muted-foreground">
-                    {override.providerInstanceId ?? override.driver ?? "Unknown provider"} ·{" "}
-                    {override.model} · $
-                    {(override.uncachedInputMicroUsdPerMillion / 1_000_000).toFixed(2)} input / $
-                    {(override.outputMicroUsdPerMillion / 1_000_000).toFixed(2)} output
-                  </span>
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    onClick={() =>
-                      void updateSettings({
-                        usagePricingOverrides: pricingOverrides.filter(
-                          (_, itemIndex) => itemIndex !== index,
-                        ),
-                      })
-                    }
-                  >
-                    Remove
-                  </Button>
-                </div>
-              ))}
-            </div>
           </div>
         </div>
       </SettingsSection>

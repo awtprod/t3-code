@@ -28,16 +28,16 @@ import {
   type HttpClientResponse,
   HttpRouter,
   HttpServer,
-} from "effect/unstable/http";
-import * as Cookies from "effect/unstable/http/Cookies";
-import * as NetAddress from "effect/unstable/net/NetAddress";
+} from "effect/http";
+import * as Cookies from "effect/http/Cookies";
+import * as NetAddress from "effect/net/NetAddress";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerConfig from "../config.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 
 import { makePreviewGatewayRoutesLayer } from "./gatewayRoute.ts";
 import { stripCookie } from "./gatewayTarget.ts";

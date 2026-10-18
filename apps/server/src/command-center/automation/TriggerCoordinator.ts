@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Command Center module that predates the Effect platform port.
 import { AutomationId, SpaceId, type Automation } from "@command-center/core";
 import {
   COMMAND_CENTER_WEBHOOK_MAX_DELIVERY_ID_CHARS,

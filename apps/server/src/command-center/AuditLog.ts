@@ -1,9 +1,9 @@
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeUtil from "node:util";
 
 export type CommandCenterAuditHashVersion = 1 | 2;
@@ -103,7 +103,7 @@ export const makeCommandCenterAuditLog = Effect.gen(function* () {
   const localAppendLock = yield* Semaphore.make(1);
 
   const digest = Effect.fn("CommandCenterAuditLog.digest")(function* (value: string) {
-    return Encoding.encodeHex(yield* crypto.digest("SHA-256", textEncoder.encode(value)));
+    return Hex.encode(yield* crypto.digest("SHA-256", textEncoder.encode(value)));
   });
 
   const appendUnlocked = Effect.fn("CommandCenterAuditLog.appendUnlocked")(function* (
@@ -168,7 +168,7 @@ export const makeCommandCenterAuditLog = Effect.gen(function* () {
       return yield* Effect.die(new Error("Command Center audit chain head is missing."));
     }
 
-    const eventId = input.eventId ?? (yield* crypto.randomUUIDv4);
+    const eventId = input.eventId ?? (yield* crypto.randomUUIDv4());
     const eventHash = yield* digest(
       commandCenterAuditHashDocument({
         hashVersion: COMMAND_CENTER_AUDIT_HASH_VERSION,

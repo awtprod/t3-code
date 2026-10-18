@@ -1,34 +1,59 @@
-import { Atom } from "effect/unstable/reactivity";
-import { appAtomRegistry } from "../rpc/atomRegistry";
+import {
+  scopeProjectRef,
+  scopedThreadKey,
+  scopeThreadRef,
+} from "@t3tools/client-runtime/environment";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
-import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+
 import { pullRequestDetailToVcsStatus } from "@t3tools/client-runtime/state/pull-requests";
 import {
   resolveEnvironmentMachineKind,
   type EnvironmentId,
+  type ScopedThreadRef,
   type ThreadLinkedPullRequest,
   type ThreadPullRequestLink,
   type VcsStatusResult,
 } from "@t3tools/contracts";
+import { Atom } from "effect/reactivity";
+import { FolderGit2Icon, TerminalIcon } from "lucide-react";
+import { useCallback, useMemo } from "react";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
+import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import { useProject } from "../state/entities";
 import {
   resolveThreadCurrentPullRequestLink,
   resolveThreadPullRequestChains,
   visibleThreadPullRequests,
   type ThreadPullRequestBadge,
 } from "@t3tools/shared/threadPullRequests";
-import { FolderGit2Icon, TerminalIcon } from "lucide-react";
 import { useRender } from "@base-ui/react/use-render";
-import { useMemo, type AnimationEvent, type MouseEvent, type ReactElement } from "react";
+import {
+  type ReactNode,
+  type AnimationEvent,
+  type MouseEvent,
+  type ReactElement,
+  type ComponentProps,
+} from "react";
 import { cn } from "../lib/utils";
-import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
-import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import { revealThreadTerminal } from "../lib/revealThreadTerminal";
+
 import { parseChangeRequestUrl } from "../lib/openPullRequestLink";
 import { useEnvironmentQuery } from "../state/query";
 import { linkedPullRequestDetailAtom, useSharedPullRequestSummary } from "../state/pullRequests";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
+import { vcsEnvironment } from "../state/vcs";
 import { useUiStateStore } from "../uiStateStore";
-import { resolveChangeRequestPresentation } from "../sourceControlPresentation";
-import { resolveThreadStatusPill, type ThreadStatusPill } from "./Sidebar.logic";
+import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
+import {
+  pullRequestMatchesSearchQuery,
+  resolveThreadLastVisitedAt,
+  resolveThreadStatusPill,
+  type ThreadStatusPill,
+  useRetainedValue,
+  useSidebarRowSubscriptionLease,
+} from "./Sidebar.logic";
+
 import type { SidebarThreadSummary } from "../types";
 import { formatWorktreePathForDisplay } from "../worktreeCleanup";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
@@ -113,15 +138,10 @@ export function linkedPullRequestSnapshotStatus(
 ): LinkedThreadPullRequestStatus | null {
   const snapshot = link.snapshot;
   if (snapshot === null) return null;
-  const kind = link.url.includes("/-/merge_requests/")
-    ? "gitlab"
-    : link.url.includes("/pullrequest/")
-      ? "azure-devops"
-      : link.url.includes("/pull-requests/")
-        ? "bitbucket"
-        : link.url.includes("/pulls/")
-          ? "forgejo"
-          : "github";
+  // A link records no host kind, so read it from the URL's change request path.
+  const kind = (
+    sourceControlClients.findByChangeRequestUrl(link.url) ?? sourceControlClients.get(undefined)
+  ).kind;
   return {
     pr: {
       number: link.number,
@@ -135,6 +155,330 @@ export function linkedPullRequestSnapshotStatus(
     },
     sourceControlProvider: { kind, name: kind, baseUrl: "" },
   };
+}
+
+export {
+  resolveThreadPullRequestBadge,
+  type ThreadPullRequestBadge,
+} from "@t3tools/shared/threadPullRequests";
+
+export interface ThreadPullRequestBadgePresentation {
+  readonly Icon: PullRequestGlyphIcon;
+  readonly toneClassName: string;
+  readonly label: string;
+  readonly text: string | number;
+}
+
+/** Resolve the complete badge appearance before rendering it in the sidebar or composer. */
+export function resolveThreadPullRequestBadgePresentation({
+  badge,
+  number,
+  url,
+  status,
+}: {
+  readonly badge: ThreadPullRequestBadge | null;
+  readonly number?: number | undefined;
+  readonly url?: string | undefined;
+  readonly status: PrStatusIndicator | null;
+}): ThreadPullRequestBadgePresentation | null {
+  // The badge already folds every visible link into one state, draft included, so both the
+  // stack and the linked count index the shared table directly rather than the single-PR resolver.
+  if (badge?.kind === "stack") {
+    const aggregate = PULL_REQUEST_STATE_PRESENTATION[badge.state];
+    return {
+      Icon: PullRequestGlyph.stack,
+      toneClassName: aggregate.toneClassName,
+      label: `Stack of ${badge.layers} pull requests, ${aggregate.label.toLowerCase()}`,
+      text: badge.layers,
+    };
+  }
+  if (number === undefined || url === undefined) return null;
+
+  const tooltip = status?.tooltip ?? `PR #${number}, status pending`;
+  if (badge?.kind === "pull-request" && badge.others > 0) {
+    // Unrelated links fold into one state, so a count of merged PRs reads as merged.
+    const aggregate = PULL_REQUEST_STATE_PRESENTATION[badge.state];
+    return {
+      Icon: aggregate.Icon,
+      toneClassName: aggregate.toneClassName,
+      label: `${tooltip}, and ${badge.others} more linked; overall ${aggregate.label.toLowerCase()}`,
+      text: `+${badge.others + 1}`,
+    };
+  }
+  return {
+    Icon: status?.Icon ?? PullRequestGlyph.pullRequest,
+    toneClassName: status?.colorClass ?? "text-muted-foreground",
+    label: tooltip,
+    text: number,
+  };
+}
+
+/**
+ * The linked-PR badge shared by the sidebar and composer footer. The badge owns what it shows:
+ * the state glyph and number at the meta size, in the state's color. The caller owns the control
+ * it sits in through `render` (an inline link in a sidebar row, a toolbar control in the
+ * composer), and the badge fills in the behavior: a single PR is a link to it, while a stack or
+ * several linked PRs is a button that opens the thread's pull requests tab.
+ */
+export function ThreadPullRequestBadgeControl({
+  render,
+  badge,
+  pullRequests,
+  number,
+  url,
+  status,
+  onOpenList,
+  onOpenPullRequest,
+}: {
+  render: ReactElement<{ render?: useRender.RenderProp }>;
+  badge: ThreadPullRequestBadge | null;
+  pullRequests: ReadonlyArray<ThreadPullRequestLink>;
+  number?: number | undefined;
+  url?: string | undefined;
+  status: PrStatusIndicator | null;
+  onOpenList: () => void;
+  onOpenPullRequest: (event: MouseEvent<HTMLElement>, url?: string) => void;
+}) {
+  const presentation = resolveThreadPullRequestBadgePresentation({ badge, number, url, status });
+  if (presentation === null) return null;
+  return (
+    <PullRequestBadge
+      render={render}
+      presentation={presentation}
+      opensList={badge !== null && (badge.kind === "stack" || badge.others > 0)}
+      url={url}
+      number={number}
+      status={status}
+      pullRequests={pullRequests}
+      onOpenList={onOpenList}
+      onOpenPullRequest={onOpenPullRequest}
+    />
+  );
+}
+
+function PullRequestBadge({
+  render,
+  presentation,
+  opensList,
+  url,
+  number,
+  status,
+  pullRequests,
+  onOpenList,
+  onOpenPullRequest,
+}: {
+  render: ReactElement<{ render?: useRender.RenderProp }>;
+  presentation: NonNullable<ReturnType<typeof resolveThreadPullRequestBadgePresentation>>;
+  opensList: boolean;
+  url: string | undefined;
+  number: number | undefined;
+  status: PrStatusIndicator | null;
+  pullRequests: ReadonlyArray<ThreadPullRequestLink>;
+  onOpenList: () => void;
+  onOpenPullRequest: (event: MouseEvent<HTMLElement>, url?: string) => void;
+}) {
+  const onClick = opensList
+    ? (event: MouseEvent<HTMLElement>) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onOpenList();
+      }
+    : onOpenPullRequest;
+  const element = opensList ? (
+    <button type="button" />
+  ) : (
+    <a href={url} target="_blank" rel="noopener noreferrer" />
+  );
+  // The caller's control (InlineButton, ComposerControl) renders as the link or stack button
+  // through its own render prop; useRender merges the badge's behavior into it.
+  const control = useRender({
+    render,
+    props: {
+      render: element,
+      "aria-label": presentation.label,
+      onPointerDown: (event: MouseEvent<HTMLElement>) => event.stopPropagation(),
+      onClick,
+    },
+  });
+  return (
+    <Tooltip key={opensList ? "list" : "link"}>
+      <TooltipTrigger render={control}>
+        <span
+          className={cn("contents font-normal text-xs tabular-nums", presentation.toneClassName)}
+        >
+          <presentation.Icon aria-hidden className="size-3 shrink-0" />
+          {/* An element, not bare text: bare text takes its line box from the control, which
+              inherits the row's size, so beside a text-sm title it sat below the other meta. */}
+          <span>{presentation.text}</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipPopup
+        side="top"
+        sideOffset={0}
+        variant="glass"
+        className="pointer-events-auto w-80 max-w-[calc(100vw-2rem)] text-left whitespace-normal"
+      >
+        {/* The viewport pads 8px inline and 4px block; pull the rows out so their hover
+            highlight sits 4px from every edge. */}
+        <div className="-mx-1">
+          {visibleThreadPullRequests(pullRequests).length > 0 ? (
+            <ThreadPullRequestsMiniList
+              pullRequests={pullRequests}
+              onOpenPullRequest={onOpenPullRequest}
+            />
+          ) : number !== undefined && url !== undefined ? (
+            <ul className="flex flex-col gap-1">
+              <ThreadPullRequestMiniListItem
+                number={number}
+                url={url}
+                title={status?.tooltipTitle ?? presentation.label}
+                presentation={presentation}
+                onOpenPullRequest={onOpenPullRequest}
+              />
+            </ul>
+          ) : null}
+        </div>
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
+
+/**
+ * A miniature of the pull-requests panel for the thread tooltip: same order, same indentation,
+ * so the hover answers "what is in here" without opening the surface.
+ */
+export function ThreadPullRequestsMiniList({
+  pullRequests,
+  onOpenPullRequest,
+}: {
+  pullRequests: ReadonlyArray<ThreadPullRequestLink>;
+  onOpenPullRequest?: (event: MouseEvent<HTMLAnchorElement>, url: string) => void;
+}) {
+  const lines = useMemo(
+    () =>
+      pullRequestListLines(resolveThreadPullRequestChains(visibleThreadPullRequests(pullRequests))),
+    [pullRequests],
+  );
+  if (lines.length === 0) return null;
+  return (
+    <ul className="flex flex-col gap-1">
+      {lines.map((line) => {
+        const snapshot = line.link.snapshot;
+        const presentation =
+          snapshot === null
+            ? null
+            : resolvePullRequestState({ state: snapshot.state, isDraft: snapshot.isDraft });
+        return (
+          <ThreadPullRequestMiniListItem
+            key={`${line.link.host}/${line.link.repository}#${line.link.number}`}
+            number={line.link.number}
+            url={line.link.url}
+            title={snapshot?.title ?? line.link.repository}
+            presentation={presentation}
+            depth={line.depth}
+            onOpenPullRequest={onOpenPullRequest}
+          >
+            {line.stack ? (
+              <span className="ml-auto shrink-0 pl-1 text-3xs">
+                {line.stack.kind === "native" ? "stack" : "chain"} · {line.stack.size}
+              </span>
+            ) : null}
+          </ThreadPullRequestMiniListItem>
+        );
+      })}
+    </ul>
+  );
+}
+
+function ThreadPullRequestMiniListItem({
+  number,
+  url,
+  title,
+  presentation,
+  depth = 0,
+  onOpenPullRequest,
+  children,
+}: {
+  number: number;
+  url: string;
+  title: string;
+  presentation: Pick<ThreadPullRequestBadgePresentation, "Icon" | "toneClassName"> | null;
+  depth?: number;
+  onOpenPullRequest?: ((event: MouseEvent<HTMLAnchorElement>, url: string) => void) | undefined;
+  children?: ReactNode;
+}) {
+  const Icon = presentation?.Icon ?? PullRequestGlyph.pullRequest;
+  const content = (
+    <>
+      <Icon
+        aria-hidden
+        className={cn("size-3 shrink-0", presentation?.toneClassName ?? "stroke-muted-foreground")}
+      />
+      <span className="shrink-0 font-mono tabular-nums">#{number}</span>
+      <span className="min-w-0 truncate text-foreground/75">{title}</span>
+      {children}
+    </>
+  );
+  return (
+    <li style={{ paddingLeft: `${Math.min(depth, 3) * 0.75}rem` }}>
+      {onOpenPullRequest ? (
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex min-w-0 items-center gap-2 rounded-sm px-1 py-1 hover:bg-accent focus-visible:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => onOpenPullRequest(event, url)}
+        >
+          {content}
+        </a>
+      ) : (
+        <div className="flex min-w-0 items-center gap-2">{content}</div>
+      )}
+    </li>
+  );
+}
+
+export function prStatusIndicator(
+  pr: ThreadPr,
+  provider: VcsStatusResult["sourceControlProvider"] | null | undefined,
+): PrStatusIndicator | null {
+  if (!pr) return null;
+  const { shortLabel } = sourceControlClients.get(provider?.kind).changeRequest;
+  const state = resolvePullRequestState({ state: pr.state, isDraft: pr.isDraft === true });
+
+  const tooltipLead = `${shortLabel} #${pr.number} - ${state.label}`;
+  return {
+    label: `${shortLabel} ${state.label.toLowerCase()}`,
+    colorClass: state.toneClassName,
+    Icon: state.Icon,
+    tooltip: `${tooltipLead}: ${pr.title}`,
+    tooltipLead,
+    tooltipTitle: pr.title,
+    url: pr.url,
+  };
+}
+
+export function ChangeRequestStatusIcon({
+  state,
+  isDraft = false,
+  className,
+}: Pick<NonNullable<ThreadPr>, "state"> & {
+  readonly isDraft?: boolean | undefined;
+  readonly className?: string | undefined;
+}) {
+  const presentation = resolvePullRequestState({ state, isDraft });
+  return <presentation.Icon className={className} />;
+}
+
+export function PrStatusTooltipContent({ status }: { status: PrStatusIndicator }) {
+  return (
+    <span className="flex max-w-[min(34rem,calc(100vw-2rem))] items-stretch overflow-hidden whitespace-nowrap">
+      <span className="shrink-0 pr-2 font-medium">{status.tooltipLead}</span>
+      <span className="min-h-4 shrink-0 border-border/70 border-l" aria-hidden="true" />
+      <span className="min-w-0 truncate pl-2">{status.tooltipTitle}</span>
+    </span>
+  );
 }
 
 export function resolveThreadPr(input: {
@@ -208,6 +552,7 @@ export function threadChangeRequestSnapshotsEqual(
     left.pr.baseRef === right.pr.baseRef &&
     left.pr.headRef === right.pr.headRef &&
     left.pr.state === right.pr.state &&
+    left.pr.isDraft === right.pr.isDraft &&
     (left.pr.updatedAt ?? null) === (right.pr.updatedAt ?? null) &&
     sourceControlProvidersEqual(left.sourceControlProvider, right.sourceControlProvider) &&
     linkedPullRequestsEqual(left.linkedPullRequest, right.linkedPullRequest)
@@ -307,7 +652,7 @@ export function nextThreadChangeRequestSnapshot(input: {
  * checkouts only, a cached merged/closed PR for the thread. Local thread
  * metadata follows the shared checkout, so the cached branch intentionally
  * survives that metadata changing to the newly checked-out branch. Open PRs
- * are never retained — their state can still change.
+ * are retained only while live status is absent and the branch still matches.
  */
 export function resolveDisplayedThreadPr(input: {
   threadBranch: string | null;
@@ -340,6 +685,15 @@ export function resolveDisplayedThreadPr(input: {
     gitStatus.pr != null
   ) {
     return gitStatus.pr;
+  }
+
+  if (
+    gitStatus === null &&
+    threadBranch !== null &&
+    snapshot?.branch === threadBranch &&
+    snapshot.linkedPullRequest === undefined
+  ) {
+    return snapshot.pr;
   }
 
   if (
@@ -389,6 +743,15 @@ export function resolveDisplayedThreadPrProvider(input: {
   }
 
   if (
+    gitStatus === null &&
+    threadBranch !== null &&
+    snapshot?.branch === threadBranch &&
+    snapshot.linkedPullRequest === undefined
+  ) {
+    return snapshot.sourceControlProvider;
+  }
+
+  if (
     threadBranch !== null &&
     retainTerminalOnBranchMismatch &&
     snapshot != null &&
@@ -399,255 +762,6 @@ export function resolveDisplayedThreadPrProvider(input: {
   }
 
   return undefined;
-}
-
-export {
-  resolveThreadPullRequestBadge,
-  type ThreadPullRequestBadge,
-} from "@t3tools/shared/threadPullRequests";
-
-export interface ThreadPullRequestBadgePresentation {
-  readonly Icon: PullRequestGlyphIcon;
-  readonly toneClassName: string;
-  readonly label: string;
-  readonly text: string | number;
-}
-
-/** Resolve the complete badge appearance before rendering it in the sidebar or composer. */
-export function resolveThreadPullRequestBadgePresentation({
-  badge,
-  number,
-  url,
-  status,
-}: {
-  readonly badge: ThreadPullRequestBadge | null;
-  readonly number?: number | undefined;
-  readonly url?: string | undefined;
-  readonly status: PrStatusIndicator | null;
-}): ThreadPullRequestBadgePresentation | null {
-  // The badge already folds every visible link into one state, draft included, so both the
-  // stack and the linked count index the shared table directly rather than the single-PR resolver.
-  if (badge?.kind === "stack") {
-    const aggregate = PULL_REQUEST_STATE_PRESENTATION[badge.state];
-    return {
-      Icon: PullRequestGlyph.stack,
-      toneClassName: aggregate.toneClassName,
-      label: `Stack of ${badge.layers} pull requests, ${aggregate.label.toLowerCase()}`,
-      text: badge.layers,
-    };
-  }
-  if (number === undefined || url === undefined) return null;
-
-  const tooltip = status?.tooltip ?? `PR #${number}, status pending`;
-  if (badge?.kind === "pull-request" && badge.others > 0) {
-    // Unrelated links fold into one state, so a count of merged PRs reads as merged.
-    const aggregate = PULL_REQUEST_STATE_PRESENTATION[badge.state];
-    return {
-      Icon: aggregate.Icon,
-      toneClassName: aggregate.toneClassName,
-      label: `${tooltip}, and ${badge.others} more linked; overall ${aggregate.label.toLowerCase()}`,
-      text: `+${badge.others + 1}`,
-    };
-  }
-  return {
-    Icon: status?.Icon ?? PullRequestGlyph.pullRequest,
-    toneClassName: status?.colorClass ?? "text-muted-foreground",
-    label: tooltip,
-    text: number,
-  };
-}
-
-/**
- * The linked-PR badge shared by the sidebar and composer footer. The badge owns what it shows:
- * the state glyph and number at the meta size, in the state's color. The caller owns the control
- * it sits in through `render` (an inline link in a sidebar row, a toolbar control in the
- * composer), and the badge fills in the behavior: a single PR is a link to it, while a stack or
- * several linked PRs is a button that opens the thread's pull requests tab.
- */
-export function ThreadPullRequestBadgeControl({
-  render,
-  badge,
-  number,
-  url,
-  status,
-  onOpenList,
-  onOpenPullRequest,
-}: {
-  render: ReactElement<{ render?: useRender.RenderProp }>;
-  badge: ThreadPullRequestBadge | null;
-  number?: number | undefined;
-  url?: string | undefined;
-  status: PrStatusIndicator | null;
-  onOpenList: () => void;
-  onOpenPullRequest: (event: MouseEvent<HTMLElement>) => void;
-}) {
-  const presentation = resolveThreadPullRequestBadgePresentation({ badge, number, url, status });
-  if (presentation === null) return null;
-  return (
-    <PullRequestBadge
-      render={render}
-      presentation={presentation}
-      opensList={badge !== null && (badge.kind === "stack" || badge.others > 0)}
-      url={url}
-      onOpenList={onOpenList}
-      onOpenPullRequest={onOpenPullRequest}
-    />
-  );
-}
-
-function PullRequestBadge({
-  render,
-  presentation,
-  opensList,
-  url,
-  onOpenList,
-  onOpenPullRequest,
-}: {
-  render: ReactElement<{ render?: useRender.RenderProp }>;
-  presentation: NonNullable<ReturnType<typeof resolveThreadPullRequestBadgePresentation>>;
-  opensList: boolean;
-  url: string | undefined;
-  onOpenList: () => void;
-  onOpenPullRequest: (event: MouseEvent<HTMLElement>) => void;
-}) {
-  const onClick = opensList
-    ? (event: MouseEvent<HTMLElement>) => {
-        event.preventDefault();
-        event.stopPropagation();
-        onOpenList();
-      }
-    : onOpenPullRequest;
-  const element = opensList ? (
-    <button type="button" />
-  ) : (
-    <a href={url} target="_blank" rel="noopener noreferrer" />
-  );
-  // The caller's control (InlineButton, ComposerControl) renders as the link or stack button
-  // through its own render prop; useRender merges the badge's behavior into it.
-  const control = useRender({
-    render,
-    props: {
-      render: element,
-      "aria-label": presentation.label,
-      onPointerDown: (event: MouseEvent<HTMLElement>) => event.stopPropagation(),
-      onClick,
-    },
-  });
-  return (
-    <Tooltip>
-      <TooltipTrigger render={control}>
-        <span
-          className={cn("contents font-normal text-xs tabular-nums", presentation.toneClassName)}
-        >
-          <presentation.Icon aria-hidden className="size-3 shrink-0" />
-          {/* An element, not bare text: bare text takes its line box from the control, which
-              inherits the row's size, so beside a text-sm title it sat below the other meta. */}
-          <span>{presentation.text}</span>
-        </span>
-      </TooltipTrigger>
-      <TooltipPopup side="top">{presentation.label}</TooltipPopup>
-    </Tooltip>
-  );
-}
-
-/**
- * A miniature of the pull-requests panel for the thread tooltip: same order, same indentation,
- * so the hover answers "what is in here" without opening the surface.
- */
-export function ThreadPullRequestsMiniList({
-  pullRequests,
-}: {
-  pullRequests: ReadonlyArray<ThreadPullRequestLink>;
-}) {
-  const lines = useMemo(
-    () =>
-      pullRequestListLines(resolveThreadPullRequestChains(visibleThreadPullRequests(pullRequests))),
-    [pullRequests],
-  );
-  if (lines.length === 0) return null;
-  return (
-    <ul className="flex flex-col gap-1">
-      {lines.map((line) => {
-        const snapshot = line.link.snapshot;
-        const presentation =
-          snapshot === null
-            ? null
-            : resolvePullRequestState({ state: snapshot.state, isDraft: snapshot.isDraft });
-        return (
-          <li
-            key={`${line.link.host}/${line.link.repository}#${line.link.number}`}
-            className="flex min-w-0 items-center gap-2"
-            // Capped like the panel: past a few layers the indent only repeats "still in the
-            // stack", and sixteen of them would walk the titles off the popover.
-            style={{ paddingLeft: `${Math.min(line.depth, 3) * 0.75}rem` }}
-          >
-            {presentation ? (
-              <presentation.Icon
-                aria-hidden
-                className={cn("size-3 shrink-0", presentation.toneClassName)}
-              />
-            ) : (
-              <PullRequestGlyph.pullRequest
-                aria-hidden
-                className="size-3 shrink-0 stroke-muted-foreground"
-              />
-            )}
-            <span className="shrink-0 font-mono tabular-nums">#{line.link.number}</span>
-            <span className="min-w-0 truncate text-foreground/75">
-              {snapshot?.title ?? line.link.repository}
-            </span>
-            {line.stack ? (
-              <span className="ml-auto shrink-0 pl-1 text-3xs">
-                {line.stack.kind === "native" ? "stack" : "chain"} · {line.stack.size}
-              </span>
-            ) : null}
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-export function prStatusIndicator(
-  pr: ThreadPr,
-  provider: VcsStatusResult["sourceControlProvider"] | null | undefined,
-): PrStatusIndicator | null {
-  if (!pr) return null;
-  const presentation = resolveChangeRequestPresentation(provider);
-  const state = resolvePullRequestState({ state: pr.state, isDraft: pr.isDraft === true });
-
-  const tooltipLead = `${presentation.shortName} #${pr.number} - ${state.label}`;
-  return {
-    label: `${presentation.shortName} ${state.label.toLowerCase()}`,
-    colorClass: state.toneClassName,
-    Icon: state.Icon,
-    tooltip: `${tooltipLead}: ${pr.title}`,
-    tooltipLead,
-    tooltipTitle: pr.title,
-    url: pr.url,
-  };
-}
-
-export function ChangeRequestStatusIcon({
-  state,
-  isDraft = false,
-  className,
-}: Pick<NonNullable<ThreadPr>, "state"> & {
-  readonly isDraft?: boolean | undefined;
-  readonly className?: string | undefined;
-}) {
-  const presentation = resolvePullRequestState({ state, isDraft });
-  return <presentation.Icon className={className} />;
-}
-
-export function PrStatusTooltipContent({ status }: { status: PrStatusIndicator }) {
-  return (
-    <span className="flex max-w-[min(34rem,calc(100vw-2rem))] items-stretch overflow-hidden whitespace-nowrap">
-      <span className="shrink-0 pr-2 font-medium">{status.tooltipLead}</span>
-      <span className="min-h-4 shrink-0 border-border/70 border-l" aria-hidden="true" />
-      <span className="min-w-0 truncate pl-2">{status.tooltipTitle}</span>
-    </span>
-  );
 }
 
 export function terminalStatusFromRunningIds(
@@ -672,6 +786,55 @@ export function synchronizeTerminalPulse(event: AnimationEvent<SVGSVGElement>) {
       animation.startTime = 0;
     }
   }
+}
+
+export function ThreadTerminalStatusButton({
+  threadRef,
+  terminalIds,
+  onThreadActivate,
+}: {
+  threadRef: ScopedThreadRef;
+  terminalIds: readonly string[];
+  onThreadActivate: (threadRef: ScopedThreadRef) => void;
+}) {
+  const terminalId = terminalIds[0];
+  if (terminalId === undefined) return null;
+  const status = terminalStatusFromRunningIds(terminalIds);
+  const label =
+    terminalIds.length === 1
+      ? "1 terminal process running. Open terminal"
+      : `${terminalIds.length} terminal processes running. Open terminal`;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            aria-label={label}
+            data-testid={`sidebar-terminal-status-${threadRef.threadId}`}
+            className={cn(
+              "inline-flex shrink-0 cursor-pointer items-center justify-center rounded-sm outline-none hover:opacity-80 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+              status?.colorClass,
+            )}
+            onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              revealThreadTerminal(threadRef, terminalId);
+              onThreadActivate(threadRef);
+            }}
+          />
+        }
+      >
+        <TerminalIcon
+          className="size-3.5 motion-safe:animate-status-pulse"
+          onAnimationStart={synchronizeTerminalPulse}
+        />
+      </TooltipTrigger>
+      <TooltipPopup side="top">{label}</TooltipPopup>
+    </Tooltip>
+  );
 }
 
 export function ThreadWorktreeIndicator({
@@ -721,6 +884,7 @@ export function ThreadStatusLabel({
         <TooltipTrigger
           render={
             <span
+              role="img"
               aria-label={status.label}
               className={`inline-flex size-3.5 shrink-0 items-center justify-center ${status.colorClass}`}
             />
@@ -742,6 +906,7 @@ export function ThreadStatusLabel({
       <TooltipTrigger
         render={
           <span
+            role="img"
             aria-label={status.label}
             className={`inline-flex items-center gap-1 text-3xs ${status.colorClass}`}
           />
@@ -764,20 +929,62 @@ export function ThreadStatusLabel({
  * like the command palette. Shows the change request state icon (if present) and the
  * thread status dot, matching the sidebar's leading indicators.
  */
-export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummary }) {
+export function ThreadRowLeadingStatus({
+  thread,
+  snapshot,
+}: {
+  thread: SidebarThreadSummary;
+  snapshot?: ThreadChangeRequestSnapshot | undefined;
+}) {
+  const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(false);
+  // Observe the containing title even when this thread has no badge yet.
+  const statusRef = useCallback(
+    (node: HTMLSpanElement | null) => rowRef(node?.parentElement ?? null),
+    [rowRef],
+  );
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
-  const lastVisitedAt = useUiStateStore(
+  const localLastVisitedAt = useUiStateStore(
     (state) => state.threadLastVisitedAtById[scopedThreadKey(threadRef)],
   );
-  const pullRequest = useLinkedThreadPullRequest(
+  const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
+  const threadProject = useProject(
+    useMemo(
+      () => scopeProjectRef(thread.environmentId, thread.projectId),
+      [thread.environmentId, thread.projectId],
+    ),
+  );
+  const threadProjectCwd = threadProject?.workspaceRoot ?? null;
+  const gitCwd = thread.worktreePath ?? threadProjectCwd;
+  const linkedPullRequest = useLinkedThreadPullRequest(
     thread.environmentId,
     thread.linkedPullRequest,
-    true,
-    thread.pullRequests,
-    thread.branchPullRequest,
+    leaseLiveStatus,
   );
-  const pr = pullRequest?.pr ?? null;
-  const prStatus = prStatusIndicator(pr, pullRequest?.sourceControlProvider);
+  const gitStatus = useEnvironmentQuery(
+    leaseLiveStatus &&
+      thread.linkedPullRequest == null &&
+      (thread.branch != null || thread.worktreePath !== null) &&
+      gitCwd !== null
+      ? vcsEnvironment.status({
+          environmentId: thread.environmentId,
+          input: { cwd: gitCwd, includeRemote: false },
+        })
+      : null,
+  );
+  const visibleGitStatus = useRetainedValue(
+    JSON.stringify([thread.environmentId, gitCwd]),
+    gitStatus.data,
+  );
+  const displayedPrInput = {
+    threadBranch: thread.branch,
+    gitStatus: visibleGitStatus,
+    snapshot,
+    retainTerminalOnBranchMismatch: thread.worktreePath === null,
+    linkedPullRequest: thread.linkedPullRequest,
+    linkedPullRequestStatus: linkedPullRequest,
+  };
+  const pr = resolveDisplayedThreadPr(displayedPrInput);
+  const prStatus = prStatusIndicator(pr, resolveDisplayedThreadPrProvider(displayedPrInput));
   const threadStatus = resolveThreadStatusPill({
     thread: {
       ...thread,
@@ -790,12 +997,14 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
     pr === null && supportsMultiplePullRequests
       ? resolveThreadCurrentPullRequestLink(thread.pullRequests)
       : null;
-  if (!prStatus && !threadStatus && !pendingLink) {
-    return null;
-  }
 
   return (
-    <span className="inline-flex shrink-0 items-center gap-1.5">
+    <span
+      ref={statusRef}
+      className={
+        prStatus || threadStatus ? "inline-flex shrink-0 items-center gap-1.5" : "contents"
+      }
+    >
       {prStatus && pr ? (
         <Tooltip>
           <TooltipTrigger
@@ -889,4 +1098,80 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
       ) : null}
     </span>
   );
+}
+
+/** Number presentation for compact thread search results. */
+function ThreadPullRequestNumber({
+  number,
+  className,
+  ...props
+}: ComponentProps<"span"> & { number: number }) {
+  return (
+    <span {...props} className={cn("shrink-0 text-xs tabular-nums", className)}>
+      #{number}
+    </span>
+  );
+}
+
+function settledPrHoverColorClass(state: NonNullable<ThreadPr>["state"], isDraft = false): string {
+  switch (state) {
+    case "open":
+      if (isDraft) {
+        return "group-hover/sidebar-row:text-zinc-500 dark:group-hover/sidebar-row:text-zinc-400/80";
+      }
+      return "group-hover/sidebar-row:text-emerald-600 dark:group-hover/sidebar-row:text-emerald-300/90";
+    case "merged":
+      return "group-hover/sidebar-row:text-violet-600 dark:group-hover/sidebar-row:text-violet-300/90";
+    case "closed":
+      return "group-hover/sidebar-row:text-red-600 dark:group-hover/sidebar-row:text-red-300/90";
+  }
+}
+
+export function ThreadSearchPullRequestNumber({
+  thread,
+  query,
+  enabled = true,
+  settled = false,
+}: {
+  thread: SidebarThreadSummary;
+  query: string;
+  enabled?: boolean;
+  settled?: boolean;
+}) {
+  const matchedLink = visibleThreadPullRequests(thread.pullRequests).find((pr) =>
+    pullRequestMatchesSearchQuery({ pullRequests: [pr] }, query),
+  );
+  const fallbackCandidates =
+    thread.pullRequests.length === 0
+      ? [thread.linkedPullRequest, thread.branchPullRequest]
+      : [thread.branchPullRequest];
+  const legacyReference = matchedLink
+    ? undefined
+    : fallbackCandidates.find(
+        (pr) => pr != null && pullRequestMatchesSearchQuery({ linkedPullRequest: pr }, query),
+      );
+  const legacyStatus = useLinkedThreadPullRequest(
+    thread.environmentId,
+    legacyReference,
+    enabled,
+    undefined,
+    legacyReference,
+  );
+  const reference = matchedLink ?? legacyReference;
+  const linked = matchedLink ? linkedPullRequestSnapshotStatus(matchedLink) : legacyStatus;
+  const status = prStatusIndicator(linked?.pr ?? null, linked?.sourceControlProvider);
+  return reference ? (
+    <ThreadPullRequestNumber
+      number={reference.number}
+      className={
+        settled
+          ? cn(
+              "text-secondary-label transition-colors",
+              linked?.pr && settledPrHoverColorClass(linked.pr.state, linked.pr.isDraft),
+            )
+          : (status?.colorClass ?? "text-secondary-label")
+      }
+      aria-label={status?.tooltip ?? `Pull request #${reference.number}`}
+    />
+  ) : null;
 }

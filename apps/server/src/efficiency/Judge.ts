@@ -1,8 +1,7 @@
 // @effect-diagnostics preferSchemaOverJson:off cryptoRandomUUID:off globalTimersInEffect:off globalFetchInEffect:off
 // This is a raw HTTP judge client with an injectable `fetch`, a JSON wire
-// protocol, an AbortController-backed timeout, and a UUID operation id — the
-// same shape as the other raw provider runtimes (see `provider/kimiRuntime.ts`),
-// so the corresponding Effect diagnostics are disabled at the file level.
+// protocol, an AbortController-backed timeout, and a UUID operation id, so the
+// corresponding Effect diagnostics are disabled at the file level.
 /**
  * Judge – one implementation of "ask a cheap model typed questions and get
  * calibrated probabilities back".
@@ -40,11 +39,12 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
-import { lookupRate, type RateTable } from "../usage/usagePricing.ts";
+import { priceTurnUsage } from "../usage/turnUsagePricing.ts";
+import { UsageService, type UsageRateTables } from "../usage/UsageService.ts";
 
 // ---------------------------------------------------------------------------
 // Public request/response shapes (mirrors DESIGN.md §0)
@@ -397,9 +397,8 @@ export function buildAnswersFromTypesafe(
 
 const RETRYABLE_STATUSES = new Set([429, 529]);
 const RETRY_BACKOFF = Duration.millis(1000);
-/** Priced from LOCAL_RATE_OVERRIDES only; the LiteLLM table never carries the
- * judge models, so an empty base table is enough. */
-const EMPTY_RATE_TABLE: RateTable = new Map();
+/** No price tables: every judge call stays unpriced (null cost, never $0). */
+const NO_RATE_TABLES: Effect.Effect<UsageRateTables | undefined> = Effect.succeed(undefined);
 
 interface RawHttpResult {
   readonly status: number;
@@ -731,16 +730,26 @@ const NO_SIDE_EFFECTS: JudgeSideEffects = {
   appendDecision: () => Effect.void,
 };
 
-const costMicroUsd = (
+/**
+ * Prices a judge call through the Usage page's one price path
+ * (`usagePriceOverrides`, then LiteLLM, after `usageModelAliases`; see
+ * `UsageService.readRateTables`). Null when the model has no price or the
+ * tables are unavailable.
+ */
+export const judgeCostMicroUsd = (
+  tables: UsageRateTables | undefined,
   model: string,
   usage: { readonly inputTokens: number; readonly outputTokens: number },
-): number | null => {
-  const rate = lookupRate(EMPTY_RATE_TABLE, model);
-  if (rate === null) return null;
-  const usd =
-    usage.inputTokens * rate.inputCostPerToken + usage.outputTokens * rate.outputCostPerToken;
-  return Math.max(0, Math.round(usd * 1_000_000));
-};
+): number | null =>
+  tables === undefined
+    ? null
+    : priceTurnUsage(tables, model, {
+        uncachedInputTokens: usage.inputTokens,
+        cacheReadInputTokens: null,
+        cacheWriteInputTokens: null,
+        outputTokens: usage.outputTokens,
+        reasoningOutputTokens: null,
+      }).costMicroUsd;
 
 const decisionLine = (input: {
   readonly completedAt: string;
@@ -774,6 +783,8 @@ const decisionLine = (input: {
 export interface JudgeDeps {
   readonly fetchImpl: typeof fetch;
   readonly sideEffects: JudgeSideEffects;
+  /** The Usage page's price tables; a failed read leaves the call unpriced. */
+  readonly rateTables: Effect.Effect<UsageRateTables | undefined>;
 }
 
 /**
@@ -810,6 +821,7 @@ const makeJudge = (getConfig: () => ResolvedJudgeConfig, deps: JudgeDeps): Judge
           onSuccess: ({ answers, usage }) =>
             Effect.gen(function* () {
               const { latencyMs, completedIso } = yield* elapsed;
+              const tables = yield* deps.rateTables;
               yield* deps.sideEffects
                 .recordUsage({
                   operation,
@@ -817,7 +829,7 @@ const makeJudge = (getConfig: () => ResolvedJudgeConfig, deps: JudgeDeps): Judge
                   durationMs: latencyMs,
                   inputTokens: usage.inputTokens,
                   outputTokens: usage.outputTokens,
-                  costMicroUsd: costMicroUsd(config.model, usage),
+                  costMicroUsd: judgeCostMicroUsd(tables, config.model, usage),
                   status: "success",
                   completedAt: completedIso,
                 })
@@ -884,8 +896,16 @@ const makeJudge = (getConfig: () => ResolvedJudgeConfig, deps: JudgeDeps): Judge
 };
 
 /** For tests: a service that never touches a DB or the filesystem. */
-export const makeTestJudge = (config: ResolvedJudgeConfig, fetchImpl: typeof fetch): JudgeShape =>
-  makeJudge(() => config, { fetchImpl, sideEffects: NO_SIDE_EFFECTS });
+export const makeTestJudge = (
+  config: ResolvedJudgeConfig,
+  fetchImpl: typeof fetch,
+  overrides: Partial<Omit<JudgeDeps, "fetchImpl">> = {},
+): JudgeShape =>
+  makeJudge(() => config, {
+    fetchImpl,
+    sideEffects: overrides.sideEffects ?? NO_SIDE_EFFECTS,
+    rateTables: overrides.rateTables ?? NO_RATE_TABLES,
+  });
 
 const MAX_DECISION_LOG_BYTES = ByteSize.mebibytes(20);
 
@@ -895,6 +915,15 @@ const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const usage = yield* UsageService;
+  const rateTables = usage.readRateTables.pipe(
+    Effect.map((tables): UsageRateTables | undefined => tables),
+    Effect.catchCause((cause) =>
+      Effect.logWarning("judge cost unpriced: rate tables unavailable", { cause }).pipe(
+        Effect.as(undefined),
+      ),
+    ),
+  );
 
   const initial = yield* settingsService.getSettings;
   const holder = { config: resolveJudgeConfig(initial.efficiency.judge) };
@@ -948,7 +977,9 @@ const make = Effect.gen(function* () {
       ),
   };
 
-  return Judge.of(makeJudge(() => holder.config, { fetchImpl: globalThis.fetch, sideEffects }));
+  return Judge.of(
+    makeJudge(() => holder.config, { fetchImpl: globalThis.fetch, sideEffects, rateTables }),
+  );
 });
 
 export const layer = Layer.effect(Judge, make);

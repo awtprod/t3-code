@@ -1,8 +1,10 @@
 import {
   COMMAND_CENTER_WS_METHODS,
   COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+  type CommandCenterThreadPlanProgress,
 } from "@t3tools/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
+import * as Stream from "effect/Stream";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import {
@@ -392,6 +394,19 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       label: "environment-data:command-center:events",
       tag: COMMAND_CENTER_WS_METHODS.eventsSubscribe,
       idleTtlMs: 0,
+    }),
+    /** Current plan step per thread id (`null`: no active todo list), kept up to date. */
+    threadPlanProgress: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:command-center:thread-plan-progress",
+      tag: COMMAND_CENTER_WS_METHODS.threadPlanProgressSubscribe,
+      idleTtlMs: 0,
+      transform: (stream) =>
+        stream.pipe(
+          Stream.scan(
+            (): Readonly<Record<string, CommandCenterThreadPlanProgress | null>> => ({}),
+            (progress, update) => ({ ...progress, [update.threadId]: update.progress }),
+          ),
+        ),
     }),
     timeline: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:command-center:timeline",

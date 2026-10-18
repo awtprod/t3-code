@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Web Push VAPID/ECE crypto needs node:crypto ECDH and HKDF primitives.
 import * as NodeCrypto from "node:crypto";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";

@@ -6,19 +6,27 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SynchronizedRef from "effect/SynchronizedRef";
-import { HttpServer } from "effect/unstable/http";
-import * as NetAddress from "effect/unstable/net/NetAddress";
+import { HttpServer } from "effect/http";
+import * as NetAddress from "effect/net/NetAddress";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
-import * as McpProviderSession from "./McpProviderSession.ts";
+import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
+  /**
+   * When false, the credential is minted without the "preview" capability so
+   * the user's choice to withhold agent browser access holds everywhere the
+   * token is honored (#7083). Defaults to full access.
+   */
+  readonly browserToolsAvailable?: boolean;
+  readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
+  /** Local project owning the thread, when issued through project orchestration. */
   readonly projectId?: ProjectId;
   readonly cwd?: string;
-  readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
+  /** Supabase connector grant for the thread's project database connection. */
   readonly databaseAccess?: "read" | "write";
   readonly spaceId?: SpaceId;
   readonly repositoryId?: RepositoryId;
@@ -50,7 +58,7 @@ export interface McpSessionRegistryShape {
   readonly issue: (request: McpCredentialRequest) => Effect.Effect<McpIssuedCredential>;
   readonly resolve: (
     rawToken: string,
-  ) => Effect.Effect<McpInvocationContext.McpInvocationScope | undefined>;
+  ) => Effect.Effect<McpInvocationContext.McpThreadInvocationScope | undefined>;
   /**
    * Records a sign of life for every credential bound to `threadId`. Provider
    * turns call this so that a session which is plainly alive keeps its
@@ -71,9 +79,10 @@ export class McpSessionRegistry extends Context.Service<
   McpSessionRegistryShape
 >()("@awtprod/command-center/mcp/McpSessionRegistry") {}
 
+/** Registry credentials always belong to a provider session, so their scope has a thread. */
 interface CredentialRecord {
   readonly tokenHash: string;
-  readonly scope: McpInvocationContext.McpInvocationScope;
+  readonly scope: McpInvocationContext.McpThreadInvocationScope;
   readonly lastAliveAt: number;
 }
 
@@ -193,25 +202,47 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const issue: McpSessionRegistryShape["issue"] = Effect.fn("McpSessionRegistry.issue")(
     function* (request) {
       const issuedAt = yield* currentTimeMillis;
-      const providerSessionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+      const providerSessionId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
+      const browserToolsAvailable = request.browserToolsAvailable ?? true;
+      // A Command Center Run or Space agent thread carries its registered scope;
+      // its capabilities replace the request's so tool input cannot widen them.
       const registeredScope = yield* scopeForThread(request.threadId);
       const spaceId = request.spaceId ?? registeredScope?.spaceId;
       const repositoryId = request.repositoryId ?? registeredScope?.repositoryId;
-      const capabilities = new Set<McpInvocationContext.McpCapability>(
-        registeredScope?.capabilities ?? request.capabilities ?? ["preview"],
-      );
-      if (request.databaseAccess !== undefined) capabilities.add("database.read");
-      if (request.databaseAccess === "write") capabilities.add("database.write");
-      const scope: McpInvocationContext.McpInvocationScope = {
+      const databaseCapabilities: ReadonlyArray<McpInvocationContext.McpCapability> =
+        request.databaseAccess === "write"
+          ? ["database.read", "database.write"]
+          : request.databaseAccess === "read"
+            ? ["database.read"]
+            : [];
+      const scope: McpInvocationContext.McpThreadInvocationScope = {
         environmentId,
-        threadId: ThreadId.make(request.threadId),
-        providerSessionId,
-        providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
+        requestNamespace: providerSessionId,
+        thread: {
+          threadId: ThreadId.make(request.threadId),
+          providerSessionId,
+          providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
+        },
+        client: undefined,
+        // A Command Center Run or Space agent thread holds exactly its
+        // registered scope (plus any database grant): upstream's base thread
+        // grants (orchestration, worktree, pull requests) would widen what a
+        // scoped credential can reach. Other threads keep upstream's grants.
+        capabilities: new Set<McpInvocationContext.McpCapability>(
+          registeredScope !== undefined
+            ? [...registeredScope.capabilities, ...databaseCapabilities]
+            : [
+                "orchestration",
+                "worktree",
+                "pull-requests",
+                ...(request.capabilities ?? (browserToolsAvailable ? (["preview"] as const) : [])),
+                ...databaseCapabilities,
+              ],
+        ),
         ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
         ...(request.cwd?.trim() ? { cwd: request.cwd.trim() } : {}),
-        capabilities,
         ...(spaceId === undefined ? {} : { spaceId }),
         ...(repositoryId === undefined ? {} : { repositoryId }),
         memoryWriteMode: registeredScope?.memoryWriteMode ?? "propose",
@@ -226,12 +257,13 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       return {
         config: {
           environmentId,
-          threadId: scope.threadId,
+          threadId: scope.thread.threadId,
           providerSessionId,
-          providerInstanceId: scope.providerInstanceId,
+          providerInstanceId: scope.thread.providerInstanceId,
           endpoint,
           authorizationHeader: `Bearer ${rawToken}`,
-          capabilities: new Set(capabilities),
+          browserToolsAvailable: scope.capabilities.has("preview"),
+          capabilities: scope.capabilities,
         },
       };
     },
@@ -260,7 +292,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         const current = pruneDead(records, timestamp);
         const next = new Map(current);
         for (const [tokenHash, record] of current) {
-          if (record.scope.threadId === threadId) {
+          if (record.scope.thread.threadId === threadId) {
             next.set(tokenHash, { ...record, lastAliveAt: timestamp });
           }
         }
@@ -281,11 +313,11 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     touch,
     revokeProviderSession: Effect.fn("McpSessionRegistry.revokeProviderSession")(
       function* (providerSessionId) {
-        yield* revokeWhere((record) => record.scope.providerSessionId === providerSessionId);
+        yield* revokeWhere((record) => record.scope.thread.providerSessionId === providerSessionId);
       },
     ),
     revokeThread: Effect.fn("McpSessionRegistry.revokeThread")(function* (threadId) {
-      yield* revokeWhere((record) => record.scope.threadId === threadId);
+      yield* revokeWhere((record) => record.scope.thread.threadId === threadId);
     }),
     registerThreadScope: Effect.fn("McpSessionRegistry.registerThreadScope")(
       function* (threadId, scope) {
@@ -345,6 +377,10 @@ export const issueActiveMcpCredential = (
 export const touchActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.touch(threadId) : Effect.void;
 
+/**
+ * Revokes a thread's credentials and drops its Command Center scope, so a
+ * finished Run or Space agent thread cannot keep calling scoped tools.
+ */
 export const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
   activeMcpSessionRegistry
     ? activeMcpSessionRegistry
@@ -372,7 +408,7 @@ export const hasActiveMcpThreadScope = (threadId: ThreadId): Effect.Effect<boole
         .pipe(Effect.map((scope) => scope !== undefined))
     : Effect.succeed(false);
 
-export const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>
+const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeAll : Effect.void;
 
 /** Exposed for tests. */

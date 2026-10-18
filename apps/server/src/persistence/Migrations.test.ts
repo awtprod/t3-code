@@ -2,7 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import {
   MIGRATIONS_TABLE,
@@ -199,4 +199,130 @@ describe("stacked Instagram migration manifest", () => {
       [82, "CommandCenterSpaceAgentReplies"],
     ]);
   });
+});
+
+const v2Migrations = migrationManifest.filter(([id]) => id >= 95);
+const newerMigrationId = Math.max(...migrationManifest.map(([id]) => id)) + 1;
+
+const history = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* sql<{ readonly migration_id: number; readonly name: string }>`
+    SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
+  `;
+  return rows.map((row) => [row.migration_id, row.name] as const);
+});
+
+const v2TableCount = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* sql`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'orchestration_v2_%'
+  `;
+  return rows.length;
+});
+
+describe("runMigrations with orchestration V2 (upstream 055-062 renumbered 095-102)", () => {
+  it.effect("migrates a fresh database through the whole manifest", () =>
+    Effect.gen(function* () {
+      yield* runMigrations();
+      assert.deepStrictEqual(yield* history, migrationManifest);
+      assert.isAbove(yield* v2TableCount, 0);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("refuses to start when another migration took a V2 id", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 94 });
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name) VALUES (95, 'FutureMainMigration')
+      `;
+      const before = yield* history;
+
+      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 94 }), []);
+      const exit = yield* Effect.exit(runMigrations());
+
+      assert.isTrue(Exit.isFailure(exit));
+      assert.include(String(exit), "95_OrchestrationV2 (recorded: FutureMainMigration)");
+      assert.deepStrictEqual(yield* history, before);
+      assert.strictEqual(yield* v2TableCount, 0);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("refuses to start when a later id would skip V2 migrations", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 94 });
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (${newerMigrationId}, 'FutureMainMigration')
+      `;
+      const before = yield* history;
+
+      const exit = yield* Effect.exit(runMigrations());
+
+      assert.isTrue(Exit.isFailure(exit));
+      for (const [id, name] of v2Migrations) {
+        assert.include(String(exit), `${id}_${name} (recorded: nothing)`);
+      }
+      assert.deepStrictEqual(yield* history, before);
+      assert.strictEqual(yield* v2TableCount, 0);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("upgrades a database at exactly 94 (the last fork migration before V2)", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 94 });
+      assert.deepStrictEqual(yield* runMigrations(), v2Migrations);
+      assert.deepStrictEqual(yield* history, migrationManifest);
+      assert.isAbove(yield* v2TableCount, 0);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect.each([30, 94])("still starts with a site-local migration at id %s", (id) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 94 });
+      yield* sql`
+        UPDATE effect_sql_migrations SET name = 'SiteLocalMigration' WHERE migration_id = ${id}
+      `;
+
+      assert.deepStrictEqual(yield* runMigrations(), v2Migrations);
+      assert.isAbove(yield* v2TableCount, 0);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("only checks V2 migrations within the requested limit", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 95 });
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (96, 'SiteLocalMigration'), (${newerMigrationId}, 'NewerV2Migration')
+      `;
+      const before = yield* history;
+
+      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 95 }), []);
+      const exit = yield* Effect.exit(runMigrations({ toMigrationInclusive: 96 }));
+      assert.isTrue(Exit.isFailure(exit));
+      assert.include(
+        String(exit),
+        "96_RemoveRedundantProjectionIndexes (recorded: SiteLocalMigration)",
+      );
+      assert.notInclude(String(exit), "97_ScheduledTaskWebhooks");
+      assert.deepStrictEqual(yield* history, before);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("still starts after a newer build recorded a later V2 migration", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations();
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (${newerMigrationId}, 'NewerV2Migration')
+      `;
+
+      assert.deepStrictEqual(yield* runMigrations(), []);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
 });

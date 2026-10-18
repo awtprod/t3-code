@@ -131,7 +131,7 @@ const make = Effect.fn("PublishConnections.make")(function* (
     const implementation = byProvider.get(input.provider);
     if (implementation === undefined) return yield* unavailable(input.provider);
     const started = yield* implementation.begin;
-    const sessionId = yield* crypto.randomUUIDv4.pipe(
+    const sessionId = yield* crypto.randomUUIDv4().pipe(
       Effect.mapError(
         (cause) =>
           new CommandCenterError({

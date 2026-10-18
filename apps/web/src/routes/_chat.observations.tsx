@@ -59,7 +59,7 @@ function ObservationCard({
       type="button"
       onClick={onSelect}
       aria-current={selected ? "true" : undefined}
-      className={`w-full rounded-xl border p-4 text-left focus-visible:ring-2 focus-visible:ring-ring ${selected ? "border-primary bg-primary/5" : "border-border hover:bg-accent/30"}`}
+      className={`w-full rounded-xl border p-4 text-left focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${selected ? "border-primary bg-primary/5" : "border-border hover:bg-accent/30"}`}
     >
       <span className="flex flex-wrap items-center justify-between gap-2">
         <strong className="text-sm">{observation.metric.definition}</strong>
@@ -381,7 +381,7 @@ function ObservationsRouteView() {
   };
 
   return (
-    <SidebarInset className="h-full min-h-0 overflow-auto">
+    <SidebarInset className="scrollbar-gutter-both h-full min-h-0 overflow-auto">
       <main className="mx-auto w-full max-w-7xl space-y-5 p-4 pb-10 pt-14 sm:p-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>

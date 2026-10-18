@@ -15,8 +15,9 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
-import { expandHomePathWith } from "../pathExpansion.ts";
 
 /** The probe is a liveness check, not real work; it must not hang a create. */
 const PROBE_TIMEOUT_MS = 10_000;
@@ -294,7 +295,9 @@ export const make = Effect.gen(function* () {
   const normalizeWorkspaceRoot: WorkspacePaths["Service"]["normalizeWorkspaceRoot"] = Effect.fn(
     "WorkspacePaths.normalizeWorkspaceRoot",
   )(function* (workspaceRoot, options) {
-    const normalizedWorkspaceRoot = path.resolve(expandHomePathWith(workspaceRoot.trim(), path));
+    const normalizedWorkspaceRoot = path.resolve(
+      expandHomePath(workspaceRoot.trim(), yield* HostProcess.HomeDirectory),
+    );
     let workspaceStat = yield* statWorkspaceRoot(
       workspaceRoot,
       normalizedWorkspaceRoot,

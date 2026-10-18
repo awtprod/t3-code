@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Command Center module that predates the Effect platform port.
 import * as NodeCrypto from "node:crypto";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -24,9 +25,9 @@ import {
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import { resolveGoogleDraftAttachmentPaths } from "./AutomationRuns.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import * as ConnectionHealth from "./ConnectionHealth.ts";
@@ -2453,68 +2454,67 @@ it.effect("force-refreshes Inbox Space access against config revocation and conf
   }).pipe(Effect.provide(makeTestLayerFrom(Effect.sync(() => currentConfig))));
 });
 
-for (const unavailableStatus of ["missing", "invalid"] as const) {
-  it.effect(
-    `${unavailableStatus} private config keeps the last projection and denies scoped writes without data loss`,
-    () => {
-      const availableConfig: LoadedCommandCenterConfig = {
-        ...loadedConfig,
-        connections: [enabledGoogleConnection],
-      };
-      let currentConfig = availableConfig;
+it.effect.each(["missing", "invalid"] as const)(
+  "%s private config keeps the last projection and denies scoped writes without data loss",
+  (unavailableStatus) => {
+    const availableConfig: LoadedCommandCenterConfig = {
+      ...loadedConfig,
+      connections: [enabledGoogleConnection],
+    };
+    let currentConfig = availableConfig;
 
-      return Effect.gen(function* () {
-        const service = yield* CommandCenterService;
-        const sql = yield* SqlClient.SqlClient;
-        yield* service.bootstrap;
-        const existing = yield* service.createItem({
-          requestId: `unavailable-config-${unavailableStatus}-existing`,
-          spaceId: systemSpace.id,
-          kind: "task",
-          priority: "normal",
-          title: "Preserved while configuration is unavailable",
-        });
-        const auditBefore = yield* sql<{ readonly count: number }>`
+    return Effect.gen(function* () {
+      const service = yield* CommandCenterService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* service.bootstrap;
+      const existing = yield* service.createItem({
+        requestId: `unavailable-config-${unavailableStatus}-existing`,
+        spaceId: systemSpace.id,
+        kind: "task",
+        priority: "normal",
+        title: "Preserved while configuration is unavailable",
+      });
+      const auditBefore = yield* sql<{ readonly count: number }>`
           SELECT count(*) AS count FROM command_center_audit_events
         `;
 
-        currentConfig = unavailableConfig(unavailableStatus);
-        yield* service.syncConfiguration({ force: true });
-        const unavailable = yield* service.bootstrap;
-        expect(unavailable.configHealth.status).toBe(unavailableStatus);
-        expect(unavailable.spaces).toContainEqual(expect.objectContaining({ id: systemSpace.id }));
-        expect(unavailable.items).toContainEqual(expect.objectContaining({ id: existing.id }));
-        expect(unavailable.runs).toEqual([]);
-        expect(unavailable.approvals).toEqual([]);
-        expect(unavailable.automations).toEqual([]);
-        expect(unavailable.connections).toContainEqual(
-          expect.objectContaining({ id: enabledGoogleConnection.id }),
-        );
-        expect(unavailable.memories).toEqual([]);
-        expect(yield* service.querySpaces({ spaceId: systemSpace.id })).toEqual({
-          spaces: [expect.objectContaining({ id: systemSpace.id })],
-        });
-        expect(yield* service.queryItems({ spaceId: systemSpace.id })).toEqual({
-          items: [expect.objectContaining({ id: existing.id })],
-        });
+      currentConfig = unavailableConfig(unavailableStatus);
+      yield* service.syncConfiguration({ force: true });
+      const unavailable = yield* service.bootstrap;
+      expect(unavailable.configHealth.status).toBe(unavailableStatus);
+      expect(unavailable.spaces).toContainEqual(expect.objectContaining({ id: systemSpace.id }));
+      expect(unavailable.items).toContainEqual(expect.objectContaining({ id: existing.id }));
+      expect(unavailable.runs).toEqual([]);
+      expect(unavailable.approvals).toEqual([]);
+      expect(unavailable.automations).toEqual([]);
+      expect(unavailable.connections).toContainEqual(
+        expect.objectContaining({ id: enabledGoogleConnection.id }),
+      );
+      expect(unavailable.memories).toEqual([]);
+      expect(yield* service.querySpaces({ spaceId: systemSpace.id })).toEqual({
+        spaces: [expect.objectContaining({ id: systemSpace.id })],
+      });
+      expect(yield* service.queryItems({ spaceId: systemSpace.id })).toEqual({
+        items: [expect.objectContaining({ id: existing.id })],
+      });
 
-        const writeError = yield* service
-          .createItem({
-            requestId: `unavailable-config-${unavailableStatus}-denied`,
-            spaceId: systemSpace.id,
-            kind: "task",
-            priority: "normal",
-            title: "This write must be denied",
-          })
-          .pipe(Effect.flip);
-        expect(writeError.reason).toBe("config");
+      const writeError = yield* service
+        .createItem({
+          requestId: `unavailable-config-${unavailableStatus}-denied`,
+          spaceId: systemSpace.id,
+          kind: "task",
+          priority: "normal",
+          title: "This write must be denied",
+        })
+        .pipe(Effect.flip);
+      expect(writeError.reason).toBe("config");
 
-        const preserved = yield* sql<{
-          readonly lifecycle: string;
-          readonly existingItems: number;
-          readonly deniedItems: number;
-          readonly connections: number;
-        }>`
+      const preserved = yield* sql<{
+        readonly lifecycle: string;
+        readonly existingItems: number;
+        readonly deniedItems: number;
+        readonly connections: number;
+      }>`
           SELECT s.lifecycle,
             (SELECT count(*) FROM command_center_items WHERE id = ${existing.id}) AS "existingItems",
             (SELECT count(*) FROM command_center_items
@@ -2524,29 +2524,28 @@ for (const unavailableStatus of ["missing", "invalid"] as const) {
           FROM command_center_spaces s
           WHERE s.id = ${systemSpace.id}
         `;
-        expect(preserved).toEqual([
-          {
-            lifecycle: "active",
-            existingItems: 1,
-            deniedItems: 0,
-            connections: 1,
-          },
-        ]);
-        expect(
-          (yield* sql<{ readonly count: number }>`
+      expect(preserved).toEqual([
+        {
+          lifecycle: "active",
+          existingItems: 1,
+          deniedItems: 0,
+          connections: 1,
+        },
+      ]);
+      expect(
+        (yield* sql<{ readonly count: number }>`
             SELECT count(*) AS count FROM command_center_audit_events
           `)[0]?.count,
-        ).toBe(auditBefore[0]?.count);
+      ).toBe(auditBefore[0]?.count);
 
-        currentConfig = availableConfig;
-        yield* service.syncConfiguration({ force: true });
-        const recovered = yield* service.bootstrap;
-        expect(recovered.spaces).toContainEqual(expect.objectContaining({ id: systemSpace.id }));
-        expect(recovered.items).toContainEqual(expect.objectContaining({ id: existing.id }));
-      }).pipe(Effect.provide(makeTestLayerFrom(Effect.sync(() => currentConfig))));
-    },
-  );
-}
+      currentConfig = availableConfig;
+      yield* service.syncConfiguration({ force: true });
+      const recovered = yield* service.bootstrap;
+      expect(recovered.spaces).toContainEqual(expect.objectContaining({ id: systemSpace.id }));
+      expect(recovered.items).toContainEqual(expect.objectContaining({ id: existing.id }));
+    }).pipe(Effect.provide(makeTestLayerFrom(Effect.sync(() => currentConfig))));
+  },
+);
 
 it.effect("updates an exact-space Item with CAS semantics and emits one typed event", () =>
   Effect.gen(function* () {

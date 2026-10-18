@@ -1,7 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeBuffer from "node:buffer";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeProcess from "node:process";
+
+import * as Redacted from "effect/Redacted";
 
 const NULL_DEVICE = NodeProcess.platform === "win32" ? "NUL" : "/dev/null";
 const NO_EXECUTABLE_PATH =
@@ -360,6 +363,64 @@ function readEnvironment(source: NodeJS.ProcessEnv, key: string): string | undef
   )?.[1];
 }
 
+/**
+ * The only `GIT_CONFIG_*` entries an inherited environment may carry into
+ * hardened Git: exact key/value pairs that pin byte-exact, unsigned behaviour
+ * (the test suite sets them in `testUtils/gitConfig.setup.ts`). Each pair only
+ * makes Git more predictable, so honouring them in production is harmless; an
+ * inherited set containing anything else is dropped whole.
+ */
+const INHERITABLE_GIT_CONFIG_PINS: ReadonlyMap<string, string> = new Map([
+  ["core.autocrlf", "false"],
+  ["core.filemode", "false"],
+  ["core.longpaths", "true"],
+  ["commit.gpgsign", "false"],
+  ["tag.gpgsign", "false"],
+  ["init.defaultBranch", "main"],
+]);
+const MAX_INHERITED_GIT_CONFIG_ENTRIES = 16;
+
+export function inheritedGitConfigPins(
+  source: NodeJS.ProcessEnv,
+): ReadonlyArray<readonly [key: string, value: string]> {
+  const countText = readEnvironment(source, "GIT_CONFIG_COUNT");
+  if (countText === undefined || !/^\d{1,2}$/u.test(countText)) return [];
+  const count = Number(countText);
+  if (count === 0 || count > MAX_INHERITED_GIT_CONFIG_ENTRIES) return [];
+  const pins: Array<readonly [string, string]> = [];
+  for (let index = 0; index < count; index++) {
+    const key = readEnvironment(source, `GIT_CONFIG_KEY_${index}`);
+    const value = readEnvironment(source, `GIT_CONFIG_VALUE_${index}`);
+    if (
+      key === undefined ||
+      value === undefined ||
+      INHERITABLE_GIT_CONFIG_PINS.get(key) !== value
+    ) {
+      return [];
+    }
+    pins.push([key, value]);
+  }
+  return pins;
+}
+
+/** Appends config entries after any `GIT_CONFIG_*` entries `environment` already has. */
+export function withGitConfigEntries(
+  environment: NodeJS.ProcessEnv,
+  entries: ReadonlyArray<readonly [key: string, value: string]>,
+): NodeJS.ProcessEnv {
+  if (entries.length === 0) return environment;
+  const existing = Number(environment.GIT_CONFIG_COUNT ?? "0");
+  const next: NodeJS.ProcessEnv = {
+    ...environment,
+    GIT_CONFIG_COUNT: String(existing + entries.length),
+  };
+  entries.forEach(([key, value], offset) => {
+    next[`GIT_CONFIG_KEY_${existing + offset}`] = key;
+    next[`GIT_CONFIG_VALUE_${existing + offset}`] = value;
+  });
+  return next;
+}
+
 /** Build an exact environment; inherited Git execution/location controls never survive. */
 export function hardenedHostGitEnvironment(
   trustedOverrides: ReadonlyArray<NodeJS.ProcessEnv | undefined> = [],
@@ -383,25 +444,28 @@ export function hardenedHostGitEnvironment(
       if (indexFile !== undefined) environment.GIT_INDEX_FILE = indexFile;
     }
   }
-  return {
-    ...environment,
-    LANG: environment.LANG ?? "C.UTF-8",
-    LC_ALL: environment.LC_ALL ?? "C.UTF-8",
-    GIT_ATTR_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: NULL_DEVICE,
-    GIT_CONFIG_SYSTEM: NULL_DEVICE,
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_ASKPASS: "true",
-    GIT_EDITOR: "true",
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_PAGER: "cat",
-    GIT_SEQUENCE_EDITOR: "true",
-    GIT_SSH_COMMAND: `ssh -F ${NULL_DEVICE}`,
-    GIT_TERMINAL_PROMPT: "0",
-    GCM_INTERACTIVE: "never",
-    SSH_ASKPASS: "true",
-    SSH_ASKPASS_REQUIRE: "force",
-  };
+  return withGitConfigEntries(
+    {
+      ...environment,
+      LANG: environment.LANG ?? "C.UTF-8",
+      LC_ALL: environment.LC_ALL ?? "C.UTF-8",
+      GIT_ATTR_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: NULL_DEVICE,
+      GIT_CONFIG_SYSTEM: NULL_DEVICE,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_ASKPASS: "true",
+      GIT_EDITOR: "true",
+      GIT_OPTIONAL_LOCKS: "0",
+      GIT_PAGER: "cat",
+      GIT_SEQUENCE_EDITOR: "true",
+      GIT_SSH_COMMAND: `ssh -F ${NULL_DEVICE}`,
+      GIT_TERMINAL_PROMPT: "0",
+      GCM_INTERACTIVE: "never",
+      SSH_ASKPASS: "true",
+      SSH_ASKPASS_REQUIRE: "force",
+    },
+    inheritedGitConfigPins(sourceEnvironment),
+  );
 }
 
 export function hardenedHostGitArguments(
@@ -561,4 +625,78 @@ export function unsafeHostGitConfigKey(contents: string): string | undefined {
   }
 
   return continuingValue ? "<malformed>" : undefined;
+}
+
+/**
+ * One trusted Git config entry a caller may add to a single `git` command: the
+ * HTTP authorization header for the exact https remote that command talks to.
+ * Nothing else is accepted, because an open `GIT_CONFIG_*` passthrough would
+ * let a caller set `url.*.insteadOf`, `http.proxy`, `http.sslVerify` or
+ * `credential.helper` and route around every other hardening rule here.
+ */
+export interface TrustedGitConfig {
+  /** Exact https URL of the remote in use: no credentials, query or fragment. */
+  readonly remoteUrl: string;
+  /** `http.<remoteUrl>.extraheader`, nothing else. */
+  readonly key: string;
+  /** `AUTHORIZATION: basic <base64 of x-access-token:<token>>`, built by the caller. */
+  readonly value: Redacted.Redacted<string>;
+}
+
+export type TrustedGitConfigRejection =
+  | "remote-url-not-https"
+  | "remote-url-not-exact"
+  | "key-not-remote-extraheader"
+  | "value-not-access-token-header";
+
+const ACCESS_TOKEN_HEADER = /^AUTHORIZATION: basic ([A-Za-z0-9+/]+={0,2})$/u;
+
+function exactHttpsRemoteUrl(remoteUrl: string): TrustedGitConfigRejection | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(remoteUrl);
+  } catch {
+    return "remote-url-not-https";
+  }
+  if (parsed.protocol !== "https:") return "remote-url-not-https";
+  if (
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    parsed.href !== remoteUrl
+  ) {
+    return "remote-url-not-exact";
+  }
+  return undefined;
+}
+
+function isAccessTokenHeader(value: string): boolean {
+  const match = ACCESS_TOKEN_HEADER.exec(value);
+  if (match?.[1] === undefined) return false;
+  const decoded = NodeBuffer.Buffer.from(match[1], "base64").toString("utf8");
+  // Round-trip so lenient base64 decoding cannot smuggle extra bytes.
+  if (NodeBuffer.Buffer.from(decoded, "utf8").toString("base64") !== match[1]) return false;
+  const prefix = "x-access-token:";
+  const token = decoded.startsWith(prefix) ? decoded.slice(prefix.length) : "";
+  return token.length > 0 && !/[\u0000- \u007f]/u.test(token);
+}
+
+/**
+ * Validates a trusted config entry. VcsProcess serialises it as a
+ * `GIT_CONFIG_*` entry; command-scope `-c` hardening still wins over it.
+ */
+export function validateTrustedGitConfig(
+  config: TrustedGitConfig,
+):
+  | { readonly entry: readonly [key: string, value: string] }
+  | { readonly rejected: TrustedGitConfigRejection } {
+  const remoteIssue = exactHttpsRemoteUrl(config.remoteUrl);
+  if (remoteIssue !== undefined) return { rejected: remoteIssue };
+  if (config.key !== `http.${config.remoteUrl}.extraheader`) {
+    return { rejected: "key-not-remote-extraheader" };
+  }
+  const value = Redacted.value(config.value);
+  if (!isAccessTokenHeader(value)) return { rejected: "value-not-access-token-header" };
+  return { entry: [config.key, value] };
 }

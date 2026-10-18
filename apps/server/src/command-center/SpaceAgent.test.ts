@@ -2,9 +2,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Space, type Space as SpaceType } from "@command-center/core";
 import { describe, expect, it } from "@effect/vitest";
 import {
-  type ClientOrchestrationCommand,
-  type OrchestrationShellSnapshot,
-  type OrchestrationThreadShell,
+  type OrchestrationV2ThreadShell,
+  RunId as OrchestrationRunId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -15,11 +14,10 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
-import * as OrchestrationCommandDispatcher from "../orchestration/CommandDispatcher.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import * as ConnectionHealth from "./ConnectionHealth.ts";
+import * as OrchestrationBridge from "./OrchestrationBridge.ts";
 import { GoogleActivityBrief, type GoogleActivityBriefShape } from "./GoogleActivity.ts";
 import { layer as commandCenterServiceLayer } from "./Service.ts";
 import * as SpaceAgent from "./SpaceAgent.ts";
@@ -67,6 +65,23 @@ const configWith = (spaces: ReadonlyArray<SpaceType>): LoadedCommandCenterConfig
 
 const agentThreadId = ThreadId.make("cc-space-agent-agent-space");
 
+/** The fields these tests read from a V1-shaped `thread.turn.start` the Space agent dispatches. */
+interface LegacyTurnStartView {
+  readonly type: "thread.turn.start";
+  readonly threadId: string;
+  readonly runtimeMode?: string;
+  readonly modelSelection?: unknown;
+  readonly message: { readonly text: string };
+  readonly bootstrap?: { readonly createThread?: Record<string, unknown> };
+}
+
+const asTurnStart = (
+  command: OrchestrationBridge.CommandCenterOrchestrationCommand | undefined,
+): LegacyTurnStartView => {
+  if (command?.type !== "thread.turn.start") throw new Error("Expected a turn start.");
+  return command as unknown as LegacyTurnStartView;
+};
+
 const makeHarness = (
   config: LoadedCommandCenterConfig = configWith([
     makeSpace("agent-space", { enabled: true }),
@@ -76,8 +91,8 @@ const makeHarness = (
   /** Replaces the fixed `mailCalendar` read (still recorded in `briefSections`). */
   section?: GoogleActivityBriefShape["section"],
 ) => {
-  const dispatched: Array<ClientOrchestrationCommand> = [];
-  const threads = new Map<string, OrchestrationThreadShell>();
+  const dispatched: Array<OrchestrationBridge.CommandCenterOrchestrationCommand> = [];
+  const threads = new Map<string, OrchestrationV2ThreadShell>();
   const briefSections: Array<string> = [];
   const layer = SpaceAgentWaker.layer.pipe(
     Layer.provideMerge(SpaceAgent.layer),
@@ -104,18 +119,13 @@ const makeHarness = (
       ),
     ),
     Layer.provide(
-      Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
+      Layer.mock(OrchestrationBridge.OrchestrationBridge)({
         getThreadShellById: (threadId) =>
           Effect.succeed(Option.fromNullishOr(threads.get(threadId))),
-        getShellSnapshot: () =>
-          Effect.succeed({ projects: [], threads: [] } as unknown as OrchestrationShellSnapshot),
+        getShellSnapshot: () => Effect.succeed({ snapshotSequence: 0, projects: [], threads: [] }),
         getProjectShellById: () => Effect.succeed(Option.none()),
         getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
-      }),
-    ),
-    Layer.provide(
-      Layer.mock(OrchestrationCommandDispatcher.OrchestrationCommandDispatcher)({
-        dispatch: (command) =>
+        dispatchCommand: (command) =>
           Effect.sync(() => {
             dispatched.push(command);
             return { sequence: dispatched.length };
@@ -127,14 +137,14 @@ const makeHarness = (
     Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "space-agent-test-" })),
     Layer.provideMerge(NodeServices.layer),
   );
-  const seedThread = (overrides: Partial<OrchestrationThreadShell> = {}) => {
+  const seedThread = (overrides: Partial<OrchestrationV2ThreadShell> = {}) => {
     threads.set(agentThreadId, {
       id: agentThreadId,
       runtimeMode: "approval-required",
       interactionMode: "default",
-      session: null,
+      activeRunId: null,
       ...overrides,
-    } as OrchestrationThreadShell);
+    } as OrchestrationV2ThreadShell);
   };
   return { layer, dispatched, seedThread, briefSections };
 };
@@ -156,8 +166,7 @@ describe("Space agent", () => {
           "project.create",
           "thread.turn.start",
         ]);
-        const turn = harness.dispatched[1];
-        if (turn?.type !== "thread.turn.start") throw new Error("Expected a turn start.");
+        const turn = asTurnStart(harness.dispatched[1]);
         expect(turn.threadId).toBe(agentThreadId);
         expect(turn.bootstrap?.createThread).toMatchObject({
           projectId: "command-center:system",
@@ -251,9 +260,8 @@ describe("Space agent", () => {
 
   it.effect("skips the Google read for a busy agent and an existing thread", () => {
     const harness = makeHarness();
-    harness.seedThread({
-      session: { activeTurnId: "turn-1" } as OrchestrationThreadShell["session"],
-    });
+    // A V2 shell reports work in flight as its active run.
+    harness.seedThread({ activeRunId: OrchestrationRunId.make("run-1") });
     return Effect.gen(function* () {
       const spaceAgent = yield* SpaceAgent.SpaceAgent;
       const busy = yield* spaceAgent
@@ -279,8 +287,7 @@ describe("Space agent", () => {
       expect(ensured).toEqual({ threadId: agentThreadId, created: false });
       expect(result).toMatchObject({ created: false });
       expect(harness.dispatched).toHaveLength(1);
-      const turn = harness.dispatched[0];
-      if (turn?.type !== "thread.turn.start") throw new Error("Expected a turn start.");
+      const turn = asTurnStart(harness.dispatched[0]);
       expect(turn.bootstrap).toBeUndefined();
       expect(turn.modelSelection).toBeUndefined();
       expect(turn.runtimeMode).toBe("approval-required");
@@ -304,7 +311,7 @@ describe("Space agent", () => {
         .sendTurn("agent-space", { text: "x".repeat(8_001), reason: "manual" })
         .pipe(Effect.flip);
       harness.seedThread({
-        session: { activeTurnId: "turn-1" } as OrchestrationThreadShell["session"],
+        activeRunId: OrchestrationRunId.make("run-1"),
       });
       const busy = yield* spaceAgent
         .sendTurn("agent-space", { text: "Hello.", reason: "manual" })

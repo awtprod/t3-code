@@ -1,105 +1,36 @@
-import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { createFileRoute } from "@tanstack/react-router";
-import { PlusIcon, RotateCcwIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { parseNewThreadLink } from "@t3tools/shared/promptLinks";
+import { createFileRoute, useLocation } from "@tanstack/react-router";
+import { useMemo } from "react";
 
-import { openCommandPalette } from "../commandPaletteBus";
-import { sortScopedProjectsForSidebar } from "../components/Sidebar.logic";
-import { Button } from "../components/ui/button";
+import { NewThreadDraftLanding } from "../components/NewThreadDraftLanding";
+import { NewThreadLinkView } from "../components/promptLinks/NewThreadLinkView";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { SidebarInset } from "../components/ui/sidebar";
-import { useNewThreadHandler } from "../hooks/useHandleNewThread";
-import {
-  useAllEnvironmentShellsBootstrapped,
-  useProjects,
-  useThreadShells,
-} from "../state/entities";
 
-function NewThreadRouteView() {
-  const projects = useProjects();
-  const threads = useThreadShells();
-  const bootstrapped = useAllEnvironmentShellsBootstrapped();
-  const handleNewThread = useNewThreadHandler();
-  const startingRef = useRef(false);
-  const [startState, setStartState] = useState({ failed: false, retryRequest: 0 });
-
-  const mostRecentProject = useMemo(
-    () =>
-      bootstrapped
-        ? (sortScopedProjectsForSidebar(projects, threads, "updated_at")[0] ?? null)
-        : null,
-    [bootstrapped, projects, threads],
-  );
-
-  useEffect(() => {
-    if (mostRecentProject === null || startingRef.current) return;
-    startingRef.current = true;
-    void handleNewThread(scopeProjectRef(mostRecentProject.environmentId, mostRecentProject.id), {
-      replace: true,
-    }).catch(() => {
-      startingRef.current = false;
-      setStartState((state) => ({ ...state, failed: true }));
-    });
-  }, [handleNewThread, mostRecentProject, startState.retryRequest]);
-
-  if (!bootstrapped) return null;
-  if (mostRecentProject !== null) {
-    return startState.failed ? (
-      <DraftStartError
-        onRetry={() => {
-          setStartState((state) => ({ failed: false, retryRequest: state.retryRequest + 1 }));
-        }}
-      />
-    ) : null;
+// The query is read raw: the router's own search parsing turns `prompt=123` into a number.
+function NewThreadLinkRoute() {
+  const search = useLocation({ select: (location) => location.searchStr });
+  const parsed = useMemo(() => parseNewThreadLink(search), [search]);
+  // A bare `/new` (the Command Center sidebar's "New thread" entry) starts a
+  // draft in the most recently active project; links carry a query.
+  if (search === "" || search === "?") {
+    return <NewThreadDraftLanding pathname="/new" />;
   }
-  return <NoProjectsHero />;
-}
-
-function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
-  return (
-    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none">
-      <Empty className="flex-1">
-        <EmptyHeader className="max-w-md">
-          <EmptyTitle>Couldn’t start a new thread</EmptyTitle>
-          <EmptyDescription className="mt-2">
-            The project is still available. Try opening the draft again.
-          </EmptyDescription>
-          <div className="mt-5 flex justify-center">
-            <Button size="sm" onClick={onRetry}>
-              <RotateCcwIcon className="size-4" />
-              Try again
-            </Button>
-          </div>
-        </EmptyHeader>
-      </Empty>
-    </SidebarInset>
-  );
-}
-
-function NoProjectsHero() {
-  const openAddProject = () => openCommandPalette({ open: "add-project" });
-  return (
-    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none">
-      <Empty className="flex-1">
-        <EmptyHeader className="max-w-md">
-          <EmptyTitle>
-            <span className="text-2xl sm:text-3xl">What should we work on?</span>
-          </EmptyTitle>
-          <EmptyDescription className="mt-2">
-            Add a project to start your first thread.
-          </EmptyDescription>
-          <div className="mt-6 flex justify-center">
-            <Button size="sm" onClick={openAddProject}>
-              <PlusIcon className="size-4" />
-              Add project
-            </Button>
-          </div>
-        </EmptyHeader>
-      </Empty>
-    </SidebarInset>
-  );
+  if (!parsed.ok) {
+    return (
+      <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
+        <Empty className="flex-1">
+          <EmptyHeader className="max-w-md">
+            <EmptyTitle>Could not open the link</EmptyTitle>
+            <EmptyDescription>{parsed.error}</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      </SidebarInset>
+    );
+  }
+  return <NewThreadLinkView key={search} link={parsed.value} />;
 }
 
 export const Route = createFileRoute("/_chat/new")({
-  component: NewThreadRouteView,
+  component: NewThreadLinkRoute,
 });

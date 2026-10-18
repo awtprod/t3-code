@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Command Center module that predates the Effect platform port.
 import {
   Automation,
   type Automation as AutomationType,
@@ -13,8 +14,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import type { SqlError } from "effect/unstable/sql/SqlError";
+import * as SqlClient from "effect/sql/SqlClient";
+import type { SqlError } from "effect/sql/SqlError";
 
 import { canonicalJson } from "./Digest.ts";
 import {
@@ -2143,6 +2144,6 @@ export const makeDefaultDependencies = (executeNode: AutomationNodeExecutor) =>
     return {
       executeNode,
       now,
-      randomUUID: crypto.randomUUIDv4.pipe(Effect.orDie),
+      randomUUID: crypto.randomUUIDv4().pipe(Effect.orDie),
     };
   });

@@ -23,16 +23,17 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { Artifact, RouteDecision } from "@command-center/core";
 
 import { commandCenterAuditHashDocument, type CommandCenterAuditHashVersion } from "./AuditLog.ts";
+import { ASSISTANT_TEXT_READ_CHARS } from "./V2Transcript.ts";
 
 const DEFAULT_REPLAY_LIMIT = 200;
 const MAX_REPLAY_LIMIT = 500;
@@ -448,7 +449,7 @@ const make = Effect.gen(function* () {
         eventStreamError("decode", "Could not decode the audit payload.", row.sequence, cause),
       ),
     );
-    const calculatedHash = Encoding.encodeHex(
+    const calculatedHash = Hex.encode(
       yield* crypto
         .digest(
           "SHA-256",
@@ -557,6 +558,8 @@ const make = Effect.gen(function* () {
     limit: number,
   ): Effect.Effect<ReadonlyArray<TimelineRow>, CommandCenterEventStreamError> => {
     const query =
+      // The excerpt is the Run thread's newest finished assistant message from the
+      // V2 message projection (see V2Transcript.latestAssistantText).
       input.afterSequence === undefined
         ? sql<TimelineRow>`
             SELECT e.sequence, r.id AS "runId", r.command_id AS "commandId",
@@ -564,20 +567,20 @@ const make = Effect.gen(function* () {
               r.thread_id AS "threadId", r.state AS status, r.route_json AS "routeJson",
               r.input_json AS "inputJson", r.error,
               (
-                SELECT message.text
-                FROM projection_thread_messages message
+                SELECT substr(json_extract(message.payload_json, '$.text'), 1, ${ASSISTANT_TEXT_READ_CHARS})
+                FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = r.thread_id
                   AND message.role = 'assistant'
-                  AND message.is_streaming = 0
+                  AND message.streaming = 0
                 ORDER BY message.created_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS "responseText",
               (
                 SELECT message.created_at
-                FROM projection_thread_messages message
+                FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = r.thread_id
                   AND message.role = 'assistant'
-                  AND message.is_streaming = 0
+                  AND message.streaming = 0
                 ORDER BY message.created_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS "responseCreatedAt",
@@ -598,20 +601,20 @@ const make = Effect.gen(function* () {
               r.thread_id AS "threadId", r.state AS status, r.route_json AS "routeJson",
               r.input_json AS "inputJson", r.error,
               (
-                SELECT message.text
-                FROM projection_thread_messages message
+                SELECT substr(json_extract(message.payload_json, '$.text'), 1, ${ASSISTANT_TEXT_READ_CHARS})
+                FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = r.thread_id
                   AND message.role = 'assistant'
-                  AND message.is_streaming = 0
+                  AND message.streaming = 0
                 ORDER BY message.created_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS "responseText",
               (
                 SELECT message.created_at
-                FROM projection_thread_messages message
+                FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = r.thread_id
                   AND message.role = 'assistant'
-                  AND message.is_streaming = 0
+                  AND message.streaming = 0
                 ORDER BY message.created_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS "responseCreatedAt",

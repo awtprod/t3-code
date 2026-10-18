@@ -12,7 +12,6 @@ import {
   SpacePolicy as SpacePolicySchema,
 } from "@command-center/core";
 import {
-  type ClientOrchestrationCommand,
   CommandCenterCommandSubmitInput,
   type CommandCenterCommandSubmitInput as CommandCenterCommandInput,
   CommandId,
@@ -27,19 +26,19 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as OrchestrationBridge from "./OrchestrationBridge.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
 import { makeCommandApprovalPayload } from "./CommandApproval.ts";
@@ -50,6 +49,7 @@ import {
 import { makeRunLifecyclePersistence } from "./RunLifecycle.ts";
 import { spaceAgentRunAuthorizedEventId } from "./SpaceAgentIds.ts";
 import { loadSpaceBriefInput, renderSpaceBrief } from "./SpaceBrief.ts";
+import { latestAssistantText } from "./V2Transcript.ts";
 import {
   COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX,
   COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX,
@@ -91,6 +91,7 @@ export class RunDispatcherError extends Schema.TaggedError<RunDispatcherError>()
       "project-unavailable",
       "scope-denied",
       "dispatch-failed",
+      "isolation-unavailable",
       "persistence-failed",
     ]),
     runId: Schema.String,
@@ -100,6 +101,9 @@ export class RunDispatcherError extends Schema.TaggedError<RunDispatcherError>()
 ) {}
 
 const isRunDispatcherError = Schema.is(RunDispatcherError);
+const isCommandCenterIsolationUnavailable = Schema.is(
+  OrchestrationBridge.CommandCenterIsolationUnavailable,
+);
 
 export interface RunDispatchResult {
   readonly runId: RunId;
@@ -119,7 +123,7 @@ export interface RunRecoveryAuthorization {
 }
 
 export type DispatchClientCommand<E, R> = (
-  command: ClientOrchestrationCommand,
+  command: OrchestrationBridge.CommandCenterOrchestrationCommand,
 ) => Effect.Effect<{ readonly sequence: number }, E, R>;
 
 export interface RunDispatcherShape {
@@ -260,6 +264,16 @@ export interface DispatcherDependencies {
     scope: McpSessionRegistry.McpThreadScope,
   ) => Effect.Effect<boolean>;
   readonly unregisterScope: (threadId: ThreadId) => Effect.Effect<void>;
+  /**
+   * The Command Center admission gate for the Run's thread. Checked before the
+   * Run is claimed or any project is resolved, so a refused Run fails from
+   * `queued` with the gate's reason and leaves no clone, project or thread.
+   */
+  readonly admitThread: (input: {
+    readonly threadId: ThreadId;
+    readonly modelSelection: { readonly instanceId: ProviderInstanceId };
+    readonly runtimeMode: "approval-required" | "auto-accept-edits";
+  }) => Effect.Effect<void, OrchestrationBridge.CommandCenterIsolationUnavailable>;
 }
 
 const dispatcherError = (
@@ -664,7 +678,7 @@ export const resolveCommandCenterSystemProject = <E, R>(input: {
   readonly baseDir: string;
   readonly fileSystem: FileSystem.FileSystem;
   readonly path: Path.Path;
-  readonly projection: ProjectionSnapshotQuery.ProjectionSnapshotQueryShape;
+  readonly projection: OrchestrationBridge.OrchestrationBridgeShape;
   readonly modelSelection: {
     readonly instanceId: ProviderInstanceId;
     readonly model: string;
@@ -1044,6 +1058,21 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
           const spaceBrief =
             deps.loadSpaceBrief === undefined ? "" : yield* deps.loadSpaceBrief(run, space);
           const userRouter = run.parentRunId === null && run.startedBySpaceAgent !== true;
+          const threadPrefix = userRouter
+            ? COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX
+            : COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX;
+          const threadId = ThreadId.make(`${threadPrefix}${yield* deps.randomUUID}`);
+          const runtimeMode =
+            route.repositoryId === null
+              ? ("approval-required" as const)
+              : ("auto-accept-edits" as const);
+          yield* deps
+            .admitThread({ threadId, modelSelection, runtimeMode })
+            .pipe(
+              Effect.mapError((refusal) =>
+                dispatcherError("isolation-unavailable", run.id, refusal.reason, refusal),
+              ),
+            );
           const now = yield* deps.now;
           const project = yield* deps.resolveTargetProject({
             run,
@@ -1069,10 +1098,6 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
                     cause,
                   ),
           });
-          const threadPrefix = userRouter
-            ? COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX
-            : COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX;
-          const threadId = ThreadId.make(`${threadPrefix}${yield* deps.randomUUID}`);
           const claimed = yield* deps.claim({ runId: run.id, projectId: project.id, threadId });
           if (!claimed) {
             const current = yield* deps.loadRun(run.id);
@@ -1113,11 +1138,7 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
             );
           }
 
-          const runtimeMode =
-            route.repositoryId === null
-              ? ("approval-required" as const)
-              : ("auto-accept-edits" as const);
-          const command: ClientOrchestrationCommand = {
+          const command: OrchestrationBridge.CommandCenterTurnStartCommand = {
             type: "thread.turn.start",
             commandId: CommandId.make(`cc:run:${run.id}:turn`),
             threadId,
@@ -1170,12 +1191,14 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
               .dispatchCommand(command)
               .pipe(
                 Effect.mapError((cause) =>
-                  dispatcherError(
-                    "dispatch-failed",
-                    run.id,
-                    "The linked T3 thread could not be started.",
-                    cause,
-                  ),
+                  isCommandCenterIsolationUnavailable(cause)
+                    ? dispatcherError("isolation-unavailable", run.id, cause.reason, cause)
+                    : dispatcherError(
+                        "dispatch-failed",
+                        run.id,
+                        "The linked thread could not be started.",
+                        cause,
+                      ),
                 ),
               );
             yield* deps.recordDispatch({
@@ -1238,7 +1261,7 @@ const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const projection = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const projection = yield* OrchestrationBridge.OrchestrationBridge;
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const sourceControlRepositories =
@@ -1429,15 +1452,8 @@ const make = Effect.gen(function* () {
           ),
         );
         if (candidate.threadId === null) return { commandText: command.text };
-        const messages = yield* sql<{ readonly text: string }>`
-          SELECT text
-          FROM projection_thread_messages
-          WHERE thread_id = ${candidate.threadId}
-            AND role = 'assistant'
-            AND is_streaming = 0
-          ORDER BY created_at DESC, message_id DESC
-          LIMIT 1
-        `.pipe(
+        const responseText = (yield* latestAssistantText({ threadId: candidate.threadId }).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
           Effect.mapError((cause) =>
             dispatcherError(
               "persistence-failed",
@@ -1446,8 +1462,7 @@ const make = Effect.gen(function* () {
               cause,
             ),
           ),
-        );
-        const responseText = messages[0]?.text.trim();
+        ))?.trim();
         return {
           commandText: command.text,
           ...(responseText ? { responseText } : {}),
@@ -1513,7 +1528,7 @@ const make = Effect.gen(function* () {
     if (row === undefined) return undefined;
     const hash = (value: string) =>
       crypto.digest("SHA-256", new TextEncoder().encode(value)).pipe(
-        Effect.map(Encoding.encodeHex),
+        Effect.map(Hex.encode),
         Effect.mapError((cause) =>
           dispatcherError(
             "persistence-failed",
@@ -1710,7 +1725,7 @@ const make = Effect.gen(function* () {
             repositoryId: input.route.repositoryId,
           };
         }
-        const provisioningDigest = Encoding.encodeHex(
+        const provisioningDigest = Hex.encode(
           yield* crypto
             .digest(
               "SHA-256",
@@ -2124,10 +2139,11 @@ const make = Effect.gen(function* () {
     queueApproved,
     markFailed,
     recordDispatch,
-    randomUUID: crypto.randomUUIDv4.pipe(Effect.orDie),
+    randomUUID: crypto.randomUUIDv4().pipe(Effect.orDie),
     now: Effect.map(DateTime.now, DateTime.formatIso),
     registerScope: McpSessionRegistry.registerActiveMcpThreadScope,
     unregisterScope: McpSessionRegistry.revokeActiveMcpThread,
+    admitThread: projection.admitThread,
   });
 });
 

@@ -22,7 +22,7 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { migrationManifest, runMigrations } from "../../../persistence/Migrations.ts";
 import migration, {
@@ -166,19 +166,35 @@ afterEach(() => {
   else process.env.INSTAGRAM_PUBLISHING_ENABLED = previousFlag;
 });
 
-const test = <E>(
-  name: string,
+const runWithFixture = <E>(
   body: (f: Effect.Success<typeof fixture>) => Effect.Effect<void, E, SqlClient.SqlClient>,
 ) =>
-  it.effect(name, () =>
-    withDb(
-      Effect.gen(function* () {
-        yield* TestClock.setTime(T0);
-        const f = yield* fixture;
-        yield* body(f);
-      }),
-    ),
+  withDb(
+    Effect.gen(function* () {
+      yield* TestClock.setTime(T0);
+      const f = yield* fixture;
+      yield* body(f);
+    }),
   );
+
+const test = Object.assign(
+  <E>(
+    name: string,
+    body: (f: Effect.Success<typeof fixture>) => Effect.Effect<void, E, SqlClient.SqlClient>,
+  ) => it.effect(name, () => runWithFixture(body)),
+  {
+    each:
+      <C>(cases: ReadonlyArray<C>) =>
+      <E>(
+        name: string,
+        body: (
+          f: Effect.Success<typeof fixture>,
+          testCase: C,
+        ) => Effect.Effect<void, E, SqlClient.SqlClient>,
+      ) =>
+        it.effect.each(cases)(name, (testCase) => runWithFixture((f) => body(f, testCase))),
+  },
+);
 
 describe("durable Instagram production executor", () => {
   test("concurrent requests, approvals and independent workers produce exactly one create/publish", (f) =>
@@ -210,17 +226,17 @@ describe("durable Instagram production executor", () => {
       expect(r.publishIntentAt).toBeGreaterThanOrEqual(DUE);
       expect(r.permalink).toBe("https://www.instagram.com/reel/test/");
     }));
-  for (const flag of [undefined, "false", "TRUE", " true", "1"])
-    test(`flag ${String(flag)} prevents every POST`, (f) =>
-      Effect.gen(function* () {
-        yield* f.admit;
-        if (flag === undefined) delete process.env.INSTAGRAM_PUBLISHING_ENABLED;
-        else process.env.INSTAGRAM_PUBLISHING_ENABLED = flag;
-        yield* TestClock.setTime(DUE);
-        yield* f.service.tick;
-        expect(f.calls.create + f.calls.publish).toBe(0);
-      }));
-  for (const changed of [
+  test.each([undefined, "false", "TRUE", " true", "1"])("flag %s prevents every POST", (f, flag) =>
+    Effect.gen(function* () {
+      yield* f.admit;
+      if (flag === undefined) delete process.env.INSTAGRAM_PUBLISHING_ENABLED;
+      else process.env.INSTAGRAM_PUBLISHING_ENABLED = flag;
+      yield* TestClock.setTime(DUE);
+      yield* f.service.tick;
+      expect(f.calls.create + f.calls.publish).toBe(0);
+    }),
+  );
+  test.each([
     "account",
     "revision",
     "asset",
@@ -229,23 +245,23 @@ describe("durable Instagram production executor", () => {
     "scope-removed",
     "late",
     "canceled",
-  ])
-    test(`${changed} invalidates effect`, (f) =>
-      Effect.gen(function* () {
-        const r = yield* f.admit;
-        if (changed === "account") f.control.accountId = "17841499999999999";
-        if (changed === "revision") f.control.revision++;
-        if (changed === "asset") f.control.assetChanged = true;
-        if (changed === "approval-expired") yield* f.patch(r.id, { approvalExpiresAt: DUE });
-        if (changed === "session-revoked")
-          yield* f.sql`UPDATE auth_sessions SET revoked_at = '2026-10-02T21:59:30.000Z'`;
-        if (changed === "scope-removed") yield* f.sql`UPDATE auth_sessions SET scopes = '[]'`;
-        if (changed === "canceled") yield* f.service.cancel(r.id, session);
-        yield* TestClock.setTime(changed === "late" ? DUE + binding.lateWindowMs : DUE);
-        yield* f.service.tick;
-        expect(f.calls.create + f.calls.publish).toBe(0);
-      }));
-  for (const field of [
+  ])("%s invalidates effect", (f, changed) =>
+    Effect.gen(function* () {
+      const r = yield* f.admit;
+      if (changed === "account") f.control.accountId = "17841499999999999";
+      if (changed === "revision") f.control.revision++;
+      if (changed === "asset") f.control.assetChanged = true;
+      if (changed === "approval-expired") yield* f.patch(r.id, { approvalExpiresAt: DUE });
+      if (changed === "session-revoked")
+        yield* f.sql`UPDATE auth_sessions SET revoked_at = '2026-10-02T21:59:30.000Z'`;
+      if (changed === "scope-removed") yield* f.sql`UPDATE auth_sessions SET scopes = '[]'`;
+      if (changed === "canceled") yield* f.service.cancel(r.id, session);
+      yield* TestClock.setTime(changed === "late" ? DUE + binding.lateWindowMs : DUE);
+      yield* f.service.tick;
+      expect(f.calls.create + f.calls.publish).toBe(0);
+    }),
+  );
+  test.each([
     "accountId",
     "sha256",
     "sizeBytes",
@@ -253,22 +269,22 @@ describe("durable Instagram production executor", () => {
     "caption",
     "dueUtc",
     "lateWindowMs",
-  ] as const)
-    test(`changed persisted ${field} cannot execute`, (f) =>
-      Effect.gen(function* () {
-        const r = yield* f.admit;
-        const changed = {
-          ...r.binding,
-          [field]:
-            typeof r.binding[field] === "number"
-              ? Number(r.binding[field]) + 1
-              : String(r.binding[field]) + "x",
-        };
-        yield* f.patch(r.id, { binding: changed });
-        yield* TestClock.setTime(DUE);
-        yield* Effect.result(f.service.tick);
-        expect(f.calls.create + f.calls.publish).toBe(0);
-      }));
+  ] as const)("changed persisted %s cannot execute", (f, field) =>
+    Effect.gen(function* () {
+      const r = yield* f.admit;
+      const changed = {
+        ...r.binding,
+        [field]:
+          typeof r.binding[field] === "number"
+            ? Number(r.binding[field]) + 1
+            : String(r.binding[field]) + "x",
+      };
+      yield* f.patch(r.id, { binding: changed });
+      yield* TestClock.setTime(DUE);
+      yield* Effect.result(f.service.tick);
+      expect(f.calls.create + f.calls.publish).toBe(0);
+    }),
+  );
   test("unauthorized and malformed callers cannot request or forge approval", (f) =>
     Effect.gen(function* () {
       const result = yield* Effect.result(f.service.request(binding, { ...session, scopes: [] }));
@@ -340,8 +356,9 @@ describe("durable Instagram production executor", () => {
       expect(f.calls.create).toBe(1);
       expect(f.calls.publish).toBe(1);
     }));
-  for (const tombstone of ["canceled", "uncertain"] as const)
-    test(`changed-caption ${tombstone} tombstone refuses admission and reapproval across restart`, (f) =>
+  test.each(["canceled", "uncertain"] as const)(
+    "changed-caption %s tombstone refuses admission and reapproval across restart",
+    (f, tombstone) =>
       Effect.gen(function* () {
         const r = yield* f.admit;
         if (tombstone === "uncertain")
@@ -371,7 +388,8 @@ describe("durable Instagram production executor", () => {
         yield* restarted.tick;
         expect(f.calls.create + f.calls.publish).toBe(0);
         expect((yield* f.raw(r.id)).state).toBe(tombstone);
-      }));
+      }),
+  );
   test("changed connection revision still conflicts at admission after private snapshot validation", (f) =>
     Effect.gen(function* () {
       const r = yield* f.admit;
@@ -387,8 +405,9 @@ describe("durable Instagram production executor", () => {
       yield* f.service.tick;
       expect(f.calls.create + f.calls.publish).toBe(0);
     }));
-  for (const state of ["creating", "publishing"] as const)
-    test(`restart from ${state} intent never retries POST`, (f) =>
+  test.each(["creating", "publishing"] as const)(
+    "restart from %s intent never retries POST",
+    (f, state) =>
       Effect.gen(function* () {
         const r = yield* f.admit;
         yield* f.patch(r.id, {
@@ -403,9 +422,11 @@ describe("durable Instagram production executor", () => {
         yield* restarted.tick;
         expect(f.calls.create + f.calls.publish).toBe(0);
         expect((yield* f.raw(r.id)).state).toBe("uncertain");
-      }));
-  for (const operation of ["create", "publish"] as const)
-    test(`lost ${operation} response stays uncertain across restart`, (f) =>
+      }),
+  );
+  test.each(["create", "publish"] as const)(
+    "lost %s response stays uncertain across restart",
+    (f, operation) =>
       Effect.gen(function* () {
         const r = yield* f.admit;
         f.control.failCreate = operation === "create";
@@ -418,9 +439,11 @@ describe("durable Instagram production executor", () => {
         expect(f.calls.create).toBe(1);
         expect(f.calls.publish).toBe(operation === "publish" ? 1 : 0);
         expect((yield* f.raw(r.id)).state).toBe("uncertain");
-      }));
-  for (const status of ["ERROR", "EXPIRED", "UNKNOWN", "PUBLISHED"])
-    test(`container ${status} cannot authorize a publish`, (f) =>
+      }),
+  );
+  test.each(["ERROR", "EXPIRED", "UNKNOWN", "PUBLISHED"])(
+    "container %s cannot authorize a publish",
+    (f, status) =>
       Effect.gen(function* () {
         const r = yield* f.admit;
         f.control.status = status;
@@ -429,7 +452,8 @@ describe("durable Instagram production executor", () => {
         yield* f.service.tick;
         expect(f.calls.publish).toBe(0);
         expect((yield* f.raw(r.id)).state).not.toBe("published");
-      }));
+      }),
+  );
   test("PUBLISHED uncertain container does bounded read-only reconciliation without guessing media ID", (f) =>
     Effect.gen(function* () {
       const r = yield* f.admit;
@@ -467,63 +491,68 @@ describe("durable Instagram production executor", () => {
       expect(f.calls.permalink).toBe(2);
       expect((yield* f.raw(r.id)).permalink).not.toBeNull();
     }));
-  for (const recoveryState of ["uncertain", "published"] as const)
-    for (const activeState of ["approved", "processing"] as const)
-      test(`due ${activeState} progresses ahead of 25 older ${recoveryState} receipts from a replaced connection`, (f) =>
-        Effect.gen(function* () {
-          const staleIds: string[] = [];
-          for (let i = 0; i < 25; i++) {
-            const oldBinding = {
-              ...binding,
-              dueUtc: DateTime.formatIso(DateTime.makeUnsafe(T0 + (i + 1) * 1000)),
-            };
-            const old = yield* f.service.request(oldBinding, session);
-            yield* f.service.approve(old.id, old.digest, session);
-            yield* f.patch(old.id, {
-              state: recoveryState,
-              createIntentAt: T0,
-              containerId: "900001",
-              publishIntentAt: T0,
-              mediaId: recoveryState === "published" ? "900002" : null,
-              publishedAt: recoveryState === "published" ? T0 : null,
-            });
-            staleIds.push(old.id);
-          }
-          f.control.revision++;
-          const active = yield* f.service.request(
-            { ...binding, accountRevision: f.control.revision },
-            session,
-          );
-          yield* f.service.approve(active.id, active.digest, session);
-          if (activeState === "processing")
-            yield* f.patch(active.id, {
-              state: "processing",
-              createIntentAt: DUE,
-              containerId: "900001",
-            });
-          yield* TestClock.setTime(DUE);
-          yield* f.service.tick;
-          expect((yield* f.raw(active.id)).state).toBe("published");
-          expect(f.calls).toEqual({
-            create: activeState === "approved" ? 1 : 0,
-            publish: 1,
-            status: 1,
-            permalink: 0,
-            recent: 0,
+  test.each(
+    (["uncertain", "published"] as const).flatMap((recoveryState) =>
+      (["approved", "processing"] as const).map((activeState) => ({ recoveryState, activeState })),
+    ),
+  )(
+    "due $activeState progresses ahead of 25 older $recoveryState receipts from a replaced connection",
+    (f, { recoveryState, activeState }) =>
+      Effect.gen(function* () {
+        const staleIds: string[] = [];
+        for (let i = 0; i < 25; i++) {
+          const oldBinding = {
+            ...binding,
+            dueUtc: DateTime.formatIso(DateTime.makeUnsafe(T0 + (i + 1) * 1000)),
+          };
+          const old = yield* f.service.request(oldBinding, session);
+          yield* f.service.approve(old.id, old.digest, session);
+          yield* f.patch(old.id, {
+            state: recoveryState,
+            createIntentAt: T0,
+            containerId: "900001",
+            publishIntentAt: T0,
+            mediaId: recoveryState === "published" ? "900002" : null,
+            publishedAt: recoveryState === "published" ? T0 : null,
           });
-          const stale = yield* Effect.forEach(staleIds, (id) => f.raw(id));
-          for (const receipt of stale) {
-            expect(receipt.state).toBe(recoveryState);
-            expect(receipt.readAttempts).toBe(0);
-            expect(receipt.permalink).toBeNull();
-            expect(receipt.binding.accountRevision).toBe(binding.accountRevision);
-          }
-          // One active action and 24 guarded recovery attempts fill the bounded batch.
-          expect(
-            stale.filter((receipt) => receipt.detail?.includes("Read-only recovery held")),
-          ).toHaveLength(24);
-          expect(stale[24]!.detail).toBeNull();
-        }));
+          staleIds.push(old.id);
+        }
+        f.control.revision++;
+        const active = yield* f.service.request(
+          { ...binding, accountRevision: f.control.revision },
+          session,
+        );
+        yield* f.service.approve(active.id, active.digest, session);
+        if (activeState === "processing")
+          yield* f.patch(active.id, {
+            state: "processing",
+            createIntentAt: DUE,
+            containerId: "900001",
+          });
+        yield* TestClock.setTime(DUE);
+        yield* f.service.tick;
+        expect((yield* f.raw(active.id)).state).toBe("published");
+        expect(f.calls).toEqual({
+          create: activeState === "approved" ? 1 : 0,
+          publish: 1,
+          status: 1,
+          permalink: 0,
+          recent: 0,
+        });
+        const stale = yield* Effect.forEach(staleIds, (id) => f.raw(id));
+        for (const receipt of stale) {
+          expect(receipt.state).toBe(recoveryState);
+          expect(receipt.readAttempts).toBe(0);
+          expect(receipt.permalink).toBeNull();
+          expect(receipt.binding.accountRevision).toBe(binding.accountRevision);
+        }
+        // One active action and 24 guarded recovery attempts fill the bounded batch.
+        expect(
+          stale.filter((receipt) => receipt.detail?.includes("Read-only recovery held")),
+        ).toHaveLength(24);
+        expect(stale[24]!.detail).toBeNull();
+      }),
+  );
   test("new approval rotates past 25 older IN_PROGRESS containers across restart at a frozen clock", (f) =>
     Effect.gen(function* () {
       const olderReceipts: InstagramReelReceipt[] = [];
@@ -582,145 +611,159 @@ describe("durable Instagram production executor", () => {
         expect(yield* f.raw(original.id)).toEqual(original);
       }
     }));
-  for (const heldState of ["uncertain", "published"] as const)
-    for (const recoveryState of ["uncertain", "published"] as const)
-      for (const equalDue of heldState === recoveryState ? [false, true] : [false])
-        test(`current ${recoveryState} recovery rotates past 25 held ${heldState} receipts with ${equalDue ? "equal" : "older"} due times across restart at a frozen clock`, (f) =>
-          Effect.gen(function* () {
-            const heldReceipts: InstagramReelReceipt[] = [];
-            for (let i = 0; i < 25; i++) {
-              const old = yield* f.service.request(
-                {
-                  ...binding,
-                  sha256: i.toString(16).padStart(64, "0"),
-                  dueUtc: equalDue
-                    ? binding.dueUtc
-                    : DateTime.formatIso(DateTime.makeUnsafe(T0 + 1000)),
-                },
-                session,
-              );
-              yield* f.service.approve(old.id, old.digest, session);
-              yield* f.patch(old.id, {
-                state: heldState,
-                createIntentAt: T0,
-                containerId: "900001",
-                publishIntentAt: T0,
-                mediaId: heldState === "published" ? "900002" : null,
-                publishedAt: heldState === "published" ? T0 : null,
-              });
-              heldReceipts.push(yield* f.raw(old.id));
-            }
-            f.control.revision++;
-            const current = yield* f.service.request(
-              { ...binding, accountRevision: f.control.revision },
-              session,
-            );
-            yield* f.service.approve(current.id, current.digest, session);
-            yield* f.patch(current.id, {
-              state: recoveryState,
-              createIntentAt: T0,
-              containerId: "900001",
-              publishIntentAt: T0,
-              mediaId: recoveryState === "published" ? "900002" : null,
-              publishedAt: recoveryState === "published" ? T0 : null,
-            });
-            f.control.status = "PUBLISHED";
-            f.control.recent = {
-              data: [{ id: "900002", caption: binding.caption, timestamp: binding.dueUtc }],
-            };
-            yield* TestClock.setTime(DUE);
-            yield* f.service.tick;
-            const firstClaims = yield* f.sql<{
-              claims: number;
-            }>`SELECT SUM(lease_generation) AS claims FROM command_center_instagram_reels`;
-            expect(firstClaims[0]!.claims).toBe(25);
-            expect(f.calls).toEqual({ create: 0, publish: 0, status: 0, permalink: 0, recent: 0 });
-            expect((yield* f.raw(current.id)).readAttempts).toBe(0);
-            const restarted = yield* make(f.ports);
-            yield* restarted.tick;
-            const secondClaims = yield* f.sql<{
-              claims: number;
-            }>`SELECT SUM(lease_generation) AS claims FROM command_center_instagram_reels`;
-            expect(secondClaims[0]!.claims).toBe(50);
-            expect(yield* Clock.currentTimeMillis).toBe(DUE);
-            expect(f.calls).toEqual({
-              create: 0,
-              publish: 0,
-              status: recoveryState === "uncertain" ? 1 : 0,
-              permalink: recoveryState === "published" ? 1 : 0,
-              recent: recoveryState === "uncertain" ? 1 : 0,
-            });
-            const recovered = yield* f.raw(current.id);
-            expect(recovered.state).toBe(recoveryState);
-            expect(recovered.readAttempts).toBe(1);
-            expect(recovered.mediaId).toBe(recoveryState === "published" ? "900002" : null);
-            expect(recovered.permalink).toBe(
-              recoveryState === "published" ? "https://www.instagram.com/reel/test/" : null,
-            );
-            if (recoveryState === "uncertain")
-              expect(recovered.detail).toContain("Human reconciliation required");
-            for (const original of heldReceipts) {
-              const held = yield* f.raw(original.id);
-              expect(held.detail).toContain("Read-only recovery held");
-              expect(held).toEqual({
-                ...original,
-                updatedAt: DUE,
-                detail: held.detail,
-              });
-              expect(held.readAttempts).toBe(0);
-            }
-          }));
-  for (const state of ["uncertain", "published"] as const) {
-    for (const snapshot of [
-      "wrong-account",
-      "changed-revision",
-      "bad-revision",
-      "disconnected",
-      "expired",
-    ] as const)
-      test(`recovery ${state} holds ${snapshot} snapshot before any API call or read-budget use`, (f) =>
-        Effect.gen(function* () {
-          const r = yield* f.admit;
-          f.control.failPublish = state === "uncertain";
-          yield* TestClock.setTime(DUE);
-          yield* f.service.tick;
-          expect((yield* f.raw(r.id)).state).toBe(state);
-          const before = { ...f.calls };
-          const attempts = (yield* f.raw(r.id)).readAttempts;
-          // All GET effect boundaries would succeed if the account gate were absent.
-          f.control.status = "PUBLISHED";
-          if (snapshot === "wrong-account") f.control.accountId = "17841499999999999";
-          if (snapshot === "changed-revision") f.control.revision++;
-          if (snapshot === "bad-revision") f.control.revision = Number.NaN;
-          if (snapshot === "disconnected" || snapshot === "expired")
-            f.control.accountUnavailable = snapshot;
-          f.control.assetChanged = true;
-          yield* f.sql`UPDATE auth_sessions SET revoked_at = '2026-10-02T22:01:00.000Z'`;
-          yield* TestClock.setTime(DUE + binding.lateWindowMs + 1);
-          const restarted = yield* make(f.ports);
-          for (let i = 0; i < 5; i++) yield* restarted.tick;
-          const held = yield* f.raw(r.id);
-          expect(f.calls).toEqual(before);
-          expect(held.state).toBe(state);
-          expect(held.readAttempts).toBe(attempts);
-          expect(held.mediaId).toBe(state === "published" ? "900002" : null);
-          expect(held.permalink).toBeNull();
+  test.each(
+    (["uncertain", "published"] as const).flatMap((heldState) =>
+      (["uncertain", "published"] as const).flatMap((recoveryState) =>
+        (heldState === recoveryState ? [false, true] : [false]).map((equalDue) => ({
+          heldState,
+          recoveryState,
+          equalDue,
+          dueKind: equalDue ? "equal" : "older",
+        })),
+      ),
+    ),
+  )(
+    "current $recoveryState recovery rotates past 25 held $heldState receipts with $dueKind due times across restart at a frozen clock",
+    (f, { heldState, recoveryState, equalDue }) =>
+      Effect.gen(function* () {
+        const heldReceipts: InstagramReelReceipt[] = [];
+        for (let i = 0; i < 25; i++) {
+          const old = yield* f.service.request(
+            {
+              ...binding,
+              sha256: i.toString(16).padStart(64, "0"),
+              dueUtc: equalDue
+                ? binding.dueUtc
+                : DateTime.formatIso(DateTime.makeUnsafe(T0 + 1000)),
+            },
+            session,
+          );
+          yield* f.service.approve(old.id, old.digest, session);
+          yield* f.patch(old.id, {
+            state: heldState,
+            createIntentAt: T0,
+            containerId: "900001",
+            publishIntentAt: T0,
+            mediaId: heldState === "published" ? "900002" : null,
+            publishedAt: heldState === "published" ? T0 : null,
+          });
+          heldReceipts.push(yield* f.raw(old.id));
+        }
+        f.control.revision++;
+        const current = yield* f.service.request(
+          { ...binding, accountRevision: f.control.revision },
+          session,
+        );
+        yield* f.service.approve(current.id, current.digest, session);
+        yield* f.patch(current.id, {
+          state: recoveryState,
+          createIntentAt: T0,
+          containerId: "900001",
+          publishIntentAt: T0,
+          mediaId: recoveryState === "published" ? "900002" : null,
+          publishedAt: recoveryState === "published" ? T0 : null,
+        });
+        f.control.status = "PUBLISHED";
+        f.control.recent = {
+          data: [{ id: "900002", caption: binding.caption, timestamp: binding.dueUtc }],
+        };
+        yield* TestClock.setTime(DUE);
+        yield* f.service.tick;
+        const firstClaims = yield* f.sql<{
+          claims: number;
+        }>`SELECT SUM(lease_generation) AS claims FROM command_center_instagram_reels`;
+        expect(firstClaims[0]!.claims).toBe(25);
+        expect(f.calls).toEqual({ create: 0, publish: 0, status: 0, permalink: 0, recent: 0 });
+        expect((yield* f.raw(current.id)).readAttempts).toBe(0);
+        const restarted = yield* make(f.ports);
+        yield* restarted.tick;
+        const secondClaims = yield* f.sql<{
+          claims: number;
+        }>`SELECT SUM(lease_generation) AS claims FROM command_center_instagram_reels`;
+        expect(secondClaims[0]!.claims).toBe(50);
+        expect(yield* Clock.currentTimeMillis).toBe(DUE);
+        expect(f.calls).toEqual({
+          create: 0,
+          publish: 0,
+          status: recoveryState === "uncertain" ? 1 : 0,
+          permalink: recoveryState === "published" ? 1 : 0,
+          recent: recoveryState === "uncertain" ? 1 : 0,
+        });
+        const recovered = yield* f.raw(current.id);
+        expect(recovered.state).toBe(recoveryState);
+        expect(recovered.readAttempts).toBe(1);
+        expect(recovered.mediaId).toBe(recoveryState === "published" ? "900002" : null);
+        expect(recovered.permalink).toBe(
+          recoveryState === "published" ? "https://www.instagram.com/reel/test/" : null,
+        );
+        if (recoveryState === "uncertain")
+          expect(recovered.detail).toContain("Human reconciliation required");
+        for (const original of heldReceipts) {
+          const held = yield* f.raw(original.id);
           expect(held.detail).toContain("Read-only recovery held");
-          // A later matching snapshot resumes only GETs without restoring mutation authority.
-          f.control.accountId = binding.accountId;
-          f.control.revision = binding.accountRevision;
-          f.control.accountUnavailable = null;
-          yield* restarted.tick;
-          const recovered = yield* f.raw(r.id);
-          expect(recovered.state).toBe(state);
-          expect(recovered.readAttempts).toBe(attempts + 1);
-          expect(f.calls.create).toBe(before.create);
-          expect(f.calls.publish).toBe(before.publish);
-          expect(f.calls.status).toBe(before.status + (state === "uncertain" ? 1 : 0));
-          expect(f.calls.recent).toBe(before.recent + (state === "uncertain" ? 1 : 0));
-          expect(f.calls.permalink).toBe(before.permalink + (state === "published" ? 1 : 0));
-        }));
-    test(`matching ${state} recovery stays GET-only without asset, approval or mutation window`, (f) =>
+          expect(held).toEqual({
+            ...original,
+            updatedAt: DUE,
+            detail: held.detail,
+          });
+          expect(held.readAttempts).toBe(0);
+        }
+      }),
+  );
+  test.each(
+    (["uncertain", "published"] as const).flatMap((state) =>
+      (
+        ["wrong-account", "changed-revision", "bad-revision", "disconnected", "expired"] as const
+      ).map((snapshot) => ({ state, snapshot })),
+    ),
+  )(
+    "recovery $state holds $snapshot snapshot before any API call or read-budget use",
+    (f, { state, snapshot }) =>
+      Effect.gen(function* () {
+        const r = yield* f.admit;
+        f.control.failPublish = state === "uncertain";
+        yield* TestClock.setTime(DUE);
+        yield* f.service.tick;
+        expect((yield* f.raw(r.id)).state).toBe(state);
+        const before = { ...f.calls };
+        const attempts = (yield* f.raw(r.id)).readAttempts;
+        // All GET effect boundaries would succeed if the account gate were absent.
+        f.control.status = "PUBLISHED";
+        if (snapshot === "wrong-account") f.control.accountId = "17841499999999999";
+        if (snapshot === "changed-revision") f.control.revision++;
+        if (snapshot === "bad-revision") f.control.revision = Number.NaN;
+        if (snapshot === "disconnected" || snapshot === "expired")
+          f.control.accountUnavailable = snapshot;
+        f.control.assetChanged = true;
+        yield* f.sql`UPDATE auth_sessions SET revoked_at = '2026-10-02T22:01:00.000Z'`;
+        yield* TestClock.setTime(DUE + binding.lateWindowMs + 1);
+        const restarted = yield* make(f.ports);
+        for (let i = 0; i < 5; i++) yield* restarted.tick;
+        const held = yield* f.raw(r.id);
+        expect(f.calls).toEqual(before);
+        expect(held.state).toBe(state);
+        expect(held.readAttempts).toBe(attempts);
+        expect(held.mediaId).toBe(state === "published" ? "900002" : null);
+        expect(held.permalink).toBeNull();
+        expect(held.detail).toContain("Read-only recovery held");
+        // A later matching snapshot resumes only GETs without restoring mutation authority.
+        f.control.accountId = binding.accountId;
+        f.control.revision = binding.accountRevision;
+        f.control.accountUnavailable = null;
+        yield* restarted.tick;
+        const recovered = yield* f.raw(r.id);
+        expect(recovered.state).toBe(state);
+        expect(recovered.readAttempts).toBe(attempts + 1);
+        expect(f.calls.create).toBe(before.create);
+        expect(f.calls.publish).toBe(before.publish);
+        expect(f.calls.status).toBe(before.status + (state === "uncertain" ? 1 : 0));
+        expect(f.calls.recent).toBe(before.recent + (state === "uncertain" ? 1 : 0));
+        expect(f.calls.permalink).toBe(before.permalink + (state === "published" ? 1 : 0));
+      }),
+  );
+  test.each(["uncertain", "published"] as const)(
+    "matching %s recovery stays GET-only without asset, approval or mutation window",
+    (f, state) =>
       Effect.gen(function* () {
         const r = yield* f.admit;
         f.control.failPublish = state === "uncertain";
@@ -744,8 +787,8 @@ describe("durable Instagram production executor", () => {
         expect(f.calls.status).toBe(before.status + (state === "uncertain" ? 3 : 0));
         expect(f.calls.recent).toBe(before.recent + (state === "uncertain" ? 3 : 0));
         expect(f.calls.permalink).toBe(before.permalink + (state === "published" ? 3 : 0));
-      }));
-  }
+      }),
+  );
   test("processing survives restart and stops at late cutoff", (f) =>
     Effect.gen(function* () {
       const r = yield* f.admit;
@@ -811,8 +854,9 @@ describe("durable Instagram production executor", () => {
       expect((yield* f.raw(r.id)).state).toBe("uncertain");
     }));
 
-  for (const phase of ["processing", "published"] as const)
-    test(`response before ${phase} save failure never repeats POST`, (f) =>
+  test.each(["processing", "published"] as const)(
+    "response before %s save failure never repeats POST",
+    (f, phase) =>
       Effect.gen(function* () {
         const r = yield* f.admit;
         yield* f.sql.unsafe(
@@ -827,9 +871,11 @@ describe("durable Instagram production executor", () => {
         expect(f.calls.create).toBe(1);
         expect(f.calls.publish).toBe(phase === "published" ? 1 : 0);
         expect((yield* f.raw(r.id)).state).toBe("uncertain");
-      }));
-  for (const stage of ["create", "publish"] as const)
-    test(`malformed ${stage} response ID cannot be retried`, (f) =>
+      }),
+  );
+  test.each(["create", "publish"] as const)(
+    "malformed %s response ID cannot be retried",
+    (f, stage) =>
       Effect.gen(function* () {
         const r = yield* f.admit;
         if (stage === "create") f.control.createResult = { id: "../wrong" };
@@ -840,7 +886,8 @@ describe("durable Instagram production executor", () => {
         expect(f.calls.create).toBe(1);
         expect(f.calls.publish).toBe(stage === "publish" ? 1 : 0);
         expect((yield* f.raw(r.id)).state).toBe("uncertain");
-      }));
+      }),
+  );
   test("request timeout becomes uncertain with no POST retry", (f) =>
     Effect.gen(function* () {
       const r = yield* f.admit;
@@ -1133,100 +1180,94 @@ it("production streaming asset inspector rejects changed bytes, count, duration 
   }
 });
 
-for (const persistedState of ["creating", "publishing", "processing", "published"] as const) {
-  it.effect(
-    `closed SQLite connection reopens ${persistedState} receipt without duplicate effects`,
-    () =>
-      Effect.gen(function* () {
-        yield* TestClock.setTime(T0);
-        const root = yield* Effect.acquireRelease(
-          Effect.promise(() =>
-            NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "instagram-reopen-test-")),
-          ),
-          (path) => Effect.promise(() => NodeFSP.rm(path, { recursive: true, force: true })),
+it.effect.each(["creating", "publishing", "processing", "published"] as const)(
+  "closed SQLite connection reopens %s receipt without duplicate effects",
+  (persistedState) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(T0);
+      const root = yield* Effect.acquireRelease(
+        Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "instagram-reopen-test-")),
+        ),
+        (path) => Effect.promise(() => NodeFSP.rm(path, { recursive: true, force: true })),
+      );
+      const db = () => NodeSqliteClient.layer({ filename: NodePath.join(root, "receipts.sqlite") });
+      const persisted = yield* Effect.gen(function* () {
+        const f = yield* fixture;
+        const r = yield* f.admit;
+        yield* f.patch(r.id, {
+          state: persistedState,
+          createIntentAt: DUE,
+          containerId: persistedState === "creating" ? null : "900001",
+          publishIntentAt:
+            persistedState === "publishing" || persistedState === "published" ? DUE : null,
+          mediaId: persistedState === "published" ? "900002" : null,
+          publishedAt: persistedState === "published" ? DUE : null,
+        });
+        return { id: r.id, ports: f.ports, calls: f.calls };
+      }).pipe(Effect.provide(db()));
+      yield* TestClock.setTime(DUE);
+      yield* Effect.gen(function* () {
+        const restarted = yield* make(persisted.ports);
+        yield* restarted.tick;
+        const receipt = yield* restarted.query(persisted.id, session);
+        expect(persisted.calls.create).toBe(0);
+        expect(persisted.calls.publish).toBe(persistedState === "processing" ? 1 : 0);
+        expect(receipt.state).toBe(
+          persistedState === "creating" || persistedState === "publishing"
+            ? "uncertain"
+            : "published",
         );
-        const db = () =>
-          NodeSqliteClient.layer({ filename: NodePath.join(root, "receipts.sqlite") });
-        const persisted = yield* Effect.gen(function* () {
-          const f = yield* fixture;
-          const r = yield* f.admit;
-          yield* f.patch(r.id, {
-            state: persistedState,
-            createIntentAt: DUE,
-            containerId: persistedState === "creating" ? null : "900001",
-            publishIntentAt:
-              persistedState === "publishing" || persistedState === "published" ? DUE : null,
-            mediaId: persistedState === "published" ? "900002" : null,
-            publishedAt: persistedState === "published" ? DUE : null,
-          });
-          return { id: r.id, ports: f.ports, calls: f.calls };
-        }).pipe(Effect.provide(db()));
-        yield* TestClock.setTime(DUE);
-        yield* Effect.gen(function* () {
-          const restarted = yield* make(persisted.ports);
-          yield* restarted.tick;
-          const receipt = yield* restarted.query(persisted.id, session);
-          expect(persisted.calls.create).toBe(0);
-          expect(persisted.calls.publish).toBe(persistedState === "processing" ? 1 : 0);
-          expect(receipt.state).toBe(
-            persistedState === "creating" || persistedState === "publishing"
-              ? "uncertain"
-              : "published",
-          );
-        }).pipe(Effect.provide(db()));
-      }),
-  );
-}
+      }).pipe(Effect.provide(db()));
+    }),
+);
 
-for (const state of ["approved", "canceled", "uncertain"] as const) {
-  it.effect(
-    `closed SQLite reopens ${state} permanent identity and rejects changed-caption admission`,
-    () =>
-      Effect.gen(function* () {
-        yield* TestClock.setTime(T0);
-        const root = yield* Effect.acquireRelease(
-          Effect.promise(() =>
-            NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "instagram-caption-reopen-")),
-          ),
-          (path) => Effect.promise(() => NodeFSP.rm(path, { recursive: true, force: true })),
-        );
-        const db = () =>
-          NodeSqliteClient.layer({ filename: NodePath.join(root, "receipts.sqlite") });
-        const persisted = yield* Effect.gen(function* () {
-          const f = yield* fixture;
-          const r = yield* f.admit;
-          if (state === "canceled") yield* f.service.cancel(r.id, session);
-          if (state === "uncertain")
-            yield* f.patch(r.id, { state, containerId: "900001", publishIntentAt: DUE });
-          return { receipt: r, ports: f.ports, calls: f.calls };
-        }).pipe(Effect.provide(db()));
-        yield* Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          const restarted = yield* make(persisted.ports);
-          const changed = { ...binding, caption: "Caption after DB reopen" };
-          expect((yield* Effect.result(restarted.request(changed, session)))._tag).toBe("Failure");
+it.effect.each(["approved", "canceled", "uncertain"] as const)(
+  "closed SQLite reopens %s permanent identity and rejects changed-caption admission",
+  (state) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(T0);
+      const root = yield* Effect.acquireRelease(
+        Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "instagram-caption-reopen-")),
+        ),
+        (path) => Effect.promise(() => NodeFSP.rm(path, { recursive: true, force: true })),
+      );
+      const db = () => NodeSqliteClient.layer({ filename: NodePath.join(root, "receipts.sqlite") });
+      const persisted = yield* Effect.gen(function* () {
+        const f = yield* fixture;
+        const r = yield* f.admit;
+        if (state === "canceled") yield* f.service.cancel(r.id, session);
+        if (state === "uncertain")
+          yield* f.patch(r.id, { state, containerId: "900001", publishIntentAt: DUE });
+        return { receipt: r, ports: f.ports, calls: f.calls };
+      }).pipe(Effect.provide(db()));
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const restarted = yield* make(persisted.ports);
+        const changed = { ...binding, caption: "Caption after DB reopen" };
+        expect((yield* Effect.result(restarted.request(changed, session)))._tag).toBe("Failure");
+        expect(
+          (yield* Effect.result(
+            restarted.approve(persisted.receipt.id, bindingDigest(changed), session),
+          ))._tag,
+        ).toBe("Failure");
+        expect(yield* sql`SELECT id FROM command_center_instagram_reels`).toHaveLength(1);
+        const receipt = yield* restarted.query(persisted.receipt.id, session);
+        expect(receipt.state).toBe(state);
+        expect(receipt.binding.caption).toBe(binding.caption);
+        if (state !== "approved")
           expect(
-            (yield* Effect.result(
-              restarted.approve(persisted.receipt.id, bindingDigest(changed), session),
-            ))._tag,
+            (yield* Effect.result(restarted.approve(receipt.id, receipt.digest, session)))._tag,
           ).toBe("Failure");
-          expect(yield* sql`SELECT id FROM command_center_instagram_reels`).toHaveLength(1);
-          const receipt = yield* restarted.query(persisted.receipt.id, session);
-          expect(receipt.state).toBe(state);
-          expect(receipt.binding.caption).toBe(binding.caption);
-          if (state !== "approved")
-            expect(
-              (yield* Effect.result(restarted.approve(receipt.id, receipt.digest, session)))._tag,
-            ).toBe("Failure");
-          yield* TestClock.setTime(DUE);
-          yield* restarted.tick;
-          yield* restarted.tick;
-          expect(persisted.calls.create).toBe(state === "approved" ? 1 : 0);
-          expect(persisted.calls.publish).toBe(state === "approved" ? 1 : 0);
-        }).pipe(Effect.provide(db()));
-      }),
-  );
-}
+        yield* TestClock.setTime(DUE);
+        yield* restarted.tick;
+        yield* restarted.tick;
+        expect(persisted.calls.create).toBe(state === "approved" ? 1 : 0);
+        expect(persisted.calls.publish).toBe(state === "approved" ? 1 : 0);
+      }).pipe(Effect.provide(db()));
+    }),
+);
 
 it.effect("real migration loader upgrades 071 through the reserved stack and 078", () =>
   withDb(

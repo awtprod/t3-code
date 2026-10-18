@@ -1,7 +1,11 @@
 import { Button } from "../ui/button";
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
-import { formatContextWindowCompactionMessage } from "./ContextWindowMeter.logic";
+import {
+  formatContextWindowCompactionMessage,
+  formatContextWindowCost,
+  formatContextWindowTurnCost,
+} from "./ContextWindowMeter.logic";
 import { Minimize2Icon } from "lucide-react";
 import { composerFloatingLayerProps } from "./composerEventScope";
 
@@ -158,42 +162,54 @@ export function ContextWindowMeter(props: {
               </span>
             </div>
           ) : null}
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-2xs leading-4">
-            <span className="text-muted-foreground/60">Uncached input</span>
-            <span className="text-right tabular-nums text-muted-foreground/80">
-              {latestInput === null
-                ? "Unavailable"
-                : formatContextWindowTokens(
-                    Math.max(0, latestInput - (latestCacheRead ?? 0) - (latestCacheWrite ?? 0)),
-                  )}
-            </span>
-            <span className="text-muted-foreground/60">Cache read</span>
-            <span className="text-right tabular-nums text-muted-foreground/80">
-              {latestCacheRead === null
-                ? "Unavailable"
-                : formatContextWindowTokens(latestCacheRead)}
-            </span>
-            <span className="text-muted-foreground/60">Cache write</span>
-            <span className="text-right tabular-nums text-muted-foreground/80">
-              {latestCacheWrite === null
-                ? "Unavailable"
-                : formatContextWindowTokens(latestCacheWrite)}
-            </span>
-            <span className="text-muted-foreground/60">Output</span>
-            <span className="text-right tabular-nums text-muted-foreground/80">
-              {latestOutput === null ? "Unavailable" : formatContextWindowTokens(latestOutput)}
-            </span>
-            <span className="text-muted-foreground/60">Cache utilization</span>
-            <span className="text-right tabular-nums text-muted-foreground/80">
-              {formatPercentage(cacheUtilization) ?? "Unavailable"}
-            </span>
-            <span className="text-muted-foreground/60">Cost</span>
-            <span className="text-right tabular-nums text-muted-foreground/80">
-              {usage.costUsd == null
-                ? "Unavailable"
-                : `$${usage.costUsd.toFixed(4)}${usage.costKind === "reported" ? " reported" : " est."}`}
-            </span>
-          </div>
+          {latestInput !== null || latestOutput !== null ? (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-2xs leading-4">
+              <span className="text-secondary-label">Uncached input</span>
+              <span className="text-right tabular-nums text-secondary-label">
+                {latestInput === null
+                  ? "Unavailable"
+                  : formatContextWindowTokens(
+                      Math.max(0, latestInput - (latestCacheRead ?? 0) - (latestCacheWrite ?? 0)),
+                    )}
+              </span>
+              <span className="text-secondary-label">Cache read</span>
+              <span className="text-right tabular-nums text-secondary-label">
+                {latestCacheRead === null
+                  ? "Unavailable"
+                  : formatContextWindowTokens(latestCacheRead)}
+              </span>
+              <span className="text-secondary-label">Cache write</span>
+              <span className="text-right tabular-nums text-secondary-label">
+                {latestCacheWrite === null
+                  ? "Unavailable"
+                  : formatContextWindowTokens(latestCacheWrite)}
+              </span>
+              <span className="text-secondary-label">Output</span>
+              <span className="text-right tabular-nums text-secondary-label">
+                {latestOutput === null ? "Unavailable" : formatContextWindowTokens(latestOutput)}
+              </span>
+              <span className="text-secondary-label">Cache utilization</span>
+              <span className="text-right tabular-nums text-secondary-label">
+                {formatPercentage(cacheUtilization) ?? "Unavailable"}
+              </span>
+            </div>
+          ) : null}
+          {usage.cost != null ? (
+            <div className="flex items-center justify-between gap-3 text-2xs leading-4">
+              <span className="text-secondary-label">Cost</span>
+              <span className="font-medium tabular-nums text-secondary-label">
+                {formatContextWindowCost(usage.cost)}
+              </span>
+            </div>
+          ) : null}
+          {usage.costUsd != null ? (
+            <div className="flex items-center justify-between gap-3 text-2xs leading-4">
+              <span className="text-secondary-label">Turn cost</span>
+              <span className="font-medium tabular-nums text-secondary-label">
+                {formatContextWindowTurnCost(usage.costUsd, usage.costKind ?? null)}
+              </span>
+            </div>
+          ) : null}
           {usage.compactsAutomatically ? (
             <div className="mt-1 text-pretty text-secondary-label text-2xs font-medium">
               {formatContextWindowCompactionMessage(modelDisplayName, usage.autoCompactThreshold)}

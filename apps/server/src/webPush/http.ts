@@ -7,7 +7,7 @@ import {
 import { buildAgentAwarenessDeepLink } from "@t3tools/shared/agentAwareness";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import {
   annotateEnvironmentRequest,

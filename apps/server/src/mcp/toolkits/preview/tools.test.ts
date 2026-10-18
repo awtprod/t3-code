@@ -1,7 +1,10 @@
 import { expect, it } from "@effect/vitest";
-import { Tool } from "effect/unstable/ai";
+import { Tool } from "effect/ai";
 
-import { PreviewToolkit } from "./tools.ts";
+import * as Context from "effect/Context";
+
+import { capabilitiesAllow, requiredCapabilityFromMeta } from "../../ToolCapability.ts";
+import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
 
 const schemaHasDescription = (schema: unknown): boolean => {
   if (!schema || typeof schema !== "object") return false;
@@ -60,6 +63,9 @@ it("exports exact object result schemas for preview actions", () => {
   const actionNames = [
     "preview_click",
     "preview_type",
+    "preview_hover",
+    "preview_drag",
+    "preview_upload",
     "preview_press",
     "preview_scroll",
     "preview_wait_for",
@@ -73,5 +79,22 @@ it("exports exact object result schemas for preview actions", () => {
       additionalProperties: true,
       description: "The preview action completed successfully.",
     });
+  }
+});
+
+it("hides every preview tool from credentials without browser access", () => {
+  const tools = [PreviewToolkit, PreviewStandardToolkit, PreviewSnapshotToolkit].flatMap(
+    (toolkit) => Object.values(toolkit.tools),
+  );
+  expect(tools.length).toBeGreaterThan(0);
+  for (const tool of tools) {
+    const required = requiredCapabilityFromMeta(
+      Context.getOrUndefined(tool.annotations, Tool.Meta),
+    );
+    expect(required, `${tool.name} must require the preview capability`).toBe("preview");
+    expect(
+      capabilitiesAllow(required, new Set(["orchestration", "worktree", "pull-requests"])),
+    ).toBe(false);
+    expect(capabilitiesAllow(required, new Set(["preview"]))).toBe(true);
   }
 });

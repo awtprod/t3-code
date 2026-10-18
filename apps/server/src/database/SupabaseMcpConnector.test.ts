@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 
 import {
   buildSupabaseMcpUrl,
+  databaseAccessForScope,
   makeSupabaseMcpConnector,
   resolveSupabaseConnection,
   resolveSupabaseConnectionsForScope,
@@ -151,7 +152,6 @@ it.effect("proxies the named database's tools without returning the access token
       readOnly: true,
     });
     expect(named).toMatchObject({ connectionId: prodId, database: "prod", readOnly: false });
-    // @effect-diagnostics-next-line preferSchemaOverJson:off
     expect(JSON.stringify([defaulted, named])).not.toContain("sbp-secret");
   }),
 );
@@ -220,3 +220,15 @@ it.effect("blocks migrations locally when the selected connection is read-only",
     expect(remoteCalled).toBe(false);
   }),
 );
+
+it("derives the credential's database grant from the reachable connections", () => {
+  // Project A reaches a read-only staging and a writable prod database.
+  expect(databaseAccessForScope(connections, { projectId: projectA })).toBe("write");
+  expect(
+    databaseAccessForScope({ [stagingId]: staging }, { projectId: projectA, cwd: "/elsewhere" }),
+  ).toBe("read");
+  // Nothing reachable: no grant at all.
+  expect(databaseAccessForScope(connections, { cwd: "/unrelated" })).toBeUndefined();
+  expect(databaseAccessForScope({}, { projectId: projectA })).toBeUndefined();
+  expect(databaseAccessForScope(connections, {})).toBeUndefined();
+});

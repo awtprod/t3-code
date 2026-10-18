@@ -3,7 +3,6 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   CommandCenterCommandSubmitInput,
-  type ClientOrchestrationCommand,
   type OrchestrationProjectShell,
   ProjectId,
   ThreadId,
@@ -22,6 +21,10 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import type * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import {
+  CommandCenterIsolationUnavailable,
+  type CommandCenterOrchestrationCommand as ClientOrchestrationCommand,
+} from "./OrchestrationBridge.ts";
 import {
   type DispatcherDependencies,
   RunDispatcherError,
@@ -157,6 +160,7 @@ function makeFixture(
   route = readyRoute,
   options: {
     readonly resolveTargetProject?: DispatcherDependencies["resolveTargetProject"];
+    readonly admitThread?: DispatcherDependencies["admitThread"];
     readonly space?: StoredSpace;
     readonly executionAuthorized?: boolean;
     readonly parentRunId?: string;
@@ -262,6 +266,7 @@ function makeFixture(
       Effect.sync(() => {
         unregisteredThread = threadId;
       }),
+    admitThread: options.admitThread ?? (() => Effect.void),
   };
 
   return {
@@ -306,6 +311,22 @@ function makeFixture(
     },
   };
 }
+
+/** The fields these tests read from the `thread.turn.start` the dispatcher builds. */
+interface LegacyTurnStartView {
+  readonly type: "thread.turn.start";
+  readonly runtimeMode?: string;
+  readonly message: { readonly text: string };
+  readonly bootstrap?: {
+    readonly createThread?: { readonly runtimeMode?: string };
+    readonly prepareWorktree?: unknown;
+  };
+}
+
+const asTurnStart = (command: ClientOrchestrationCommand | undefined): LegacyTurnStartView => {
+  if (command?.type !== "thread.turn.start") throw new Error("Expected a turn start.");
+  return command as unknown as LegacyTurnStartView;
+};
 
 it("renders bounded prior context as reference while keeping the current command authoritative", () => {
   const rendered = renderThreadMessage({
@@ -359,16 +380,16 @@ it.effect("links one fresh thread and registers the exact Space and repository s
       "cc.runs.start",
     ]);
     expect(dispatchedCommand?.type).toBe("thread.turn.start");
-    if (dispatchedCommand?.type !== "thread.turn.start") return;
-    expect(dispatchedCommand.runtimeMode).toBe("auto-accept-edits");
-    expect(dispatchedCommand.bootstrap?.createThread?.runtimeMode).toBe("auto-accept-edits");
-    expect(dispatchedCommand.bootstrap?.prepareWorktree).toMatchObject({
+    const turnStart = asTurnStart(dispatchedCommand);
+    expect(turnStart.runtimeMode).toBe("auto-accept-edits");
+    expect(turnStart.bootstrap?.createThread?.runtimeMode).toBe("auto-accept-edits");
+    expect(turnStart.bootstrap?.prepareWorktree).toMatchObject({
       projectCwd: targetProject.workspaceRoot,
       baseBranch: "main",
       startFromOrigin: false,
     });
-    expect(dispatchedCommand.message.text).toContain("Command Center route receipt");
-    expect(dispatchedCommand.message.text).toContain("Space instructions");
+    expect(turnStart.message.text).toContain("Command Center route receipt");
+    expect(turnStart.message.text).toContain("Space instructions");
   }),
 );
 
@@ -427,10 +448,10 @@ it.effect("binds explicit Memory writes to the credential and keeps system work 
 
     expect(fixture.read().registeredScope?.memoryWriteMode).toBe("remember");
     expect(dispatchedCommand?.type).toBe("thread.turn.start");
-    if (dispatchedCommand?.type !== "thread.turn.start") return;
-    expect(dispatchedCommand.runtimeMode).toBe("approval-required");
-    expect(dispatchedCommand.bootstrap?.createThread?.runtimeMode).toBe("approval-required");
-    expect(dispatchedCommand.bootstrap?.prepareWorktree).toBeUndefined();
+    const turnStart = asTurnStart(dispatchedCommand);
+    expect(turnStart.runtimeMode).toBe("approval-required");
+    expect(turnStart.bootstrap?.createThread?.runtimeMode).toBe("approval-required");
+    expect(turnStart.bootstrap?.prepareWorktree).toBeUndefined();
   }),
 );
 
@@ -449,6 +470,71 @@ it.effect("persists dispatch failure and revokes the linked thread scope", () =>
     expect(state.storedRun.state).toBe("failed");
     expect(state.failedError?.reason).toBe("dispatch-failed");
     expect(state.unregisteredThread).toBe(ThreadId.make("cc:interactive:thread-example"));
+  }),
+);
+
+it.effect(
+  "fails a Run refused by the isolation gate before claiming or provisioning anything",
+  () =>
+    Effect.gen(function* () {
+      let resolvedProjects = 0;
+      const admitted: Array<{ readonly threadId: string; readonly runtimeMode: string }> = [];
+      const fixture = makeFixture(readyRoute, {
+        resolveTargetProject: () =>
+          Effect.sync(() => {
+            resolvedProjects += 1;
+            return targetProject;
+          }),
+        admitThread: (input) =>
+          Effect.gen(function* () {
+            admitted.push({ threadId: input.threadId, runtimeMode: input.runtimeMode });
+            return yield* new CommandCenterIsolationUnavailable({
+              threadId: input.threadId,
+              providerInstanceId: String(input.modelSelection.instanceId),
+              reason: "Example isolation refusal.",
+            });
+          }),
+      });
+      const failure = yield* Effect.flip(
+        fixture.dispatcher.dispatch({ runId, dispatchCommand: fixture.dispatch() }),
+      );
+      const state = fixture.read();
+
+      expect(failure.reason).toBe("isolation-unavailable");
+      expect(failure.message).toBe("Example isolation refusal.");
+      expect(admitted).toEqual([
+        { threadId: "cc:interactive:thread-example", runtimeMode: "auto-accept-edits" },
+      ]);
+      // Terminal from `queued`: no project, clone, scope or thread was created.
+      expect(state.storedRun.state).toBe("failed");
+      expect(state.storedRun.threadId).toBeNull();
+      expect(state.failedError?.reason).toBe("isolation-unavailable");
+      expect(state.failedError?.message).toBe("Example isolation refusal.");
+      expect(resolvedProjects).toBe(0);
+      expect(state.dispatchCount).toBe(0);
+      expect(state.registeredThread).toBeUndefined();
+    }),
+);
+
+it.effect("keeps the gate's reason when the bridge refuses the launch itself", () =>
+  Effect.gen(function* () {
+    const fixture = makeFixture();
+    const failure = yield* Effect.flip(
+      fixture.dispatcher.dispatch({
+        runId,
+        dispatchCommand: (command) =>
+          Effect.fail(
+            new CommandCenterIsolationUnavailable({
+              threadId: command.type === "thread.turn.start" ? command.threadId : "",
+              providerInstanceId: "codex",
+              reason: "Example launch refusal.",
+            }),
+          ),
+      }),
+    );
+    expect(failure.reason).toBe("isolation-unavailable");
+    expect(fixture.read().failedError?.message).toBe("Example launch refusal.");
+    expect(fixture.read().unregisteredThread).toBe(ThreadId.make("cc:interactive:thread-example"));
   }),
 );
 
@@ -888,9 +974,9 @@ it.effect("starts Space agent Runs as unattended workers that carry the Space br
     });
 
     expect(result.threadId).toBe(ThreadId.make("cc:automation:thread-example"));
-    if (dispatched?.type !== "thread.turn.start") throw new Error("Expected a turn start.");
-    expect(dispatched.message.text).not.toContain("Command Center router role");
-    expect(dispatched.message.text).toContain("[procedure] Run the tests");
+    const turnStart = asTurnStart(dispatched);
+    expect(turnStart.message.text).not.toContain("Command Center router role");
+    expect(turnStart.message.text).toContain("[procedure] Run the tests");
   }),
 );
 

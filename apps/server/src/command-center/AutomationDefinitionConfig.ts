@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - Command Center module that predates the Effect platform port.
+import { commandCenterGitIdentityEnvironment } from "@t3tools/shared/commandCenterGitIdentity";
 import { AutomationId } from "@command-center/core";
 import {
   CommandCenterAutomationSourceDefinition,
@@ -565,10 +567,7 @@ export const make = Effect.gen(function* () {
             "Could not create the local automation config commit.",
             {
               ...indexEnv,
-              GIT_AUTHOR_NAME: "Command Center",
-              GIT_AUTHOR_EMAIL: "command-center@localhost",
-              GIT_COMMITTER_NAME: "Command Center",
-              GIT_COMMITTER_EMAIL: "command-center@localhost",
+              ...commandCenterGitIdentityEnvironment(),
             },
           ))
             .trim()

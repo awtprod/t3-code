@@ -25,9 +25,9 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
-import * as HttpClient from "effect/unstable/http/HttpClient";
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import {
@@ -38,7 +38,7 @@ import {
 import { getOrCreateEnvironmentKeyPairFromSecretStore } from "../cloud/environmentKeys.ts";
 import * as CommandCenterService from "../command-center/Service.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
+import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStreamText";
 
 export const PROSPECT_NOTIFICATION_RELAY_TIMEOUT_MS = 5_000;
 const PROSPECT_NOTIFICATION_RELAY_MAX_RESPONSE_BYTES = 32 * 1024;
@@ -299,7 +299,7 @@ export const make = Effect.gen(function* () {
     if (!relayUrl || !environmentCredential) {
       return itemFailure(item.id, "not_configured", evaluationId);
     }
-    const jtiResult = yield* crypto.randomUUIDv4.pipe(Effect.result);
+    const jtiResult = yield* crypto.randomUUIDv4().pipe(Effect.result);
     if (jtiResult._tag === "Failure") {
       return itemFailure(item.id, "signing_failed", evaluationId);
     }

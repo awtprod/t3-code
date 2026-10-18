@@ -30,15 +30,13 @@ it is not an assertion about a subscription bill. Unsupported and custom models 
 unavailable** until an override is configured. T3 Code does not convert currencies or estimate fees
 that the provider does not report, such as web-search charges.
 
-The bundled Kimi K3 record effective July 2026 uses $3.00 per million uncached or cache-created input
-tokens, $0.30 per million cache-read input tokens, and $15.00 per million output tokens. Override
-precedence is provider instance plus model, then provider driver plus model, then the built-in rate.
+Override precedence is provider instance plus model, then provider driver plus model, then the
+built-in rate.
 
 ## Provider limitations
 
 - Codex preserves its native thread and reports cache-read counters.
 - Claude preserves cache-read and cache-creation counters separately and may report cost directly.
-- Kimi preserves native sessions and reports read/write cache events and subagent usage.
 - Cursor, Grok, and OpenCode preserve their native sessions. Cache and detailed token fields appear
   only when the installed runtime exposes trustworthy telemetry.
 

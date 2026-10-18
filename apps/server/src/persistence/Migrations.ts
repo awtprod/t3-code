@@ -8,9 +8,9 @@
  * schema is always up to date before the application starts.
  */
 
-import * as Migrator from "effect/unstable/sql/Migrator";
+import * as Migrator from "effect/sql/Migrator";
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -106,6 +106,20 @@ import Migration0091 from "./Migrations/091_ProjectionThreadTitleState.ts";
 import Migration0092 from "./Migrations/092_PullRequestFilesViewed.ts";
 import Migration0093 from "./Migrations/093_ProjectionThreadsAutoSettleDisabledAt.ts";
 import Migration0094 from "./Migrations/094_AuthSessionRenewalLineage.ts";
+// Upstream orchestration V2 migrations (T3 Code upstream 055-062), renumbered
+// to 095-102 so they append after the fork's highest migration (094). The
+// OrchestrationV2/* modules are composed inside 095 and carry no id of their
+// own. See docs/operations/upstream-sync.md.
+import Migration0095 from "./Migrations/095_OrchestrationV2.ts";
+import Migration0096 from "./Migrations/096_RemoveRedundantProjectionIndexes.ts";
+import Migration0097 from "./Migrations/097_ScheduledTaskWebhooks.ts";
+import Migration0098 from "./Migrations/098_WebhookRelayDeliveries.ts";
+import Migration0099 from "./Migrations/099_McpAppModelContext.ts";
+import Migration0100 from "./Migrations/100_ThreadSnapshotWindowIndexes.ts";
+import Migration0101 from "./Migrations/101_PullRequestReviewGuides.ts";
+import Migration0102 from "./Migrations/102_ThreadFailureLookupIndex.ts";
+// Fork-owned migrations after the renumbered upstream block (never renumber).
+import Migration0103 from "./Migrations/103_EfficiencyRoutingSideChannel.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -211,6 +225,18 @@ export const migrationEntries = [
   [92, "PullRequestFilesViewed", Migration0092],
   [93, "ProjectionThreadsAutoSettleDisabledAt", Migration0093],
   [94, "AuthSessionRenewalLineage", Migration0094],
+  // Upstream orchestration V2 (upstream 055-062) renumbered to 095-102,
+  // preserving upstream's relative order (055->95 ... 062->102). Preserve
+  // 95's schema: future V2 schema changes need new migrations.
+  [95, "OrchestrationV2", Migration0095],
+  [96, "RemoveRedundantProjectionIndexes", Migration0096],
+  [97, "ScheduledTaskWebhooks", Migration0097],
+  [98, "WebhookRelayDeliveries", Migration0098],
+  [99, "McpAppModelContext", Migration0099],
+  [100, "ThreadSnapshotWindowIndexes", Migration0100],
+  [101, "PullRequestReviewGuides", Migration0101],
+  [102, "ThreadFailureLookupIndex", Migration0102],
+  [103, "EfficiencyRoutingSideChannel", Migration0103],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -223,6 +249,49 @@ const makeMigrationLoader = (throughId?: number) =>
         .map(([id, name, migration]) => [`${id}_${name}`, migration]),
     ),
   );
+
+// V2's schema migrations start at 95 (upstream 55) after the fork's legacy
+// schema migrations.
+const FIRST_V2_MIGRATION_ID = 95;
+
+/**
+ * Fail before migrating when the migrator would skip one of V2's own
+ * migrations. It skips every id up to the highest recorded one, whatever name
+ * was recorded, so a database that took a V2 id for another migration would
+ * start without V2's schema and fail on first use. Earlier ids keep the
+ * warning below: databases with a site-local migration there still work.
+ */
+const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function* (
+  throughId?: number,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
+  `;
+  if (tables.length === 0) return;
+  const recorded = yield* sql<{
+    readonly migration_id: number;
+    readonly name: string;
+  }>`SELECT migration_id, name FROM effect_sql_migrations`;
+  const latestRecordedId = Math.max(0, ...recorded.map((row) => row.migration_id));
+  const recordedNames = new Map(recorded.map((row) => [row.migration_id, row.name]));
+  const skipped = migrationEntries.flatMap(([id, name]) => {
+    if (
+      id < FIRST_V2_MIGRATION_ID ||
+      id > latestRecordedId ||
+      (throughId !== undefined && id > throughId)
+    )
+      return [];
+    const recordedName = recordedNames.get(id);
+    if (recordedName === name) return [];
+    return [`${id}_${name} (recorded: ${recordedName ?? "nothing"})`];
+  });
+  if (skipped.length === 0) return;
+  return yield* new Migrator.MigrationError({
+    kind: "BadState",
+    message: `This database's migration history would skip required schema migrations: ${skipped.join(", ")}. The migrator skips every id up to the highest recorded id (${latestRecordedId}), regardless of name. It was probably written by a different build. Start the build that wrote it, or report this migration history so an upgrade path can be added.`,
+  });
+});
 
 /**
  * Migrator run function - no schema dumping needed
@@ -368,6 +437,9 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID) {
+    yield* assertV2MigrationsCanRun(toMigrationInclusive);
+  }
   yield* assertNoSkippedMigrations(
     migrationEntries
       .map(([id]) => id)
@@ -378,5 +450,30 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")
     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
+
+  // The migrator keys on migration_id: a database that recorded a different
+  // migration under a shared id (local or fork builds) keeps that id and
+  // silently skips this build's migration at it. Surface the divergence so the
+  // skipped schema change is diagnosable.
+  const sql = yield* SqlClient.SqlClient;
+  const recorded = yield* sql<{
+    readonly migration_id: number;
+    readonly name: string;
+  }>`SELECT migration_id, name FROM effect_sql_migrations`;
+  const manifestNames = new Map<number, string>(migrationEntries.map(([id, name]) => [id, name]));
+  const divergent = recorded.flatMap((row) => {
+    const expected = manifestNames.get(row.migration_id);
+    if (expected === undefined) {
+      return [`${row.migration_id}:${row.name} (unknown to this build)`];
+    }
+    return expected === row.name
+      ? []
+      : [`${row.migration_id}:${row.name} (this build: ${expected})`];
+  });
+  if (divergent.length > 0) {
+    yield* Effect.logWarning(
+      "Database migration history diverges from this build; recorded migration ids are skipped, not reconciled by name.",
+    ).pipe(Effect.annotateLogs({ divergent }));
+  }
   return executedMigrations;
 });

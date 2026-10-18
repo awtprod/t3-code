@@ -1,3 +1,4 @@
+import { Alert, AlertDescription } from "../ui/alert";
 import type { AuthSessionState } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import React, { startTransition, useEffect, useRef, useState, useCallback } from "react";
@@ -6,9 +7,9 @@ import { APP_DISPLAY_NAME } from "../../branding";
 import { connectPairing } from "../../connection/onboarding";
 import {
   peekPairingTokenFromUrl,
+  reconnectSavedDesktopEnvironment,
   stripPairingTokenFromUrl,
   submitServerAuthCredential,
-  reconnectSavedDesktopEnvironment,
 } from "../../environments/primary";
 import { readHostedPairingRequest } from "../../hostedPairing";
 import { Button } from "../ui/button";
@@ -37,6 +38,8 @@ export function PairingRouteSurface({
   initialErrorMessage?: string;
   onAuthenticated: () => void;
 }) {
+  // The desktop app pairs through Connections; at the gate it reconnects with
+  // the credential it already saved for the selected server.
   const desktopRecovery = window.desktopBridge !== undefined;
   const recoverySupported = typeof window.desktopBridge?.recoverRemotePrimarySession === "function";
   const autoPairTokenRef = useRef<string | null>(
@@ -130,12 +133,9 @@ export function PairingRouteSurface({
             </p>
           ) : null}
           {errorMessage ? (
-            <div
-              role="alert"
-              className="rounded-lg border border-destructive/30 bg-destructive/6 px-3 py-2 text-sm text-destructive"
-            >
-              {errorMessage}
-            </div>
+            <Alert variant="error">
+              <AlertDescription>{errorMessage}</AlertDescription>
+            </Alert>
           ) : null}
         </div>
       ) : (
@@ -159,9 +159,9 @@ export function PairingRouteSurface({
           </div>
 
           {errorMessage ? (
-            <div className="rounded-lg border border-destructive/30 bg-destructive/6 px-3 py-2 text-sm text-destructive">
-              {errorMessage}
-            </div>
+            <Alert variant="error">
+              <AlertDescription>{errorMessage}</AlertDescription>
+            </Alert>
           ) : null}
 
           <div className="flex flex-wrap gap-2">
@@ -279,10 +279,12 @@ export function HostedPairingRouteSurface() {
       ) : null}
 
       {status === "error" ? (
-        <div className="mt-5 rounded-lg border border-destructive/30 bg-destructive/6 px-3 py-2 text-sm text-destructive">
-          Verify the backend is reachable from this browser, supports CORS for hosted clients, and
-          is served over HTTPS when opening this page from HTTPS.
-        </div>
+        <Alert variant="error" className="mt-5">
+          <AlertDescription>
+            Verify the backend is reachable from this browser, supports CORS for hosted clients, and
+            is served over HTTPS when opening this page from HTTPS.
+          </AlertDescription>
+        </Alert>
       ) : null}
 
       <div className="mt-6 flex flex-wrap gap-2">

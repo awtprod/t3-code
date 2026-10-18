@@ -28,9 +28,6 @@
  * unmapped-directory refusal is lifted, and only to the identity the
  * session already had.
  *
- * `SandboxCredentialProxy` sets the same pair for the same reason when it
- * shells out to `gh` from the server process.
- *
  * @module provider/githubProvisioningIdentity
  */
 import type {
@@ -42,7 +39,7 @@ import type {
 export const GITHUB_IDENTITY_VARIABLE = "COMMAND_CENTER_GITHUB_IDENTITY";
 export const GITHUB_PROVISIONING_IDENTITY_VARIABLE = "COMMAND_CENTER_GITHUB_PROVISIONING_IDENTITY";
 
-export function resolveProviderInstanceGitHubIdentity(
+function resolveProviderInstanceGitHubIdentity(
   instanceId: ProviderInstanceId,
   instance: ProviderInstanceConfig | undefined,
 ): string | undefined {

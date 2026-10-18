@@ -14,8 +14,9 @@ import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
 import { PhoneCalls } from "../../../command-center/phone/PhoneCalls.ts";
 import { PhoneCallProposals } from "../../../command-center/phone/PhoneCallProposals.ts";
 import { commandCenterProviderAvailability } from "../../../command-center/ProviderAvailability.ts";
-import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
 import { CommandCenterToolkit } from "./tools.ts";
 
 const bySpace = <A extends { readonly spaceId: string }>(
@@ -64,7 +65,21 @@ const requireScopedSpace = Effect.fn("CommandCenterToolkit.requireScopedSpace")(
       });
     }
   }
-  return { ...scope, spaceId: scope.spaceId };
+  // Command Center scopes are minted only for agent thread credentials; flatten
+  // the V2 thread caller so tools can attribute writes to the thread.
+  if (scope.thread === undefined) {
+    return yield* new CommandCenterError({
+      reason: "validation",
+      message: "Command Center tools need an agent thread credential.",
+    });
+  }
+  return {
+    ...scope,
+    spaceId: scope.spaceId,
+    threadId: scope.thread.threadId,
+    providerSessionId: scope.thread.providerSessionId,
+    providerInstanceId: scope.thread.providerInstanceId,
+  };
 });
 
 export const memoryVisibleToScope = (
@@ -231,9 +246,9 @@ const invocationAuthoritiesMatch = (
 ): boolean =>
   left.spaceId === right.spaceId &&
   left.repositoryId === right.repositoryId &&
-  left.threadId === right.threadId &&
-  left.providerSessionId === right.providerSessionId &&
-  left.providerInstanceId === right.providerInstanceId;
+  left.thread?.threadId === right.thread?.threadId &&
+  left.thread?.providerSessionId === right.thread?.providerSessionId &&
+  left.thread?.providerInstanceId === right.thread?.providerInstanceId;
 
 export const resolveRunStartScope = (input: {
   readonly requestedSpaceId?: string;
@@ -727,4 +742,54 @@ const handlers = {
     }),
 } satisfies Parameters<typeof CommandCenterToolkit.toLayer>[0];
 
-export const CommandCenterToolkitHandlersLive = CommandCenterToolkit.toLayer(handlers);
+/**
+ * Drops object keys whose value is `undefined`, at any depth. Command Center
+ * records carry optional fields as explicit `undefined` (`Schema.optional`),
+ * and effect's MCP server rejects a `CallToolResult` whose `structuredContent`
+ * is not strict JSON, so `cc_items_list`, `cc_runs_list` and friends failed
+ * every call. An absent key and an `undefined` one mean the same here.
+ */
+const withoutUndefinedFields = <A>(value: A): A => {
+  if (Array.isArray(value)) return value.map(withoutUndefinedFields) as A;
+  if (value === null || typeof value !== "object") return value;
+  if (Object.getPrototypeOf(value) !== Object.prototype) return value;
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, field]) =>
+      field === undefined ? [] : [[key, withoutUndefinedFields(field)]],
+    ),
+  ) as A;
+};
+
+/** Wraps one handler so its success value is strict JSON (see above). */
+const jsonSafe =
+  <Args extends ReadonlyArray<unknown>, A, E, R>(
+    handler: (...args: Args) => Effect.Effect<A, E, R>,
+  ) =>
+  (...args: Args): Effect.Effect<A, E, R> =>
+    handler(...args).pipe(Effect.map(withoutUndefinedFields));
+
+/** Every Command Center tool declares its access (see `McpToolAccess`). */
+export const CommandCenterToolkitHandlersLive = McpToolAccess.toLayer(CommandCenterToolkit, {
+  cc_spaces_list: McpToolAccess.reads(jsonSafe(handlers.cc_spaces_list)),
+  cc_items_list: McpToolAccess.reads(jsonSafe(handlers.cc_items_list)),
+  cc_memory_list: McpToolAccess.reads(jsonSafe(handlers.cc_memory_list)),
+  cc_memory_search: McpToolAccess.reads(jsonSafe(handlers.cc_memory_search)),
+  cc_space_brief: McpToolAccess.reads(jsonSafe(handlers.cc_space_brief)),
+  cc_automations_list: McpToolAccess.reads(jsonSafe(handlers.cc_automations_list)),
+  cc_runs_list: McpToolAccess.reads(jsonSafe(handlers.cc_runs_list)),
+  cc_google_read: McpToolAccess.reads(jsonSafe(handlers.cc_google_read)),
+  cc_space_activity: McpToolAccess.reads(jsonSafe(handlers.cc_space_activity)),
+  // Writes check their Command Center capability in the handler.
+  cc_items_create: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_items_create)),
+  cc_items_update: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_items_update)),
+  cc_memory_propose: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_memory_propose)),
+  cc_automations_create: McpToolAccess.writesWithCapability(
+    jsonSafe(handlers.cc_automations_create),
+  ),
+  cc_automations_save: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_automations_save)),
+  cc_runs_start: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_runs_start)),
+  cc_automations_run: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_automations_run)),
+  // Phone tools act (the owner call dials; the third-party call files an approval).
+  cc_phone_call_me: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_phone_call_me)),
+  cc_phone_call: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_phone_call)),
+});

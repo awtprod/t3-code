@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
+import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 
-import { cursorRateModel } from "./cursorUsageReader.ts";
+import { cursorRateModel } from "@t3tools/provider-cursor/server/accountUsage";
+import type { UsageSpeed } from "@t3tools/provider-core/server/usage";
 import {
   cacheSavingsUsd,
   createOverrideRateTable,
@@ -23,11 +25,15 @@ describe("usage pricing", () => {
     outputTokens: 1_000_000,
     reasoningTokens: 500_000,
   };
-  const record = (model: string, reportedCostUsd: number | null = null, fast = false) => ({
+  const record = (
+    model: string,
+    reportedCostUsd: number | null = null,
+    speed: UsageSpeed = "standard",
+  ) => ({
     model,
     totals,
     reportedCostUsd,
-    fast,
+    speed,
   });
 
   it("uses custom token rates ahead of public and provider-reported costs", () => {
@@ -42,7 +48,7 @@ describe("usage pricing", () => {
     });
 
     for (const reportedCostUsd of [null, 99]) {
-      expect(priceUsage(table, record("example-model", reportedCostUsd), overrides)).toEqual({
+      expect(priceUsage(table, record("example-model", reportedCostUsd), overrides)).toMatchObject({
         costUsd: 13.5,
         costSource: "modelPriced",
       });
@@ -64,7 +70,7 @@ describe("usage pricing", () => {
     expect(cacheSavingsUsd(table, cursorRecord("claude-fable-5-1-thinking-high"))).toBeCloseTo(9);
     expect(cacheSavingsUsd(table, cursorRecord("cursor-grok-4.7-high-fast"))).toBeCloseTo(1.5);
     expect(cacheSavingsUsd(table, cursorRecord("default"))).toBe(0);
-    expect(priceUsage(table, cursorRecord("grok-4.7-xhigh-fast"))).toEqual({
+    expect(priceUsage(table, cursorRecord("grok-4.7-xhigh-fast"))).toMatchObject({
       costUsd: 0.25,
       costSource: "providerReported",
     });
@@ -76,7 +82,7 @@ describe("usage pricing", () => {
       "example-model": { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 },
     });
 
-    expect(priceUsage(table, record("example-model"), overrides)).toEqual({
+    expect(priceUsage(table, record("example-model"), overrides)).toMatchObject({
       costUsd: 14,
       costSource: "modelPriced",
     });
@@ -91,7 +97,7 @@ describe("usage pricing", () => {
         outputCostPerMillionTokens: 0,
       },
     });
-    expect(priceUsage(table, record(" vendor/example-model[1m] ", 99), overrides)).toEqual({
+    expect(priceUsage(table, record(" vendor/example-model[1m] ", 99), overrides)).toMatchObject({
       costUsd: 0,
       costSource: "modelPriced",
     });
@@ -105,6 +111,8 @@ describe("usage pricing", () => {
       expect(priceUsage(table, record(model, 99), overrides)).toEqual({
         costUsd: 99,
         costSource: "providerReported",
+        categoryCostUsd: null,
+        speedPremiumUsd: 0,
       });
     }
   });
@@ -117,18 +125,80 @@ describe("usage pricing", () => {
     const overrides = createOverrideRateTable({
       "claude-opus-5-5": { inputCostPerMillionTokens: 4, outputCostPerMillionTokens: 20 },
     });
-    const cost = (model: string, fast: boolean, custom?: typeof overrides) =>
-      priceUsage(table, record(model, null, fast), custom).costUsd;
+    const cost = (model: string, speed: UsageSpeed, custom?: typeof overrides) =>
+      priceUsage(table, record(model, null, speed), custom).costUsd;
 
-    expect(cost("claude-opus-5-5", true)).toBeCloseTo(2 * cost("claude-opus-5-5", false));
-    expect(cacheSavingsUsd(table, record("claude-opus-5-5", null, true))).toBeCloseTo(
+    expect(cost("claude-opus-5-5", "fast")).toBeCloseTo(2 * cost("claude-opus-5-5", "standard"));
+    expect(cacheSavingsUsd(table, record("claude-opus-5-5", null, "fast"))).toBeCloseTo(
       2 * cacheSavingsUsd(table, record("claude-opus-5-5")),
     );
     // No published fast tier, and custom prices, both stay at the standard rate.
-    expect(cost("claude-fable-5-1", true)).toBe(cost("claude-fable-5-1", false));
-    expect(cost("claude-opus-5-5", true, overrides)).toBe(
-      cost("claude-opus-5-5", false, overrides),
+    expect(cost("claude-fable-5-1", "fast")).toBe(cost("claude-fable-5-1", "standard"));
+    expect(cost("claude-opus-5-5", "fast", overrides)).toBe(
+      cost("claude-opus-5-5", "standard", overrides),
     );
+  });
+
+  it("splits cost by category and prices the speed premium", () => {
+    const table = parseRateTable({
+      "claude-opus-5-5": {
+        ...rate(4e-6, 4e-7),
+        cache_creation_input_token_cost: 5e-6,
+        provider_specific_entry: { fast: 2 },
+      },
+    });
+    const split = (input: number, cacheRead: number, cacheWrite: number, output: number) => ({
+      input: expect.closeTo(input),
+      cacheRead: expect.closeTo(cacheRead),
+      cacheWrite: expect.closeTo(cacheWrite),
+      output: expect.closeTo(output),
+    });
+
+    expect(priceUsage(table, record("claude-opus-5-5", null, "fast"))).toEqual({
+      costUsd: expect.closeTo(58.8),
+      costSource: "modelPriced",
+      categoryCostUsd: split(8, 0.8, 10, 40),
+      speedPremiumUsd: expect.closeTo(29.4),
+    });
+    // A reported cost keeps its total and splits in proportion to list rates.
+    expect(priceUsage(table, record("claude-opus-5-5", 29.4, "fast"))).toEqual({
+      costUsd: 29.4,
+      costSource: "providerReported",
+      categoryCostUsd: split(4, 0.4, 5, 20),
+      speedPremiumUsd: expect.closeTo(14.7),
+    });
+    // Without rates there is nothing to split it by.
+    expect(priceUsage(table, record("unknown-model", 29.4, "fast"))).toMatchObject({
+      costUsd: 29.4,
+      categoryCostUsd: null,
+      speedPremiumUsd: 0,
+    });
+  });
+
+  it("prices Codex priority and ultrafast requests at their published tier rates", () => {
+    const table = parseRateTable({
+      "gpt-6-astra": {
+        ...rate(1e-5, 1e-6),
+        input_cost_per_token_priority: 2e-5,
+        output_cost_per_token_priority: 1e-4,
+        cache_read_input_token_cost_priority: 2e-6,
+        input_cost_per_token_ultrafast: 6e-5,
+        output_cost_per_token_ultrafast: 3e-4,
+        // No ultrafast cache rate: keeps the standard 10:1 input-to-cache ratio.
+      },
+      "gpt-6-sol": rate(2e-6, 2e-7),
+    });
+    const cost = (model: string, speed: UsageSpeed) =>
+      priceUsage(table, record(model, null, speed)).costUsd;
+    const standard = cost("gpt-6-astra", "standard");
+
+    expect(cost("gpt-6-astra", "fast")).toBeCloseTo(2 * standard);
+    expect(cost("gpt-6-astra", "ultrafast")).toBeCloseTo(6 * standard);
+    expect(cacheSavingsUsd(table, record("gpt-6-astra", null, "ultrafast"))).toBeCloseTo(
+      6 * cacheSavingsUsd(table, record("gpt-6-astra")),
+    );
+    // A tier the model does not publish bills at the standard rate.
+    expect(cost("gpt-6-sol", "ultrafast")).toBe(cost("gpt-6-sol", "standard"));
   });
 
   it("keeps the canonical Fable rate separate from DeepInfra in either order", () => {
@@ -180,25 +250,28 @@ describe("usage pricing", () => {
     expect(lookupRate(table, "example-model")).toBeNull();
   });
 
-  it("prices a local-override model the LiteLLM table doesn't carry", () => {
-    const table = parseRateTable({});
-
-    const priced = lookupRate(table, "z-ai/glm-5.3-flash");
-    expect(priced?.inputCostPerToken).toBe(0.15 / 1_000_000);
-    expect(priced?.outputCostPerToken).toBe(0.5 / 1_000_000);
-    // Casing/whitespace still normalizes onto the override.
-    expect(lookupRate(table, " Z-AI/GLM-5.3-Flash ")?.inputCostPerToken).toBe(0.15 / 1_000_000);
-  });
-
-  it("lets a real LiteLLM entry win over the local override", () => {
-    const table = parseRateTable({ "z-ai/glm-5.3-flash": rate(9) });
-
-    expect(lookupRate(table, "z-ai/glm-5.3-flash")?.inputCostPerToken).toBe(9);
-  });
-
-  it("prices the TypeSafe judge model (jev-latest) with free output", () => {
-    const priced = lookupRate(parseRateTable({}), "jev-latest");
-    expect(priced?.inputCostPerToken).toBe(0.042 / 1_000_000);
-    expect(priced?.outputCostPerToken).toBe(0);
+  it("prices the seeded jev-latest and z-ai/glm-5.3-flash rates through the setting", () => {
+    const overrides = createOverrideRateTable(DEFAULT_SERVER_SETTINGS.usagePriceOverrides);
+    const totals = {
+      uncachedInputTokens: 1_000_000,
+      cachedInputTokens: 1_000_000,
+      cacheCreationTokens: 1_000_000,
+      outputTokens: 1_000_000,
+      reasoningTokens: 0,
+    };
+    const price = (model: string) =>
+      priceUsage(
+        parseRateTable({}),
+        { model, totals, speed: "standard", reportedCostUsd: null },
+        overrides,
+      );
+    // $0.042 per 1M input, cache read and cache write; output free.
+    expect(price("jev-latest").costUsd).toBeCloseTo(0.042 * 3, 10);
+    expect(price("jev-latest").costSource).toBe("modelPriced");
+    // $0.15 input + $0.03 cached + $0.15 cache write + $0.50 output per 1M.
+    expect(price("z-ai/glm-5.3-flash").costUsd).toBeCloseTo(0.15 + 0.03 + 0.15 + 0.5, 10);
+    // There is no second, built-in price path any more.
+    expect(lookupRate(parseRateTable({}), "jev-latest")).toBeNull();
+    expect(lookupRate(parseRateTable({}), "z-ai/glm-5.3-flash")).toBeNull();
   });
 });

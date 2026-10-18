@@ -12,7 +12,7 @@ import {
   CommandId,
   MessageId,
   type OrchestrationProjectShell,
-  type OrchestrationThreadShell,
+  type OrchestrationV2ThreadShell,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -24,12 +24,11 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
-import * as OrchestrationCommandDispatcher from "../orchestration/CommandDispatcher.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as OrchestrationBridge from "./OrchestrationBridge.ts";
 import { GoogleActivityBrief } from "./GoogleActivity.ts";
 import { isManagedRepositoryWorkspacePath } from "./RepositoryProvisioningPolicy.ts";
 import {
@@ -153,8 +152,7 @@ const selectSpaceAgentRepositoryProject = (input: {
 
 const make = Effect.gen(function* () {
   const service = yield* CommandCenterService.CommandCenterService;
-  const projection = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-  const commandDispatcher = yield* OrchestrationCommandDispatcher.OrchestrationCommandDispatcher;
+  const projection = yield* OrchestrationBridge.OrchestrationBridge;
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -213,7 +211,7 @@ const make = Effect.gen(function* () {
       projection,
       modelSelection,
       now,
-      dispatchCommand: commandDispatcher.dispatch,
+      dispatchCommand: projection.dispatchCommand,
     }).pipe(
       Effect.mapError((cause) =>
         agentError("routing", "No project is available for the Space agent thread.", cause),
@@ -245,7 +243,7 @@ const make = Effect.gen(function* () {
 
   const startTurn = Effect.fn("SpaceAgent.startTurn")(function* (
     space: SpaceType,
-    existing: OrchestrationThreadShell | undefined,
+    existing: OrchestrationV2ThreadShell | undefined,
     input: {
       readonly text: string;
       readonly reason: SpaceAgentTurnReason | "bootstrap";
@@ -254,16 +252,19 @@ const make = Effect.gen(function* () {
   ) {
     const text = input.text.trim();
     yield* validateTurnText(text);
-    if (existing?.session?.activeTurnId != null) return yield* busyError();
+    // A V2 shell reports work in flight as its active run.
+    if (existing?.activeRunId != null) return yield* busyError();
     const threadId = ThreadId.make(spaceAgentThreadId(space.id));
     const { brief } = yield* service.spaceBrief({
       spaceId: space.id,
       mailCalendar: input.mailCalendar,
     });
     const now = DateTime.formatIso(yield* DateTime.now);
-    const nonce = yield* crypto.randomUUIDv4.pipe(
-      Effect.mapError((cause) => agentError("persistence", "Could not mint a turn id.", cause)),
-    );
+    const nonce = yield* crypto
+      .randomUUIDv4()
+      .pipe(
+        Effect.mapError((cause) => agentError("persistence", "Could not mint a turn id.", cause)),
+      );
     const message = {
       messageId: MessageId.make(`space-agent:${space.id}:message:${nonce}`),
       role: "user" as const,
@@ -271,9 +272,10 @@ const make = Effect.gen(function* () {
       attachments: [],
     };
     const commandId = CommandId.make(`space-agent:${space.id}:turn:${nonce}`);
+    // A follow-up turn on the agent's thread, or its first turn creating it.
     if (existing !== undefined) {
-      const dispatched = yield* commandDispatcher
-        .dispatch({
+      const dispatched = yield* projection
+        .dispatchCommand({
           type: "thread.turn.start",
           commandId,
           threadId,
@@ -293,8 +295,8 @@ const make = Effect.gen(function* () {
     const modelSelection = commandCenterModelSelection(model);
     const projectId = yield* resolveProject(space, modelSelection, now);
     const title = `${space.displayName} agent`.slice(0, 80);
-    const dispatched = yield* commandDispatcher
-      .dispatch({
+    const dispatched = yield* projection
+      .dispatchCommand({
         type: "thread.turn.start",
         commandId,
         threadId,
@@ -337,7 +339,7 @@ const make = Effect.gen(function* () {
       const threadId = ThreadId.make(spaceAgentThreadId(space.id));
       yield* validateTurnText(input.text.trim());
       const current = Option.getOrUndefined(yield* findThread(threadId));
-      if (current?.session?.activeTurnId != null) return yield* busyError();
+      if (current?.activeRunId != null) return yield* busyError();
       const mailCalendar = yield* fetchMailCalendar(space);
       return yield* threadLock.withPermits(1)(
         Effect.gen(function* () {

@@ -9,6 +9,7 @@ import {
   SpaceId,
 } from "@command-center/core";
 import {
+  OrchestratorMcpFailure,
   CommandCenterError,
   CommandCenterAutomationExecution,
   CommandCenterAutomationDefinitionCreateInput,
@@ -31,7 +32,7 @@ import {
   GoogleReadResult,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 
 import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as AutomationDefinitionConfig from "../../../command-center/AutomationDefinitionConfig.ts";
@@ -52,11 +53,18 @@ import {
   PhoneCalls,
 } from "../../../command-center/phone/PhoneCalls.ts";
 import { PhoneCallProposals } from "../../../command-center/phone/PhoneCallProposals.ts";
-import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { commandCenterCapability } from "../../ToolCapability.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 
-const failure = Schema.Union([CommandCenterError, CommandCenterMcpCapabilityUnavailableError]);
+// `McpToolAccess` refuses a write from a read-only client or a caller whose run is not
+// live with `OrchestratorMcpFailure`, so every tool can fail with it.
+const failure = Schema.Union([
+  CommandCenterError,
+  CommandCenterMcpCapabilityUnavailableError,
+  OrchestratorMcpFailure,
+]);
 
 const scopedInput = Schema.Struct({ spaceId: Schema.optional(SpaceId) });
 
@@ -83,6 +91,7 @@ const SpaceListResult = Schema.Struct({
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
+  ThreadManagementService.ThreadManagementService,
   CommandCenterService.CommandCenterService,
   AutomationRuns.AutomationRuns,
   MemorySearchIndex.MemorySearchIndex,

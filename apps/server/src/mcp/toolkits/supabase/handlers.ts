@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 
 import * as SupabaseMcpConnector from "../../../database/SupabaseMcpConnector.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
 import { MODEL_RESULT_LIMITS, capOpaqueResult } from "../../ToolResultBudget.ts";
 import { SupabaseToolkit } from "./tools.ts";
 
@@ -36,18 +37,25 @@ const callSupabase = Effect.fn("SupabaseToolkit.call")(function* (
   return { ...response, result };
 });
 
-const handlers = SupabaseToolkit.of({
-  supabase_list_tables: (input) => callSupabase("list_tables", input, "database.read"),
-  supabase_list_extensions: (input) => callSupabase("list_extensions", input, "database.read"),
-  supabase_list_migrations: (input) => callSupabase("list_migrations", input, "database.read"),
-  supabase_apply_migration: (input) => callSupabase("apply_migration", input, "database.write"),
-  supabase_execute_sql: (input) => callSupabase("execute_sql", input, "database.write"),
-  supabase_get_advisors: (input) => callSupabase("get_advisors", input, "database.read"),
-  supabase_get_project_url: (input) => callSupabase("get_project_url", input, "database.read"),
-  supabase_get_publishable_keys: (input) =>
-    callSupabase("get_publishable_keys", input, "database.read"),
-  supabase_generate_typescript_types: (input) =>
-    callSupabase("generate_typescript_types", input, "database.read"),
-} satisfies Parameters<typeof SupabaseToolkit.toLayer>[0]);
+const read = (tool: SupabaseMcpConnector.SupabaseRemoteToolName) =>
+  McpToolAccess.reads((input: Readonly<Record<string, unknown>>) =>
+    callSupabase(tool, input, "database.read"),
+  );
+// Writes check the credential's `database.write` grant in `callSupabase`.
+const write = (tool: SupabaseMcpConnector.SupabaseRemoteToolName) =>
+  McpToolAccess.writesWithCapability((input: Readonly<Record<string, unknown>>) =>
+    callSupabase(tool, input, "database.write"),
+  );
 
-export const SupabaseToolkitHandlersLive = SupabaseToolkit.toLayer(handlers);
+/** Every Supabase tool declares its access (see `McpToolAccess`). */
+export const SupabaseToolkitHandlersLive = McpToolAccess.toLayer(SupabaseToolkit, {
+  supabase_list_tables: read("list_tables"),
+  supabase_list_extensions: read("list_extensions"),
+  supabase_list_migrations: read("list_migrations"),
+  supabase_apply_migration: write("apply_migration"),
+  supabase_execute_sql: write("execute_sql"),
+  supabase_get_advisors: read("get_advisors"),
+  supabase_get_project_url: read("get_project_url"),
+  supabase_get_publishable_keys: read("get_publishable_keys"),
+  supabase_generate_typescript_types: read("generate_typescript_types"),
+});

@@ -180,7 +180,7 @@ export function ResponsibilitiesScreen({
               <button
                 aria-current={selected?.automationId === item.automationId ? "true" : undefined}
                 className={cn(
-                  "flex min-h-20 w-full flex-col items-start gap-2 rounded-xl border bg-card p-3 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  "flex min-h-20 w-full flex-col items-start gap-2 rounded-xl border bg-card p-3 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                   selected?.automationId === item.automationId && "border-primary/50 bg-accent/60",
                 )}
                 key={`${item.spaceId}:${item.automationId}`}

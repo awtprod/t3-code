@@ -41,7 +41,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { localDateAt } from "../DigestPeriod.ts";
 import * as CommandCenterService from "../Service.ts";
@@ -291,7 +291,7 @@ const make = Effect.gen(function* () {
 
   const requireConnection = store.load;
 
-  const newAttemptId = crypto.randomUUIDv4.pipe(
+  const newAttemptId = crypto.randomUUIDv4().pipe(
     Effect.mapError(
       (cause) =>
         new CommandCenterError({

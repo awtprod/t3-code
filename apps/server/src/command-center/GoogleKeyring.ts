@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Base64Url from "effect/encoding/Base64Url";
 
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 
@@ -19,7 +19,7 @@ export const googleKeyringEnvironment = Effect.fn("GoogleKeyring.environment")(f
 
   const password =
     configuredPassword ??
-    Encoding.encodeBase64Url(
+    Base64Url.encode(
       yield* (yield* ServerSecretStore).getOrCreateRandom(
         GOOGLE_KEYRING_PASSWORD_SECRET,
         GOOGLE_KEYRING_PASSWORD_BYTES,

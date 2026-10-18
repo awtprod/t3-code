@@ -1,7 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import {
   CommandCenterMcpCapabilityUnavailableError,
-  DatabaseToolError,
   EnvironmentId,
   McpCapabilityUnavailableError,
   PreviewAutomationUnavailableError,
@@ -12,31 +11,22 @@ import * as Effect from "effect/Effect";
 
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 
-// `requireMcpCapability` returns a union of per-capability effects that share
-// their success value and context but each carry a distinct error type. Collapse
-// that union to the merged effect type (error channels widen covariantly) so
-// `.pipe` sees one concrete effect instead of an unresolvable union.
-type RequireMcpCapabilityEffect = Effect.Effect<
-  McpInvocationContext.McpInvocationScope,
-  | CommandCenterMcpCapabilityUnavailableError
-  | DatabaseToolError
-  | McpCapabilityUnavailableError
-  | PreviewAutomationUnavailableError,
-  McpInvocationContext.McpInvocationContext
->;
-
 it.effect("reports the scoped credential context when preview capability is unavailable", () => {
   const invocation: McpInvocationContext.McpInvocationScope = {
     environmentId: EnvironmentId.make("environment-1"),
-    threadId: ThreadId.make("thread-1"),
-    providerSessionId: "provider-session-1",
-    providerInstanceId: ProviderInstanceId.make("codex"),
+    requestNamespace: "provider-session-1",
+    thread: {
+      threadId: ThreadId.make("thread-1"),
+      providerSessionId: "provider-session-1",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    },
+    client: undefined,
     capabilities: new Set(),
     issuedAt: 1,
   };
 
   return Effect.gen(function* () {
-    const error = yield* McpInvocationContext.requirePreviewCapability().pipe(
+    const error = yield* McpInvocationContext.requireMcpCapability("preview").pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
       Effect.flip,
     );
@@ -45,24 +35,33 @@ it.effect("reports the scoped credential context when preview capability is unav
     expect(error).toMatchObject({
       capability: "preview",
       environmentId: invocation.environmentId,
-      threadId: invocation.threadId,
-      providerSessionId: invocation.providerSessionId,
-      providerInstanceId: invocation.providerInstanceId,
+      threadId: invocation.thread?.threadId,
+      providerSessionId: invocation.thread?.providerSessionId,
+      providerInstanceId: invocation.thread?.providerInstanceId,
     });
     expect(error.message).toContain("MCP credential does not grant the preview capability");
     expect(error.message).toContain("use a headless browser from the shell");
   });
 });
 
-it.effect("denies automation runs without the exact scoped capability", () => {
-  const invocation: McpInvocationContext.McpInvocationScope = {
-    environmentId: EnvironmentId.make("environment-1"),
-    threadId: ThreadId.make("thread-automation"),
-    providerSessionId: "provider-session-automation",
+const commandCenterInvocation = (
+  name: string,
+  capabilities: ReadonlyArray<McpInvocationContext.McpCapability>,
+): McpInvocationContext.McpInvocationScope => ({
+  environmentId: EnvironmentId.make("environment-1"),
+  requestNamespace: `provider-session-${name}`,
+  thread: {
+    threadId: ThreadId.make(`thread-${name}`),
+    providerSessionId: `provider-session-${name}`,
     providerInstanceId: ProviderInstanceId.make("codex"),
-    capabilities: new Set(["cc.automations.read"]),
-    issuedAt: 1,
-  };
+  },
+  client: undefined,
+  capabilities: new Set(capabilities),
+  issuedAt: 1,
+});
+
+it.effect("denies automation runs without the exact scoped capability", () => {
+  const invocation = commandCenterInvocation("automation", ["cc.automations.read"]);
 
   return Effect.gen(function* () {
     const error = yield* McpInvocationContext.requireCommandCenterCapability(
@@ -74,21 +73,14 @@ it.effect("denies automation runs without the exact scoped capability", () => {
     expect(error).toBeInstanceOf(CommandCenterMcpCapabilityUnavailableError);
     expect(error).toMatchObject({
       capability: "cc.automations.run",
-      threadId: invocation.threadId,
-      providerSessionId: invocation.providerSessionId,
+      threadId: invocation.thread?.threadId,
+      providerSessionId: invocation.thread?.providerSessionId,
     });
   });
 });
 
 it.effect("does not let a Gmail-only credential cross into Calendar or Drive", () => {
-  const invocation: McpInvocationContext.McpInvocationScope = {
-    environmentId: EnvironmentId.make("environment-1"),
-    threadId: ThreadId.make("thread-google"),
-    providerSessionId: "provider-session-google",
-    providerInstanceId: ProviderInstanceId.make("codex"),
-    capabilities: new Set(["cc.connections.google.gmail.read"]),
-    issuedAt: 1,
-  };
+  const invocation = commandCenterInvocation("google", ["cc.connections.google.gmail.read"]);
 
   return Effect.gen(function* () {
     yield* McpInvocationContext.requireCommandCenterCapability("cc.connections.google.gmail.read");
@@ -108,29 +100,53 @@ it.effect("does not let a Gmail-only credential cross into Calendar or Drive", (
 it.effect("reports other missing capabilities with the neutral error", () => {
   const invocation: McpInvocationContext.McpInvocationScope = {
     environmentId: EnvironmentId.make("environment-1"),
-    threadId: ThreadId.make("thread-1"),
-    providerSessionId: "provider-session-1",
-    providerInstanceId: ProviderInstanceId.make("codex"),
+    requestNamespace: "provider-session-1",
+    thread: {
+      threadId: ThreadId.make("thread-1"),
+      providerSessionId: "provider-session-1",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    },
+    client: undefined,
     capabilities: new Set(["preview"]),
     issuedAt: 1,
   };
 
   return Effect.gen(function* () {
-    const pullRequestsCheck: RequireMcpCapabilityEffect =
-      McpInvocationContext.requireMcpCapability("pull-requests");
-    const error = yield* pullRequestsCheck.pipe(
+    const error = yield* McpInvocationContext.requireMcpCapability("pull-requests").pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
       Effect.flip,
     );
 
     expect(error).toBeInstanceOf(McpCapabilityUnavailableError);
-    expect(error).toMatchObject({ capability: "pull-requests", threadId: invocation.threadId });
+    expect(error).toMatchObject({
+      capability: "pull-requests",
+      threadId: invocation.thread?.threadId,
+    });
 
-    const previewCheck: RequireMcpCapabilityEffect =
-      McpInvocationContext.requireMcpCapability("preview");
-    const scope = yield* previewCheck.pipe(
+    const scope = yield* McpInvocationContext.requireMcpCapability("preview").pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
     );
     expect(scope).toBe(invocation);
+  });
+});
+
+it.effect("refuses thread-owned capabilities to a caller signed in from outside a thread", () => {
+  const invocation: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment-1"),
+    requestNamespace: "client:session-1",
+    thread: undefined,
+    client: { sessionId: "session-1", label: "Claude Code", access: "auto" },
+    capabilities: new Set(["preview", "orchestration"]),
+    issuedAt: 1,
+  };
+
+  return Effect.gen(function* () {
+    const error = yield* McpInvocationContext.requireThreadMcpCapability("preview").pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+      Effect.flip,
+    );
+    expect(error).toBeInstanceOf(PreviewAutomationUnavailableError);
+    expect(error).toMatchObject({ capability: "preview", environmentId: "environment-1" });
+    expect(error.threadId).toBeUndefined();
   });
 });

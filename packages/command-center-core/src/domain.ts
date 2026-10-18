@@ -20,8 +20,8 @@ export const Confidence = Schema.Number.check(Schema.isBetween({ minimum: 0, max
 export const Timestamp = TrimmedNonEmptyString;
 export type Timestamp = typeof Timestamp.Type;
 
-const makeEntityId = <Brand extends string>(brand: Brand) =>
-  TrimmedNonEmptyString.pipe(Schema.brand(brand));
+const makeEntityId = <Brand extends string>(brand: Parameters<typeof Schema.brand<Brand>>[0]) =>
+  TrimmedNonEmptyString.pipe(Schema.brand<Brand>(brand));
 
 export const SpaceId = makeEntityId("CommandCenterSpaceId");
 export type SpaceId = typeof SpaceId.Type;

@@ -7,22 +7,72 @@ import {
   resolveProviderModelSelection,
 } from "@command-center/core";
 import {
+  type CommandId,
   type EfficiencyDecision,
   type EfficiencyRule,
   type EfficiencySettings,
   type EfficiencyTierJudgment,
+  type MessageId,
   type ModelSelection,
+  type ProjectId,
+  type ProviderInteractionMode,
+  type RuntimeMode,
   type TaskKind,
+  type ThreadId,
+  type TurnId,
   ProviderInstanceId,
-  type OrchestrationCommand,
-  type OrchestrationThreadShell,
   type ServerProvider,
 } from "@t3tools/contracts";
 
 import { providerAvailability } from "../command-center/ProviderAvailability.ts";
 import { assignExperiment } from "./Experiments.ts";
 
-type TurnStartCommand = Extract<OrchestrationCommand, { readonly type: "thread.turn.start" }>;
+type RoutingMode = "manual" | "auto";
+
+/**
+ * The turn-start fields efficiency routing reads and rewrites. Routing used to
+ * run on the V1 `thread.turn.start` command, whose schema was deleted with the
+ * V1 engine. On V2 the client-turn router (`ClientTurnRouting.ts`) and the
+ * settings preview RPC build this shape from a V2 `message.dispatch` or launch
+ * plus the thread's side-channel routing state.
+ */
+export interface TurnStartCommand {
+  readonly type: "thread.turn.start";
+  readonly commandId: CommandId;
+  readonly threadId: ThreadId;
+  readonly message: {
+    readonly messageId: MessageId;
+    readonly role: "user";
+    readonly text: string;
+    readonly attachments: ReadonlyArray<unknown>;
+  };
+  readonly modelSelection?: ModelSelection;
+  readonly routingMode?: RoutingMode;
+  readonly efficiencyTier?: EfficiencyTier;
+  readonly efficiencyDecision?: EfficiencyDecision;
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+  readonly retryOfTurnId?: TurnId;
+  readonly bootstrap?: {
+    readonly createThread?: {
+      readonly projectId: ProjectId;
+      readonly modelSelection: ModelSelection;
+      readonly routingMode?: RoutingMode;
+      readonly efficiencyTier?: EfficiencyTier;
+      readonly [field: string]: unknown;
+    };
+    readonly [field: string]: unknown;
+  };
+  readonly createdAt: string;
+}
+
+/** The thread fields routing reads (V1 shell shape; see {@link TurnStartCommand}). */
+export interface RoutingThread {
+  readonly projectId: ProjectId;
+  readonly modelSelection: ModelSelection;
+  readonly routingMode?: RoutingMode;
+  readonly efficiencyTier?: EfficiencyTier;
+}
 
 /**
  * A resolved judge complexity judgment for this turn, produced by the caller
@@ -43,7 +93,7 @@ export interface TierJudgmentInput {
 
 export interface InteractiveEfficiencyInput {
   readonly command: TurnStartCommand;
-  readonly thread?: OrchestrationThreadShell;
+  readonly thread?: RoutingThread;
   readonly settings: EfficiencySettings;
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly projectIdOverride?: string;
@@ -102,7 +152,7 @@ function matchesRule(
 
 function fallbackSelection(
   command: TurnStartCommand,
-  thread: OrchestrationThreadShell | undefined,
+  thread: RoutingThread | undefined,
 ): ModelSelection | undefined {
   return (
     command.modelSelection ??
@@ -113,7 +163,7 @@ function fallbackSelection(
 
 function effectiveRoutingMode(
   command: TurnStartCommand,
-  thread: OrchestrationThreadShell | undefined,
+  thread: RoutingThread | undefined,
 ): "manual" | "auto" {
   return (
     command.routingMode ??
@@ -445,20 +495,28 @@ export function resolveInteractiveEfficiency(
 }
 
 /**
- * Whether a routed selection is one the thread's already-bound session cannot
- * serve: a different provider driver, or a model change on a provider that
- * needs a new thread for one. The provider command reactor rejects both, so
- * such a turn runs in a subagent thread instead. Unknown instances return
- * false and keep today's behaviour.
+ * Whether a routed selection is one the thread's bound provider should not
+ * serve in place: a different provider driver, or a model change on a
+ * provider that needs a new thread for one. Such a turn runs in a routed child
+ * thread instead (see `ClientTurnRouting.ts`). A thread not yet bound to a
+ * provider thread switches in place, and unknown instances return false and
+ * keep the dispatch path's own error.
+ *
+ * V2 itself can hand a thread across drivers (`create_with_handoff`); the
+ * child keeps the parent bound to the provider the user chose for it.
  */
 export function routedSelectionNeedsSubagent(input: {
-  readonly thread: OrchestrationThreadShell;
+  readonly thread: {
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly modelSelection: ModelSelection;
+    /** The thread already has a provider thread (V1: a bound session). */
+    readonly bound: boolean;
+  };
   readonly selection: ModelSelection;
   readonly providers: ReadonlyArray<ServerProvider>;
 }): boolean {
-  const session = input.thread.session;
-  if (session === null) return false;
-  const boundInstanceId = session.providerInstanceId ?? input.thread.modelSelection.instanceId;
+  if (!input.thread.bound) return false;
+  const boundInstanceId = input.thread.providerInstanceId;
   const bound = input.providers.find((provider) => provider.instanceId === boundInstanceId);
   const routed = input.providers.find(
     (provider) => provider.instanceId === input.selection.instanceId,

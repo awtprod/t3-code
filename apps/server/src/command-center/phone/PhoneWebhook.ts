@@ -37,8 +37,8 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import * as SqlClient from "effect/sql/SqlClient";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { ServerSecretStore } from "../../auth/ServerSecretStore.ts";
 import { CommandCenterReadinessGate } from "../ReadinessGate.ts";

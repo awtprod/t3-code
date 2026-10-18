@@ -1,5 +1,5 @@
 import { expect, it } from "@effect/vitest";
-import { Tool } from "effect/unstable/ai";
+import { Tool } from "effect/ai";
 
 import {
   codexDefaultModeDeveloperInstructions,
@@ -39,7 +39,11 @@ it("records the committed static-context baseline", () => {
     // remains for the tool-unavailable case).
     // 2026-10: -2 bytes from upstream v0.0.45 joining the tool blocks with
     // "\n\n" (tools now ride turn additionalContext; baseline measures both).
-    collaborationInstructions: { defaultBytes: 2_163, planBytes: 10_300 },
+    // 2026-10: +887 bytes from upstream v0.1.0's developer instructions (re-platform
+    // onto orchestration v2); Command Center's own additions are unchanged.
+    // 2026-10: +14 bytes: the collaborative-browser block names Command Center
+    // instead of T3 Code again (two mentions).
+    collaborationInstructions: { defaultBytes: 3_064, planBytes: 11_201 },
     // 2026-09: +1,938 bytes for the optional `database` selector on the nine
     // Supabase tools (multi-database projects).
     // 2026-09: +76 bytes for the `prospect.evaluate`/`prospect.notify`
@@ -55,9 +59,10 @@ it("records the committed static-context baseline", () => {
     // 2026-10: +560 bytes for `cc_items_update` (status/title/description only).
     // 2026-10: +3 bytes net from the upstream v0.0.45 sync (preview_snapshot
     // `save` text, effect rc.115 and shared contract schema changes).
-    // 2026-10: +1,298 bytes for the Space agent phone tools `cc_phone_call_me`
-    // and `cc_phone_call` (approval-gated; only Spaces that opt in see them).
-    mcp: { toolCount: 41, schemaBytes: 28_114, toolkitCounts: [14, 18, 9] },
+    // 2026-10: upstream v0.1.0 adds five preview tools (14 -> 19); the Space agent
+    // phone tools `cc_phone_call_me` and `cc_phone_call` (approval-gated; only Spaces
+    // that opt in see them) take Command Center from 16 to 18. Supabase (9) unchanged.
+    mcp: { toolCount: 46, schemaBytes: 35_769, toolkitCounts: [19, 18, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

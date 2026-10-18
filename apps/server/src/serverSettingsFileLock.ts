@@ -5,10 +5,10 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import type * as SqlConnection from "effect/unstable/sql/SqlConnection";
+import * as SqlClient from "effect/sql/SqlClient";
+import type * as SqlConnection from "effect/sql/SqlConnection";
 
-import { makeRuntimeSqliteLayer } from "./persistence/Layers/Sqlite.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const LOCK_ATTEMPTS = 40;
 const LOCK_RETRY_DELAY = Duration.millis(25);
@@ -146,7 +146,7 @@ export const withServerSettingsFileLock = <A, E, R>(
         );
       }).pipe(
         Effect.provide(
-          makeRuntimeSqliteLayer({
+          NodeSqliteClient.layer({
             filename: lockPath,
             spanAttributes: {
               "db.name": path.basename(lockPath),
@@ -156,6 +156,9 @@ export const withServerSettingsFileLock = <A, E, R>(
         ),
       ),
     ).pipe(
+      // The caller's error channel is generic, which `catchTags` cannot type; this maps
+      // the lock database's SqlError (opening the lock file), as before the lint rule.
+      // oxlint-disable-next-line t3code/prefer-catch-tags
       Effect.catchTag(
         "SqlError",
         (cause) => new ServerSettingsFileLockError({ settingsPath, operation: "open", cause }),

@@ -73,7 +73,7 @@ export const ChatVideoClipTile = memo(function ChatVideoClipTile(props: {
       aria-label={`Play ${props.name}`}
       className={cn(
         TILE_CLASS_NAME,
-        "group cursor-zoom-in text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70",
+        "group cursor-zoom-in text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
       )}
       onClick={(event) => {
         event.preventDefault();

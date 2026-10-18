@@ -4,8 +4,8 @@ import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { HttpServer } from "effect/unstable/http";
-import * as NetAddress from "effect/unstable/net/NetAddress";
+import { HttpServer } from "effect/http";
+import * as NetAddress from "effect/net/NetAddress";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
@@ -40,6 +40,13 @@ const activeRegistryLayer = McpSessionRegistry.layer.pipe(
   Layer.provide(NodeServices.layer),
 );
 
+/** Upstream's base grants, carried by every thread credential without a registered scope. */
+const BASE_THREAD_CAPABILITIES = ["orchestration", "pull-requests", "worktree"] as const;
+const sortedCapabilities = (capabilities: ReadonlySet<string> | undefined) =>
+  [...(capabilities ?? [])].sort();
+const withBase = (...capabilities: ReadonlyArray<string>) =>
+  [...BASE_THREAD_CAPABILITIES, ...capabilities].sort();
+
 it.effect("stores only a token hash, resolves the bearer token, and revokes by thread", () =>
   Effect.gen(function* () {
     let timestamp = 1_000;
@@ -55,7 +62,10 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
     expect(token.length).toBeGreaterThan(20);
 
     const resolved = yield* registry.resolve(token);
-    expect(resolved?.threadId).toBe(threadId);
+    expect(resolved?.thread.threadId).toBe(threadId);
+    expect(resolved?.capabilities).toEqual(
+      new Set(["preview", "orchestration", "worktree", "pull-requests"]),
+    );
 
     yield* registry.revokeThread(threadId);
     expect(yield* registry.resolve(token)).toBeUndefined();
@@ -64,90 +74,47 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
   }),
 );
 
-it.effect("binds project and working-directory scope into the issued credential", () =>
+it.effect("always grants pull-requests and gates browser and device access independently", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry(() => 1_000);
-    const issued = yield* registry.issue({
-      threadId: ThreadId.make("thread-project-scope"),
-      providerInstanceId: ProviderInstanceId.make("codex"),
-      projectId: ProjectId.make("project-a"),
-      cwd: "  /work/project-a  ",
-    });
-    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
-    const resolved = yield* registry.resolve(token);
-
-    expect(resolved?.projectId).toBe("project-a");
-    expect(resolved?.cwd).toBe("/work/project-a");
-  }),
-);
-
-it.effect("derives read-only and writable database capabilities at credential issue time", () =>
-  Effect.gen(function* () {
-    const registry = yield* makeRegistry(() => 1_000);
-    const issueCapabilities = Effect.fnUntraced(function* (databaseAccess: "read" | "write") {
-      const issued = yield* registry.issue({
-        threadId: ThreadId.make(`thread-database-${databaseAccess}`),
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        databaseAccess,
-      });
-      const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
-      return (yield* registry.resolve(token))?.capabilities ?? new Set();
-    });
-
-    expect([...(yield* issueCapabilities("read"))]).toEqual(["preview", "database.read"]);
-    expect([...(yield* issueCapabilities("write"))]).toEqual([
-      "preview",
-      "database.read",
-      "database.write",
-    ]);
-  }),
-);
-
-it.effect("issues database-only credentials when preview is explicitly omitted", () =>
-  Effect.gen(function* () {
-    const registry = yield* makeRegistry(() => 1_000);
-    const issueCapabilities = Effect.fnUntraced(function* (databaseAccess: "read" | "write") {
-      const issued = yield* registry.issue({
-        threadId: ThreadId.make(`thread-database-only-${databaseAccess}`),
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        capabilities: new Set(),
-        databaseAccess,
-      });
-      const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
-      const resolved = yield* registry.resolve(token);
-      expect(issued.config.capabilities).toEqual(resolved?.capabilities);
-      return resolved?.capabilities ?? new Set();
-    });
-
-    expect([...(yield* issueCapabilities("read"))]).toEqual(["database.read"]);
-    expect([...(yield* issueCapabilities("write"))]).toEqual(["database.read", "database.write"]);
-  }),
-);
-
-it.effect("revokes the previous preview credential when a thread is re-issued database-only", () =>
-  Effect.gen(function* () {
-    const registry = yield* McpSessionRegistry.McpSessionRegistry;
-    const threadId = ThreadId.make("thread-reprepare-database-only");
-    const first = yield* McpSessionRegistry.issueActiveMcpCredential({
-      threadId,
+    const withPreview = yield* registry.issue({
+      threadId: ThreadId.make("thread-preview"),
       providerInstanceId: ProviderInstanceId.make("codex"),
       capabilities: new Set(["preview"]),
     });
-    const firstToken = first?.config.authorizationHeader.replace(/^Bearer\s+/, "") ?? "";
-
-    const second = yield* McpSessionRegistry.issueActiveMcpCredential({
-      threadId,
+    const withoutPreview = yield* registry.issue({
+      threadId: ThreadId.make("thread-no-preview"),
       providerInstanceId: ProviderInstanceId.make("codex"),
       capabilities: new Set(),
-      databaseAccess: "read",
     });
-    const secondToken = second?.config.authorizationHeader.replace(/^Bearer\s+/, "") ?? "";
+    const withDevice = yield* registry.issue({
+      threadId: ThreadId.make("thread-device"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(["device"]),
+    });
+    const capabilitiesOf = (issued: typeof withPreview) =>
+      registry
+        .resolve(issued.config.authorizationHeader.replace(/^Bearer\s+/, ""))
+        .pipe(Effect.map((scope) => [...(scope?.capabilities ?? [])].sort()));
 
-    expect(firstToken.length).toBeGreaterThan(20);
-    expect(secondToken.length).toBeGreaterThan(20);
-    expect(yield* registry.resolve(firstToken)).toBeUndefined();
-    expect([...(yield* registry.resolve(secondToken))!.capabilities]).toEqual(["database.read"]);
-  }).pipe(Effect.provide(activeRegistryLayer)),
+    expect(yield* capabilitiesOf(withPreview)).toEqual([
+      "orchestration",
+      "preview",
+      "pull-requests",
+      "worktree",
+    ]);
+    expect(yield* capabilitiesOf(withoutPreview)).toEqual([
+      "orchestration",
+      "pull-requests",
+      "worktree",
+    ]);
+    expect(yield* capabilitiesOf(withDevice)).toEqual([
+      "device",
+      "orchestration",
+      "pull-requests",
+      "worktree",
+    ]);
+  }),
 );
 
 it.effect("builds MCP endpoints from the bound server host", () =>
@@ -187,6 +154,93 @@ it.effect("expires credentials once their session stops showing signs of life", 
   }),
 );
 
+it.effect("binds project and working-directory scope into the issued credential", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issued = yield* registry.issue({
+      threadId: ThreadId.make("thread-project-scope"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      projectId: ProjectId.make("project-a"),
+      cwd: "  /work/project-a  ",
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const resolved = yield* registry.resolve(token);
+
+    expect(resolved?.projectId).toBe("project-a");
+    expect(resolved?.cwd).toBe("/work/project-a");
+  }),
+);
+
+it.effect("derives read-only and writable database capabilities at credential issue time", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issueCapabilities = Effect.fnUntraced(function* (databaseAccess: "read" | "write") {
+      const issued = yield* registry.issue({
+        threadId: ThreadId.make(`thread-database-${databaseAccess}`),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        databaseAccess,
+      });
+      const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+      return sortedCapabilities((yield* registry.resolve(token))?.capabilities);
+    });
+
+    expect(yield* issueCapabilities("read")).toEqual(withBase("preview", "database.read"));
+    expect(yield* issueCapabilities("write")).toEqual(
+      withBase("preview", "database.read", "database.write"),
+    );
+  }),
+);
+
+it.effect("issues database-only credentials when preview is explicitly omitted", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issueCapabilities = Effect.fnUntraced(function* (databaseAccess: "read" | "write") {
+      const issued = yield* registry.issue({
+        threadId: ThreadId.make(`thread-database-only-${databaseAccess}`),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        capabilities: new Set(),
+        databaseAccess,
+      });
+      const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+      const resolved = yield* registry.resolve(token);
+      expect(issued.config.capabilities).toEqual(resolved?.capabilities);
+      expect(issued.config.browserToolsAvailable).toBe(false);
+      return sortedCapabilities(resolved?.capabilities);
+    });
+
+    expect(yield* issueCapabilities("read")).toEqual(withBase("database.read"));
+    expect(yield* issueCapabilities("write")).toEqual(withBase("database.read", "database.write"));
+  }),
+);
+
+it.effect("revokes the previous preview credential when a thread is re-issued database-only", () =>
+  Effect.gen(function* () {
+    const registry = yield* McpSessionRegistry.McpSessionRegistry;
+    const threadId = ThreadId.make("thread-reprepare-database-only");
+    const first = yield* McpSessionRegistry.issueActiveMcpCredential({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(["preview"]),
+    });
+    const firstToken = first?.config.authorizationHeader.replace(/^Bearer\s+/, "") ?? "";
+
+    const second = yield* McpSessionRegistry.issueActiveMcpCredential({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(),
+      databaseAccess: "read",
+    });
+    const secondToken = second?.config.authorizationHeader.replace(/^Bearer\s+/, "") ?? "";
+
+    expect(firstToken.length).toBeGreaterThan(20);
+    expect(secondToken.length).toBeGreaterThan(20);
+    expect(yield* registry.resolve(firstToken)).toBeUndefined();
+    expect(sortedCapabilities((yield* registry.resolve(secondToken))?.capabilities)).toEqual(
+      withBase("database.read"),
+    );
+  }).pipe(Effect.provide(activeRegistryLayer)),
+);
+
 it.effect("binds registered Command Center capabilities to one Space and repository", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry(() => 1_000);
@@ -211,10 +265,41 @@ it.effect("binds registered Command Center capabilities to one Space and reposit
     expect(resolved?.spaceId).toBe(spaceId);
     expect(resolved?.repositoryId).toBe(repositoryId);
     expect(resolved?.memoryWriteMode).toBe("remember");
-    expect([...((resolved?.capabilities ?? new Set()) as ReadonlySet<string>)]).toEqual([
+    // The registered scope replaces the requested capabilities (no preview).
+    expect(sortedCapabilities(resolved?.capabilities)).toEqual(["cc.items.read", "cc.runs.start"]);
+  }),
+);
+
+it.effect("gives a registered Command Center scope none of the base thread grants", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("thread-command-center-narrow");
+    yield* registry.registerThreadScope(threadId, {
+      spaceId: SpaceId.make("space-example"),
+      capabilities: new Set(["cc.items.read"]),
+      memoryWriteMode: "propose",
+    });
+
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(["preview", "orchestration", "worktree", "pull-requests"]),
+      databaseAccess: "write",
+    });
+    const resolved = yield* registry.resolve(
+      issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+    );
+
+    // Only the registered scope plus the database grant, never upstream's base grants.
+    expect(sortedCapabilities(resolved?.capabilities)).toEqual([
       "cc.items.read",
-      "cc.runs.start",
+      "database.read",
+      "database.write",
     ]);
+    for (const capability of BASE_THREAD_CAPABILITIES) {
+      expect(resolved?.capabilities.has(capability)).toBe(false);
+    }
+    expect(issued.config.browserToolsAvailable).toBe(false);
   }),
 );
 
@@ -252,7 +337,7 @@ it.effect("keeps a credential alive across turns that never touch an MCP tool", 
       yield* registry.touch(threadId);
     }
 
-    expect((yield* registry.resolve(token))?.threadId).toBe(threadId);
+    expect((yield* registry.resolve(token))?.thread.threadId).toBe(threadId);
   }),
 );
 
@@ -313,9 +398,9 @@ it.effect("derives a durable Space agent scope that survives revocation and rest
     const first = yield* issueAndResolve(registry);
     expect(first?.role).toBe("space-agent");
     expect(first?.memoryWriteMode).toBe("remember");
-    expect([...((first?.capabilities ?? new Set()) as ReadonlySet<string>)]).toEqual([
-      "cc.memory.read",
+    expect(sortedCapabilities(first?.capabilities)).toEqual([
       "cc.memory.propose",
+      "cc.memory.read",
     ]);
 
     // A provider-session stop revokes the thread and clears registered scopes.
@@ -332,9 +417,8 @@ it.effect("derives a durable Space agent scope that survives revocation and rest
     const disabled = yield* issueAndResolve(restarted);
     expect(disabled?.role).toBeUndefined();
     expect(disabled?.spaceId).toBeUndefined();
-    expect([...((disabled?.capabilities ?? new Set()) as ReadonlySet<string>)]).toEqual([
-      "preview",
-    ]);
+    // Without a scope the thread is an ordinary one again and keeps upstream's grants.
+    expect(sortedCapabilities(disabled?.capabilities)).toEqual(withBase("preview"));
   }),
 );
 

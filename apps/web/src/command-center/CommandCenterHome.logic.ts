@@ -203,8 +203,9 @@ function providerLabel(provider: ServerProvider): string {
   return provider.displayName ?? provider.driver ?? provider.instanceId;
 }
 
+/** Command Center Runs need Codex's isolation profile, so routing offers Codex only. */
 function supportsCommandCenterRouting(provider: ServerProvider): boolean {
-  return provider.driver === "codex" || provider.capabilities?.commandCenterAutomation === true;
+  return provider.driver === "codex";
 }
 
 function isUsableCommandCenterProvider(provider: ServerProvider): boolean {
