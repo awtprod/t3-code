@@ -168,7 +168,7 @@ it.layer(testLayer)("SpaceActivity service", (it) => {
     }),
   );
 
-  it.effect("keeps an explicit link and ignores sequence-0 rows in the resume cursor", () =>
+  it.effect("shows phone rows in recent, unlike mail rows, and keeps them out of the cursor", () =>
     Effect.gen(function* () {
       yield* insertSpace("phones");
       const activity = yield* SpaceActivity;
@@ -181,11 +181,30 @@ it.layer(testLayer)("SpaceActivity service", (it) => {
           url: "https://api.elevenlabs.io/v1/convai/conversations/conv_1",
         }),
       ).toBe(true);
+      // A newer mail row with the same sequence 0: hidden unless asked for.
+      expect(
+        yield* activity.record({
+          ...row({
+            sequence: SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
+            occurredAt: secondsAfterNow(1),
+          }),
+          spaceId: "phones",
+          sourceKind: "run",
+          sourceId: "gmail:thread-9:1",
+        }),
+      ).toBe(true);
+      // The layer's database is shared and the next test asserts no Run cursor
+      // yet, so no run row with a real sequence is written here.
       expect(yield* activity.latestEventSequence("run")).toBeUndefined();
-      const [entry] = yield* activity.recent({ spaceId: "phones", includeExternal: true });
-      expect(entry?.url).toBe("https://api.elevenlabs.io/v1/convai/conversations/conv_1");
-      // No run row with a real sequence here: the layer's database is shared, and
-      // the next test owns "a real run row moves the cursor".
+      const visible = yield* activity.recent({ spaceId: "phones" });
+      expect(visible.map((entry) => [entry.sourceId, entry.url])).toEqual([
+        ["phone-start:conv_1", "https://api.elevenlabs.io/v1/convai/conversations/conv_1"],
+      ]);
+      const all = yield* activity.recent({ spaceId: "phones", includeExternal: true });
+      expect(all.map((entry) => entry.sourceId)).toEqual([
+        "gmail:thread-9:1",
+        "phone-start:conv_1",
+      ]);
     }),
   );
 

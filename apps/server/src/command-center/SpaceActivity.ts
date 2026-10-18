@@ -10,7 +10,8 @@
  * reads it through `recent` (brief and the `cc_space_activity` MCP tool).
  * Externally observed rows (Google mail and calendar, `GoogleActivityPoller`)
  * share the table but reach the agent only through its wake delta: `recent`
- * leaves them out unless a caller opts in.
+ * leaves them out unless a caller opts in. Phone call rows are also written
+ * outside the event logs, but `recent` returns them.
  *
  * @module SpaceActivity
  */
@@ -30,15 +31,25 @@ const SPACE_ACTIVITY_TITLE_CHARS = 200;
 /** The table's `url` CHECK; a longer URL is dropped rather than clipped into a broken link. */
 const SPACE_ACTIVITY_URL_CHARS = 500;
 /**
- * Event sequence of rows observed outside the orchestration and audit event
- * logs (Google mail and calendar, `GoogleActivityPoller`). Those rows reuse the
- * `run` source kind (the table's CHECK allows only `thread` and `run`) with a
- * namespaced source id such as `gmail:<threadId>:<count>`, so the unique key
- * still dedupes them. Both event logs number from 1 (AUTOINCREMENT), so
- * sequence 0 marks exactly these rows: it keeps them out of every reactor
- * cursor and out of `recent` unless a caller opts in.
+ * Event sequence of rows that did not come from the orchestration or audit
+ * event logs: Google mail and calendar (`GoogleActivityPoller`) and phone calls
+ * (`phone/PhoneCalls.ts`, `phone/PhoneWebhook.ts`). Those rows reuse the `run`
+ * source kind (the table's CHECK allows only `thread` and `run`) with a
+ * namespaced source id such as `gmail:<threadId>:<count>` or
+ * `phone-start:<conversationId>`, so the unique key still dedupes them. Both
+ * event logs number from 1 (AUTOINCREMENT), so sequence 0 marks exactly these
+ * rows and keeps them out of every reactor cursor. `recent` hides the Google
+ * rows unless a caller opts in with `includeExternal`, and shows phone rows
+ * either way.
  */
 export const SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE = 0;
+/**
+ * Phone call rows: `run` rows whose source id starts with `phone-`. The one
+ * discriminator for both rules that single them out: the prune keeps them, and
+ * `recent` returns them without `includeExternal`.
+ */
+const PHONE_ROW_SOURCE_KIND: SpaceActivitySourceKind = "run";
+const PHONE_ROW_SOURCE_ID_PATTERN = "phone-%";
 /** Rows kept per Space (phone rows excepted); older rows are pruned on insert. */
 export const SPACE_ACTIVITY_RETENTION = 500;
 export const SPACE_ACTIVITY_MAX_LIMIT = 50;
@@ -135,7 +146,8 @@ export interface SpaceActivityRecord {
    * The orchestration or audit event sequence the row came from. Rows that do
    * not come from an event log (phone calls, Google mail and calendar) use
    * `SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE` (0), which the reactor's resume
-   * cursor ignores and `recent` leaves out unless `includeExternal`.
+   * cursor ignores; `recent` returns the phone rows and hides the Google rows
+   * unless `includeExternal`.
    */
   readonly eventSequence: number;
   /** A link the source supplies itself; otherwise the newest PR URL in `text` is used. */
@@ -150,10 +162,11 @@ export interface SpaceActivityQuery {
   readonly maxLimit?: number;
   /**
    * Return externally observed rows (sequence `SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE`:
-   * Google mail and calendar) too. Off by default: they carry Google data that
-   * a reader holding only `cc.items.read` must not see, and a poll's worth of
-   * them would crowd thread and Run rows out of a bounded list. The Space agent
-   * receives them in its wake delta; only the owner's activity view opts in.
+   * Google mail and calendar) too; phone rows are returned either way. Off by
+   * default: they carry Google data that a reader holding only `cc.items.read`
+   * must not see, and a poll's worth of them would crowd thread and Run rows
+   * out of a bounded list. The Space agent receives them in its wake delta;
+   * only the owner's activity view opts in.
    */
   readonly includeExternal?: boolean;
 }
@@ -161,7 +174,7 @@ export interface SpaceActivityQuery {
 export interface SpaceActivityShape {
   /**
    * Newest first. `limit` is clamped to 1..`maxLimit` (default 20, max 50).
-   * Externally observed rows are left out unless `includeExternal`.
+   * Google mail and calendar rows are left out unless `includeExternal`.
    */
   readonly recent: (
     input: SpaceActivityQuery,
@@ -207,7 +220,7 @@ const persistenceError = (message: string) => (cause: unknown) =>
 
 /**
  * The newest activity rows of a Space (newest first, limit clamped to
- * 1..`maxLimit`, default 50), without externally observed rows unless
+ * 1..`maxLimit`, default 50), without Google mail and calendar rows unless
  * `includeExternal`. The one reader of the feed for tools and briefs: shared by
  * `SpaceActivity.recent` and the Space brief loader, which only has a
  * `SqlClient`. The filter is in SQL, so the limit counts only returned rows.
@@ -238,7 +251,9 @@ export const queryRecentSpaceActivity = (
       WHERE space_id = ${input.spaceId}
         AND (${since} IS NULL OR occurred_at > ${since})
         AND (${includeExternal} = 1
-          OR event_sequence <> ${SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE})
+          OR event_sequence <> ${SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE}
+          OR (source_kind = ${PHONE_ROW_SOURCE_KIND}
+            AND source_id LIKE ${PHONE_ROW_SOURCE_ID_PATTERN}))
       ORDER BY occurred_at DESC, id DESC
       LIMIT ${limit}
     `.pipe(Effect.mapError(persistenceError("Could not read Space activity.")));
@@ -281,11 +296,13 @@ export const make = Effect.gen(function* () {
           yield* sql`
             DELETE FROM command_center_space_activity
             WHERE space_id = ${input.spaceId}
-              AND NOT (source_kind = 'run' AND source_id LIKE 'phone-%')
+              AND NOT (source_kind = ${PHONE_ROW_SOURCE_KIND}
+                AND source_id LIKE ${PHONE_ROW_SOURCE_ID_PATTERN})
               AND id NOT IN (
                 SELECT id FROM command_center_space_activity
                 WHERE space_id = ${input.spaceId}
-                  AND NOT (source_kind = 'run' AND source_id LIKE 'phone-%')
+                  AND NOT (source_kind = ${PHONE_ROW_SOURCE_KIND}
+                    AND source_id LIKE ${PHONE_ROW_SOURCE_ID_PATTERN})
                 ORDER BY occurred_at DESC, id DESC
                 LIMIT ${SPACE_ACTIVITY_RETENTION}
               )
