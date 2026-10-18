@@ -221,6 +221,13 @@ import * as RunRecoveryCoordinator from "./command-center/RunRecoveryCoordinator
 import * as SpaceAgent from "./command-center/SpaceAgent.ts";
 import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
 import * as SpaceActivityReactor from "./command-center/SpaceActivityReactor.ts";
+import * as GoogleActivity from "./command-center/GoogleActivity.ts";
+import * as GoogleActivityPoller from "./command-center/GoogleActivityPoller.ts";
+import * as ElevenLabsClient from "./command-center/phone/ElevenLabsClient.ts";
+import * as PhoneCallProposals from "./command-center/phone/PhoneCallProposals.ts";
+import * as PhoneCalls from "./command-center/phone/PhoneCalls.ts";
+import * as PhoneConnection from "./command-center/phone/PhoneConnection.ts";
+import * as PhoneWebhook from "./command-center/phone/PhoneWebhook.ts";
 import * as RunLifecycle from "./command-center/RunLifecycle.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import * as OrchestrationBridge from "./command-center/OrchestrationBridge.ts";
@@ -838,11 +845,18 @@ const layerRunRecoveryCoordinator = RunRecoveryCoordinator.layer.pipe(
   Layer.provide(layerPersistence),
 );
 
+const layerGoogleActivityBrief = GoogleActivity.layer.pipe(Layer.provide(layerCommandCenterBase));
+
 const layerSpaceAgent = SpaceAgent.layer.pipe(
   Layer.provide(layerRunDispatcher),
   Layer.provide(layerCommandCenterBase),
   Layer.provide(layerCommandCenterOrchestrationBridge),
+  Layer.provide(layerGoogleActivityBrief),
   Layer.provide(layerPersistence),
+);
+
+const layerGoogleActivityPoller = GoogleActivityPoller.layer.pipe(
+  Layer.provide(layerCommandCenterBase),
 );
 
 const layerSpaceActivityReactor = SpaceActivityReactor.layer.pipe(
@@ -854,6 +868,22 @@ const layerSpaceActivityReactor = SpaceActivityReactor.layer.pipe(
 
 const layerSpaceAgentWaker = SpaceAgentWaker.layer.pipe(
   Layer.provide(layerSpaceAgent),
+  Layer.provide(layerPersistence),
+);
+
+const layerPhoneConnection = PhoneConnection.layer.pipe(Layer.provide(ServerSecretStore.layer));
+
+const layerPhoneCalls = PhoneCalls.layer.pipe(
+  Layer.provideMerge(layerPhoneConnection),
+  Layer.provide(ElevenLabsClient.layer),
+  Layer.provide(layerCommandCenterBase),
+  Layer.provide(layerPersistence),
+);
+
+/** Outbound calls and approval-gated third-party calls (the webhook route builds its own service). */
+const layerPhone = PhoneCallProposals.layer.pipe(
+  Layer.provideMerge(layerPhoneCalls),
+  Layer.provide(layerCommandCenterBase),
   Layer.provide(layerPersistence),
 );
 
@@ -881,6 +911,8 @@ const layerCommandCenter = Layer.mergeAll(
   layerSpaceAgent,
   layerSpaceAgentWaker,
   layerSpaceActivityReactor,
+  layerPhone,
+  layerGoogleActivityPoller,
   layerCommandCenterOrchestrationBridge,
   SprintPlan.layer.pipe(Layer.provide(layerPersistence)),
   ReadinessGate.layer,
@@ -1122,6 +1154,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerBrowserStream.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
     webhookHttpRouteLayer,
+    PhoneWebhook.phoneWebhookHttpRouteLayer,
     Ws.layer,
   ),
   // The MCP session registry is provided globally (shared with V2 provider

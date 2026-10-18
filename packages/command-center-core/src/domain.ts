@@ -73,6 +73,8 @@ export const CapabilityName = Schema.Literals([
   "cc.sales.propose",
   "cc.sales.write",
   "cc.runs.start",
+  "cc.phone.call-owner",
+  "cc.phone.call",
 ]);
 export type CapabilityName = typeof CapabilityName.Type;
 
@@ -93,12 +95,28 @@ export const CAPABILITY_NAMES: ReadonlyArray<CapabilityName> = [
   "cc.sales.propose",
   "cc.sales.write",
   "cc.runs.start",
+  "cc.phone.call-owner",
+  "cc.phone.call",
 ];
 
 /** Capabilities that may be issued for new routes and credentials. */
 export const ACTIVE_CAPABILITY_NAMES: ReadonlyArray<CapabilityName> = CAPABILITY_NAMES.filter(
   (capability) => capability !== "cc.connections.google.read",
 );
+
+/**
+ * Capabilities a Space only has when its policy lists them: placing phone
+ * calls reaches people outside the system, so it is never implied by a
+ * Space that omits `policy.allowedCapabilities`.
+ */
+export const OPT_IN_CAPABILITY_NAMES: ReadonlyArray<CapabilityName> = [
+  "cc.phone.call-owner",
+  "cc.phone.call",
+];
+
+/** The policy of a Space whose config lists no `allowedCapabilities`. */
+export const DEFAULT_SPACE_CAPABILITY_NAMES: ReadonlyArray<CapabilityName> =
+  ACTIVE_CAPABILITY_NAMES.filter((capability) => !OPT_IN_CAPABILITY_NAMES.includes(capability));
 
 export const RiskLevel = Schema.Literals(["low", "reversible", "approval-required", "blocked"]);
 export type RiskLevel = typeof RiskLevel.Type;

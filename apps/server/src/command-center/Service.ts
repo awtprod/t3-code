@@ -70,7 +70,11 @@ import { configProjectionFingerprint, type ConfigSyncState } from "./ConfigProje
 import { CommandApprovalPayload, makeCommandApprovalPayload } from "./CommandApproval.ts";
 import { spaceAgentRunAuthorizedEventId } from "./SpaceAgentIds.ts";
 import { isSpaceAgentItemMetadata, recordSpaceAgentReply } from "./SpaceAgentReplies.ts";
-import { loadSpaceBriefInput, renderSpaceBrief } from "./SpaceBrief.ts";
+import {
+  loadSpaceBriefInput,
+  renderSpaceBrief,
+  type SpaceBriefMailCalendar,
+} from "./SpaceBrief.ts";
 
 const decodeSpace = Schema.decodeUnknownEffect(Space);
 const decodeItem = Schema.decodeUnknownEffect(Item);
@@ -594,10 +598,16 @@ export interface CommandCenterServiceShape {
       readonly providerInstanceId: string;
     },
   ) => Effect.Effect<CommandCenterCommandSubmitResultType, CommandCenterError>;
-  /** Bounded brief of approved Memory and open Items for one configured Space. */
+  /**
+   * Bounded brief of approved Memory, open Items, and activity for one
+   * configured Space. `mailCalendar` is fetched by a caller that has already
+   * checked the Google read scope (the Space agent turn); it is left out of a
+   * repository-scoped brief, like activity.
+   */
   readonly spaceBrief: (input: {
     readonly spaceId: string;
     readonly repositoryId?: string;
+    readonly mailCalendar?: SpaceBriefMailCalendar | undefined;
   }) => Effect.Effect<CommandCenterSpaceBrief, CommandCenterError>;
   /** The active, configured Space (cached config; fails when absent). */
   readonly getConfiguredSpace: (spaceId: string) => Effect.Effect<SpaceType, CommandCenterError>;
@@ -2980,7 +2990,13 @@ export const layer = Layer.effect(
           repositoryId: input.repositoryId,
           now: DateTime.formatIso(yield* DateTime.now),
         }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
-        return { spaceId: space.id, brief: renderSpaceBrief(briefInput) };
+        return {
+          spaceId: space.id,
+          brief: renderSpaceBrief({
+            ...briefInput,
+            mailCalendar: input.repositoryId === undefined ? input.mailCalendar : undefined,
+          }),
+        };
       }).pipe(
         Effect.mapError((cause) =>
           isCommandCenterError(cause)

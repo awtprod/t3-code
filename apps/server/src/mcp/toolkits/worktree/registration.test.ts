@@ -38,6 +38,8 @@ import * as AutomationDefinitionConfig from "../../../command-center/AutomationD
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts";
+import { PhoneCalls } from "../../../command-center/phone/PhoneCalls.ts";
+import { PhoneCallProposals } from "../../../command-center/phone/PhoneCallProposals.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
 import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
@@ -72,6 +74,8 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
   Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
   Layer.mock(SpaceActivity.SpaceActivity)({}),
+  Layer.mock(PhoneCalls)({}),
+  Layer.mock(PhoneCallProposals)({}),
   Layer.mock(SupabaseMcpConnector.SupabaseMcpConnector)({}),
   ReadinessGate.layer,
 );
