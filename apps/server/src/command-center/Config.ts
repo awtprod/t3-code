@@ -1,5 +1,5 @@
 import {
-  ACTIVE_CAPABILITY_NAMES,
+  DEFAULT_SPACE_CAPABILITY_NAMES,
   type Automation as AutomationType,
   CapabilityName,
   Connection,
@@ -418,7 +418,7 @@ export const layer = Layer.effect(
         instructions,
         policy: {
           allowedCapabilities: expandLegacyGoogleCapabilities(
-            raw.policy?.allowedCapabilities ?? ACTIVE_CAPABILITY_NAMES,
+            raw.policy?.allowedCapabilities ?? DEFAULT_SPACE_CAPABILITY_NAMES,
           ),
           autoRunRiskLevels: raw.policy?.autoRunRiskLevels ?? ["low", "reversible"],
           ...(raw.policy?.observationEligibility === undefined

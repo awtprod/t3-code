@@ -67,6 +67,7 @@ import {
   writeInboxDraft,
   writeInboxPendingReply,
   gmailDraftApprovalBlockedReason,
+  isPhoneCallProposal,
 } from "./InboxScreen.logic";
 
 export interface InboxEnvironmentOption {
@@ -1620,7 +1621,7 @@ export function InboxDetailPane({
                 />
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button
-                    disabled={disabled}
+                    disabled={disabled || (isPhoneCallProposal(candidate.payload) && !canApprove)}
                     onClick={() =>
                       void runMutation("accept-candidate", async () =>
                         acceptCandidate({
@@ -1637,7 +1638,10 @@ export function InboxDetailPane({
                     }
                     size="sm"
                   >
-                    <CheckIcon /> Accept revision
+                    <CheckIcon />{" "}
+                    {isPhoneCallProposal(candidate.payload)
+                      ? "Approve and call"
+                      : "Accept revision"}
                   </Button>
                   <Button
                     disabled={disabled}
@@ -1662,7 +1666,11 @@ export function InboxDetailPane({
                   </Button>
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  Accepting edits the proposal. It does not authorize or execute the action.
+                  {!isPhoneCallProposal(candidate.payload)
+                    ? "Accepting edits the proposal. It does not authorize or execute the action."
+                    : canApprove
+                      ? "Accepting approves this call plan and places the phone call now."
+                      : "Placing this call needs approval authority."}
                 </p>
               </div>
             ))}

@@ -41,6 +41,18 @@ import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
 import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
+import { PhoneNumberE164 } from "../../../command-center/phone/PhoneConnection.ts";
+import {
+  PhoneCalleeName,
+  PhoneCallBrief,
+  PhoneCallOutcome,
+  PhoneCallOutcomeOption,
+  PhoneCallPatchInWhen,
+  PhoneCallPurpose,
+  PhoneCallQuestion,
+  PhoneCalls,
+} from "../../../command-center/phone/PhoneCalls.ts";
+import { PhoneCallProposals } from "../../../command-center/phone/PhoneCallProposals.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { commandCenterCapability } from "../../ToolCapability.ts";
@@ -351,6 +363,76 @@ export const CommandCenterSpaceActivityTool = readonlyTool(
   "cc.items.read",
 );
 
+const CommandCenterPhoneCallMeTool = commandCenterCapability(
+  Tool.make("cc_phone_call_me", {
+    description:
+      "Phone Andrew now to brief him or ask one yes/no question; his spoken answer arrives in a later wake as a reply tagged `phone:<conversationId>` (not an Inbox Item). Use it only when it cannot wait for an Item or push notification. Refused during quiet hours and after 3 calls today in this Space; a refusal returns placed=false with the reason. The brief is read to the in-call voice agent, so keep it short and factual.",
+    parameters: Schema.Struct({
+      spaceId: Schema.optional(SpaceId),
+      purpose: PhoneCallPurpose.annotate({ description: "One line: why you are calling." }),
+      brief: PhoneCallBrief.annotate({
+        description: "What the voice agent should tell Andrew (at most 1,500 characters).",
+      }),
+      question: Schema.optional(
+        PhoneCallQuestion.annotate({ description: "One yes/no question to ask Andrew." }),
+      ),
+    }),
+    success: PhoneCallOutcome,
+    failure,
+    dependencies: [...dependencies, PhoneCalls],
+  })
+    .annotate(Tool.Title, "Phone Andrew")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, false),
+  "cc.phone.call-owner",
+);
+
+const CommandCenterPhoneCallTool = commandCenterCapability(
+  Tool.make("cc_phone_call", {
+    description:
+      "Propose a phone call to a third party. This never dials: it files a decision Item with the full call plan for Andrew to approve in the Inbox, and accepting it places the call. The voice agent can patch Andrew into the call (patchInWhen). The outcome arrives later as Space activity. At most 5 third-party calls are placed per day per Space.",
+    parameters: Schema.Struct({
+      requestId: Schema.String.check(
+        Schema.isMinLength(1),
+        Schema.isMaxLength(120),
+        Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u),
+      ).annotate({ description: "Stable id for this proposal; reusing it returns the same Item." }),
+      spaceId: Schema.optional(SpaceId),
+      to: PhoneNumberE164.annotate({ description: "E.164 number to call, e.g. +15550100000." }),
+      calleeName: PhoneCalleeName.annotate({
+        description: "Who will answer, e.g. a business name.",
+      }),
+      purpose: PhoneCallPurpose.annotate({
+        description: "One line: what the call should achieve.",
+      }),
+      brief: PhoneCallBrief.annotate({
+        description: "Everything the voice agent needs to know (at most 1,500 characters).",
+      }),
+      allowedOutcomes: Schema.Array(PhoneCallOutcomeOption)
+        .check(Schema.isMinLength(1), Schema.isMaxLength(10))
+        .annotate({ description: "What the voice agent may agree to; anything else it declines." }),
+      patchInWhen: Schema.optional(
+        PhoneCallPatchInWhen.annotate({
+          description: "When the voice agent should bridge Andrew into the call.",
+        }),
+      ),
+    }),
+    success: Schema.Struct({
+      status: Schema.Literal("awaiting-approval"),
+      itemId: Schema.String,
+      candidateRevisionId: Schema.String,
+    }),
+    failure,
+    dependencies: [...dependencies, PhoneCallProposals],
+  })
+    .annotate(Tool.Title, "Propose a phone call")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true),
+  "cc.phone.call",
+);
+
 export const CommandCenterToolkit = Toolkit.make(
   CommandCenterSpacesListTool,
   CommandCenterItemsListTool,
@@ -368,4 +450,6 @@ export const CommandCenterToolkit = Toolkit.make(
   CommandCenterAutomationRunTool,
   CommandCenterGoogleReadTool,
   CommandCenterSpaceActivityTool,
+  CommandCenterPhoneCallMeTool,
+  CommandCenterPhoneCallTool,
 );

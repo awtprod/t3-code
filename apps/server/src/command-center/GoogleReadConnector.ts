@@ -263,6 +263,9 @@ export const layer = Layer.effect(
       HOME: gogHome,
       XDG_CONFIG_HOME: gogHome,
       PATH: buildGoogleHelperSearchPath(binary, process.env.PATH, path),
+      // gog prints Gmail dates as zone-less local wall time; sharing the
+      // server's TZ keeps them on the clock the server parses them with.
+      ...(process.env.TZ === undefined ? {} : { TZ: process.env.TZ }),
       ...keyringEnvironment,
     };
 

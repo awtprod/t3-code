@@ -18,7 +18,7 @@ import * as AutomationTriggerCoordinator from "./automation/TriggerCoordinator.t
 import * as CommandCenterCredentialStore from "./CredentialStore.ts";
 
 export const COMMAND_CENTER_WEBHOOK_SECRET_NAME = "command-center-webhooks";
-const COMMAND_CENTER_WEBHOOK_TIMESTAMP_SKEW_MS = 5 * 60 * 1_000;
+export const COMMAND_CENTER_WEBHOOK_TIMESTAMP_SKEW_MS = 5 * 60 * 1_000;
 export const COMMAND_CENTER_WEBHOOK_HEADERS = {
   credentialId: "x-command-center-credential-id",
   spaceId: "x-command-center-space-id",

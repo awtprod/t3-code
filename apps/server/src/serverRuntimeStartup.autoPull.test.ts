@@ -18,6 +18,7 @@ import * as RunRecoveryCoordinator from "./command-center/RunRecoveryCoordinator
 import * as CommandCenterService from "./command-center/Service.ts";
 import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
 import * as SpaceActivityReactor from "./command-center/SpaceActivityReactor.ts";
+import * as GoogleActivityPoller from "./command-center/GoogleActivityPoller.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as ServerConfig from "./config.ts";
@@ -194,6 +195,7 @@ it.effect("parks automatic pull until activation without delaying command readin
         }),
         Layer.mock(SpaceAgentWaker.SpaceAgentWaker)({ start: () => Effect.void }),
         Layer.mock(SpaceActivityReactor.SpaceActivityReactor)({ start: () => Effect.void }),
+        Layer.mock(GoogleActivityPoller.GoogleActivityPoller)({ start: () => Effect.void }),
         Layer.mock(AutomationRecoveryCoordinator.AutomationRecoveryCoordinator)({
           start: () => Effect.void,
         }),

@@ -59,9 +59,10 @@ it("records the committed static-context baseline", () => {
     // 2026-10: +560 bytes for `cc_items_update` (status/title/description only).
     // 2026-10: +3 bytes net from the upstream v0.0.45 sync (preview_snapshot
     // `save` text, effect rc.115 and shared contract schema changes).
-    // 2026-10: upstream v0.1.0 adds five preview tools (14 -> 19); the Command Center
-    // (16) and Supabase (9) toolkits are unchanged.
-    mcp: { toolCount: 44, schemaBytes: 34_471, toolkitCounts: [19, 16, 9] },
+    // 2026-10: upstream v0.1.0 adds five preview tools (14 -> 19); the Space agent
+    // phone tools `cc_phone_call_me` and `cc_phone_call` (approval-gated; only Spaces
+    // that opt in see them) take Command Center from 16 to 18. Supabase (9) unchanged.
+    mcp: { toolCount: 46, schemaBytes: 35_769, toolkitCounts: [19, 18, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

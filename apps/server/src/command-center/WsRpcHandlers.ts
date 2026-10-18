@@ -17,6 +17,7 @@ import {
   ThreadId as CommandCenterThreadId,
 } from "@command-center/core";
 import {
+  AuthCommandCenterApproveScope,
   COMMAND_CENTER_SPACE_AGENT_ACTIVITY_MAX_LIMIT,
   COMMAND_CENTER_WS_METHODS,
   COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
@@ -45,6 +46,7 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { InstagramPublish } from "./publish/instagram/InstagramPublish.ts";
 import * as CommandCenterService from "./Service.ts";
 import * as CommandCenterInbox from "./Inbox.ts";
+import * as PhoneCallProposals from "./phone/PhoneCallProposals.ts";
 import * as SprintPlan from "./SprintPlan.ts";
 import * as CommandCenterDigest from "./Digest.ts";
 import * as CommandCenterEventStream from "./EventStream.ts";
@@ -81,6 +83,7 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
       const currentSessionId = currentSession.sessionId;
       const commandCenter = yield* CommandCenterService.CommandCenterService;
       const commandCenterInbox = yield* Effect.serviceOption(CommandCenterInbox.CommandCenterInbox);
+      const phoneCallProposals = yield* Effect.serviceOption(PhoneCallProposals.PhoneCallProposals);
       const sprintPlan = yield* Effect.serviceOption(SprintPlan.SprintPlanService);
       const commandCenterDigest = yield* Effect.serviceOption(
         CommandCenterDigest.CommandCenterDigest,
@@ -485,6 +488,8 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
                 spaceId: input.spaceId,
                 ...(input.limit === undefined ? {} : { limit: input.limit }),
                 maxLimit: COMMAND_CENTER_SPACE_AGENT_ACTIVITY_MAX_LIMIT,
+                // The owner's view of what wakes the agent, mail and calendar included.
+                includeExternal: true,
               }),
             ).pipe(Effect.map((entries) => ({ spaceId: input.spaceId, entries }))),
             { "rpc.aggregate": "command-center" },
@@ -625,7 +630,16 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.inboxCandidateAccept,
             withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
-              inbox.acceptCandidate(input, { subject: currentSession.subject }),
+              Option.match(phoneCallProposals, {
+                // Without the phone module an accepted `phone.call` plan just stays accepted.
+                onNone: () => inbox.acceptCandidate(input, { subject: currentSession.subject }),
+                // Accepting a `phone.call` candidate places the call, so it needs approve scope.
+                onSome: (proposals) =>
+                  proposals.acceptCandidate(input, {
+                    subject: currentSession.subject,
+                    canApprove: currentSession.scopes.includes(AuthCommandCenterApproveScope),
+                  }),
+              }),
             ),
             { "rpc.aggregate": "command-center" },
           ),
