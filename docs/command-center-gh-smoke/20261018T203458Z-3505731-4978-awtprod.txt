@@ -1,0 +1,2 @@
+Command Center provider GitHub push and merge smoke test for awtprod.
+No product code or deployment configuration changed.
