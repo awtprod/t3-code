@@ -120,13 +120,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          # Full history: scripts/public-leak-scan.test.ts borrows this checkout's
-          # objects and needs the pinned upstream commits it verifies provenance against.
+          # Full history with blobs: scripts/public-leak-scan.test.ts borrows this
+          # checkout's objects to verify provenance against pinned upstream commits,
+          # so no sparse (blob-filtered, partial) clone here.
           fetch-depth: 0
-          sparse-checkout: |
-            /*
-            !/.repos/
-          sparse-checkout-cone-mode: false
 
       # Blacksmith boots GitHub's Ubuntu runner image (gcc is usually present),
       # but ACP process-tree live tests compile a small pthread fixture with `cc`
