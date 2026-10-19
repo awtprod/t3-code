@@ -174,6 +174,128 @@ it.effect("uses a remote named fetch without reclassifying a nested remote comma
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect.each(["separate", "joined", "changed cwd"] as const)(
+  "authenticates a background fetch against its explicit Git directory (%s)",
+  (optionForm) =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const cwd = yield* makeTmpDir();
+      const target = yield* makeTmpDir();
+      yield* initRepoWithCommit(cwd);
+      yield* initRepoWithCommit(target);
+      const remoteUrl = "https://github.com/exampleowner/sample.git";
+      yield* git(target, ["remote", "add", "fetch", remoteUrl]);
+      const gitDir = path.join(target, ".git");
+      const globals =
+        optionForm === "separate"
+          ? ["--git-dir", gitDir]
+          : optionForm === "joined"
+            ? [`--git-dir=${gitDir}`]
+            : ["-C", target, "--git-dir", ".git"];
+      const fetchArgs = [...globals, "fetch", "--quiet", "--no-tags", "--no-auto-gc", "fetch"];
+      const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const captured: Array<{ args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
+      const selectedOwners: string[] = [];
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (ChildProcess.isStandardCommand(command)) {
+          const args = gitSubcommandArgs(command.args);
+          if (args.join("\0") === fetchArgs.join("\0")) {
+            captured.push({ args: command.args, env: command.options.env ?? {} });
+            return Effect.succeed(makeSuccessfulHandle(""));
+          }
+        }
+        return delegate.spawn(command);
+      });
+      const driver = yield* makeGitVcsDriverCore().pipe(
+        Effect.provideService(
+          GitHubProfileAuth.GitHubProfileAuth,
+          GitHubProfileAuth.GitHubProfileAuth.of({
+            get: (owner) => {
+              selectedOwners.push(owner);
+              return Effect.succeed({
+                account: "primary",
+                token: Redacted.make("fake-token"),
+                fingerprint: "test",
+              });
+            },
+          }),
+        ),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provide(layerServerConfig),
+      );
+      yield* driver.execute({
+        operation: "GitVcsDriver.fetchRemoteForStatus",
+        cwd,
+        args: fetchArgs,
+      });
+      assert.deepStrictEqual(selectedOwners, ["exampleowner"]);
+      assert.equal(captured.length, 1);
+      const fetched = captured[0];
+      assert.ok(fetched);
+      const count = Number(fetched.env.GIT_CONFIG_COUNT);
+      const entries = Array.from({ length: count }, (_, index) => [
+        fetched.env[`GIT_CONFIG_KEY_${index}`],
+        fetched.env[`GIT_CONFIG_VALUE_${index}`],
+      ]);
+      assert.deepInclude(entries, [
+        `http.${remoteUrl}.extraheader`,
+        "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46ZmFrZS10b2tlbg==",
+      ]);
+      assert.notInclude(fetched.args.join(" "), "fake-token");
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("checks the explicit Git directory for unsafe fetch configuration", () =>
+  Effect.gen(function* () {
+    const path = yield* Path.Path;
+    const cwd = yield* makeTmpDir();
+    const target = yield* makeTmpDir();
+    yield* initRepoWithCommit(cwd);
+    yield* initRepoWithCommit(target);
+    yield* git(target, ["remote", "add", "origin", "https://github.com/exampleowner/sample.git"]);
+    yield* git(target, ["config", "credential.helper", "!echo unsafe"]);
+    const fetchArgs = ["--git-dir", path.join(target, ".git"), "fetch", "--quiet", "origin"];
+    const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+    let fetches = 0;
+    const spawner = ChildProcessSpawner.make((command) => {
+      if (
+        ChildProcess.isStandardCommand(command) &&
+        gitSubcommandArgs(command.args).join("\0") === fetchArgs.join("\0")
+      ) {
+        fetches += 1;
+        return Effect.succeed(makeSuccessfulHandle(""));
+      }
+      return delegate.spawn(command);
+    });
+    let credentialReads = 0;
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(
+        GitHubProfileAuth.GitHubProfileAuth,
+        GitHubProfileAuth.GitHubProfileAuth.of({
+          get: (owner) => {
+            credentialReads += 1;
+            return Effect.fail(
+              new GitHubProfileAuth.GitHubProfileUnavailableError({ account: owner }),
+            );
+          },
+        }),
+      ),
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provide(layerServerConfig),
+    );
+    const error = yield* Effect.flip(
+      driver.execute({
+        operation: "GitVcsDriver.fetchRemoteForStatus",
+        cwd,
+        args: fetchArgs,
+      }),
+    );
+    assert.equal(error.detail, "Local Git configuration is unsafe for authenticated Git.");
+    assert.equal(credentialReads, 0);
+    assert.equal(fetches, 0);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("does not treat a branch named fetch as a transport command", () =>
   Effect.gen(function* () {
     const cwd = yield* makeTmpDir();
@@ -201,7 +323,46 @@ it.effect("does not treat a branch named fetch as a transport command", () =>
       cwd,
       args: ["branch", "--list", "fetch"],
     });
+    yield* driver.execute({
+      operation: "GitVcsDriver.test.branchName",
+      cwd,
+      args: ["-c", "alias.fixture=fetch", "branch", "--list", "fetch"],
+    });
+    const path = yield* Path.Path;
+    yield* driver.execute({
+      operation: "GitVcsDriver.test.configName",
+      cwd,
+      args: ["--git-dir", path.join(cwd, ".git"), "config", "--get-regexp", "fetch"],
+      allowNonZeroExit: true,
+    });
     assert.equal(credentialReads, 0);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  [["--git-dir"], "Unsupported leading Git option."],
+  [["--unknown", "fetch", "origin"], "Unsupported leading Git option."],
+  [
+    ["-c", "http.sslVerify=false", "fetch", "origin"],
+    "Authenticated Git cannot use command configuration overrides.",
+  ],
+] as const)("rejects unsafe leading options %j before spawning Git", ([args, detail]) =>
+  Effect.gen(function* () {
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() => Effect.die("Unexpected Git process")),
+      ),
+      Effect.provide(layerServerConfig),
+    );
+    const error = yield* Effect.flip(
+      driver.execute({
+        operation: "GitVcsDriver.test.leadingOptions",
+        cwd: yield* makeTmpDir(),
+        args,
+      }),
+    );
+    assert.equal(error.detail, detail);
   }).pipe(Effect.provide(layerTest)),
 );
 
