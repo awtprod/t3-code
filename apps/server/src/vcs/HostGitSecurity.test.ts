@@ -19,10 +19,20 @@ import {
   supportsHardenedHostGitAuthoring,
   trustedHostExecutablePath,
   unsafeHostGitConfigKey,
+  unsafeHostGitConfigName,
   inheritedGitConfigPins,
 } from "./HostGitSecurity.ts";
 
 describe("host Git process boundary", () => {
+  it("recognizes executable and transport-changing local config names", () => {
+    expect(unsafeHostGitConfigName("credential.https://github.com.helper")).toBe(
+      "credential.*.helper",
+    );
+    expect(unsafeHostGitConfigName("remote.origin.vcs")).toBe("remote.*.vcs");
+    expect(unsafeHostGitConfigName("http.https://github.com.proxy")).toBe("http.*");
+    expect(unsafeHostGitConfigName("url.https://example.com.insteadOf")).toBe("url.*");
+    expect(unsafeHostGitConfigName("branch.main.remote")).toBeUndefined();
+  });
   it("forces non-executable repository behavior before the requested command", () => {
     expect(hardenedHostGitArguments(["-C", "/workspace", "status"])).toEqual([
       "-c",

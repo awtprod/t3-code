@@ -546,6 +546,10 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
   const publishAccount = publishAccountByProvider.get(publishProvider) ?? null;
   const publishRepositoryPrefill = publishAccount ? `${publishAccount}/` : "";
   const publishRepository = publishRepositoryOverride ?? publishRepositoryPrefill;
+  const managedPublishOwner = /^(awtprod|ccn|charlottecomedynetwork)\//i.test(
+    publishRepository.trim(),
+  );
+  const effectivePublishProtocol = managedPublishOwner ? "https" : publishProtocol;
   const currentPublishProvider = publishProviderOption(publishProvider);
   const publishHost = currentPublishProvider.definition.publishHost(
     Option.getOrNull(
@@ -578,46 +582,60 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
     selectedPublishProviderReadiness,
   ]);
 
-  const submitPublishRepository = useCallback(() => {
-    if (!canSubmitPublishRepository) {
-      return;
-    }
-
-    setPublishError(null);
-
-    void (async () => {
-      const result = await publishRepositoryAction.run({
-        provider: publishProvider,
-        repository: publishRepository.trim(),
-        visibility: publishVisibility,
-        remoteName: publishRemoteName.trim() || "origin",
-        protocol: publishProtocol,
-      });
-
-      if (result._tag === "Failure") {
-        if (!isAtomCommandInterrupted(result)) {
-          const error = squashAtomCommandFailure(result);
-          setPublishError(error instanceof Error ? error.message : "An error occurred.");
-        }
+  const submitPublishRepository = useCallback(
+    (resumeExisting = false) => {
+      if (
+        resumeExisting
+          ? (publishResult === null && !canSubmitPublishRepository) ||
+            publishRepositoryAction.isPending
+          : !canSubmitPublishRepository
+      ) {
         return;
       }
 
-      flushSync(() => {
-        setPublishResult(result.value);
-        setPublishWizardStep(2);
-      });
-    })();
-  }, [
-    canSubmitPublishRepository,
-    props.environmentId,
-    props.gitCwd,
-    publishProtocol,
-    publishProvider,
-    publishRemoteName,
-    publishRepository,
-    publishRepositoryAction,
-    publishVisibility,
-  ]);
+      setPublishError(null);
+
+      void (async () => {
+        const result = await publishRepositoryAction.run({
+          provider: publishProvider,
+          repository:
+            resumeExisting && publishResult !== null
+              ? publishResult.repository.nameWithOwner
+              : publishRepository.trim(),
+          visibility: publishVisibility,
+          remoteName:
+            resumeExisting && publishResult !== null
+              ? publishResult.remoteName
+              : publishRemoteName.trim() || "origin",
+          protocol: effectivePublishProtocol,
+          ...(resumeExisting ? { resumeExisting: true } : {}),
+        });
+
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            setPublishError(error instanceof Error ? error.message : "An error occurred.");
+          }
+          return;
+        }
+
+        flushSync(() => {
+          setPublishResult(result.value);
+          setPublishWizardStep(2);
+        });
+      })();
+    },
+    [
+      canSubmitPublishRepository,
+      effectivePublishProtocol,
+      publishProvider,
+      publishRemoteName,
+      publishRepository,
+      publishResult,
+      publishRepositoryAction,
+      publishVisibility,
+    ],
+  );
 
   const resetState = useCallback(() => {
     setPublishRemoteName("origin");
@@ -761,7 +779,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
                       event.preventDefault();
-                      submitPublishRepository();
+                      submitPublishRepository(false);
                     }
                   }}
                   placeholder={publishPathPlaceholder}
@@ -864,7 +882,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                       Protocol
                     </span>
                     <ToggleGroup
-                      value={[publishProtocol]}
+                      value={[effectivePublishProtocol]}
                       onValueChange={(next) => {
                         const protocol = next[0];
                         if (protocol === "ssh" || protocol === "https") {
@@ -872,7 +890,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                         }
                       }}
                       aria-labelledby="publish-protocol-label"
-                      disabled={publishRepositoryAction.isPending}
+                      disabled={publishRepositoryAction.isPending || managedPublishOwner}
                     >
                       <Toggle value="ssh">SSH</Toggle>
                       <Toggle value="https">HTTPS</Toggle>
@@ -899,6 +917,16 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
               >
                 <p className="font-medium">Publish failed</p>
                 <p className="mt-0.5 text-destructive/90">{publishError}</p>
+                {managedPublishOwner && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    onClick={() => submitPublishRepository(true)}
+                  >
+                    Use existing repository
+                  </Button>
+                )}
               </div>
             ) : null}
           </div>
@@ -913,12 +941,20 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                   <h3 className="text-sm font-semibold text-foreground">
                     {publishResult.status === "pushed"
                       ? "Repository published"
-                      : "Repository created"}
+                      : publishResult.status === "push_failed"
+                        ? "Repository created; push failed"
+                        : publishResult.status === "remote_failed"
+                          ? "Repository created; remote setup failed"
+                          : "Repository created"}
                   </h3>
                   <p className="max-w-xs text-pretty text-xs text-muted-foreground">
                     {publishResult.status === "pushed"
                       ? `${publishResult.branch} is now live on ${publishProviderLabel}.`
-                      : `Remote "${publishResult.remoteName}" is set up. Make a commit and push it to share your code.`}
+                      : publishResult.status === "push_failed"
+                        ? `The repository exists on ${publishProviderLabel}, but the push did not finish${publishResult.failureReason ? ` (${publishResult.failureReason.replaceAll("_", " ")})` : ""}. Retry after checking the selected account's write access.`
+                        : publishResult.status === "remote_failed"
+                          ? "The repository exists, but Command Center could not set up the local remote. Retry to continue."
+                          : `Remote "${publishResult.remoteName}" is set up. Make a commit and push it to share your code.`}
                   </p>
                 </div>
                 <div className="flex items-center gap-2 rounded-lg border border-input bg-muted/40 px-3 py-2 dark:border-transparent dark:bg-white/[0.035]">
@@ -937,6 +973,20 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                 >
                   Open on {publishProviderLabel}
                 </Button>
+                {(publishResult.status === "push_failed" ||
+                  publishResult.status === "remote_failed") && (
+                  <Button
+                    disabled={publishRepositoryAction.isPending}
+                    onClick={() => submitPublishRepository(true)}
+                  >
+                    {publishRepositoryAction.isPending ? "Retrying..." : "Retry publication"}
+                  </Button>
+                )}
+                {publishError && (
+                  <p role="alert" className="text-xs text-destructive">
+                    {publishError}
+                  </p>
+                )}
               </>
             ) : (
               <div className="rounded-md border border-input bg-background px-3 py-2 text-xs text-muted-foreground dark:border-transparent dark:bg-white/[0.035]">
@@ -972,7 +1022,10 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                   Next
                 </Button>
               ) : (
-                <Button disabled={!canSubmitPublishRepository} onClick={submitPublishRepository}>
+                <Button
+                  disabled={!canSubmitPublishRepository}
+                  onClick={() => submitPublishRepository(false)}
+                >
                   {publishRepositoryAction.isPending ? (
                     <>
                       <Spinner size="sm" aria-hidden />

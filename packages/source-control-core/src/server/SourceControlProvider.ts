@@ -178,6 +178,11 @@ export class SourceControlProvider extends Context.Service<
       readonly context?: SourceControlProviderContext;
       readonly repository: string;
     }) => Effect.Effect<SourceControlRepositoryCloneUrls, SourceControlProviderError>;
+    /** Used to verify an existing repository before resuming a partial publication. */
+    readonly getRepositoryVisibility?: (input: {
+      readonly cwd: string;
+      readonly repository: string;
+    }) => Effect.Effect<SourceControlRepositoryVisibility, SourceControlProviderError>;
     readonly createRepository: (input: {
       readonly cwd: string;
       readonly repository: string;

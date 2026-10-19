@@ -347,6 +347,7 @@ const RawRepositorySchema = Schema.Struct({
   full_name: TrimmedNonEmptyString,
   html_url: TrimmedNonEmptyString,
   ssh_url: TrimmedNonEmptyString,
+  private: Schema.optional(Schema.Boolean),
   default_branch: Schema.optional(Schema.NullOr(Schema.String)),
 });
 const decodeRawRepository = decodeJsonResult(RawRepositorySchema);
@@ -1046,6 +1047,25 @@ export const make = Effect.gen(function* () {
       }).pipe(
         Effect.mapError(
           providerError("getRepositoryCloneUrls", input.cwd, { repository: input.repository }),
+        ),
+      ),
+    getRepositoryVisibility: (input) =>
+      Effect.gen(function* () {
+        const locator = parseGitHubRepositorySelector(input.repository, "github.com");
+        if (locator === null || locator.host !== "github.com") {
+          return yield* failure("Repositories are named owner/name.");
+        }
+        const repository = yield* readRepository(locator);
+        if (
+          repository.private === undefined ||
+          repository.full_name.toLowerCase() !== input.repository.toLowerCase()
+        ) {
+          return yield* failure("GitHub returned incomplete repository visibility.");
+        }
+        return repository.private ? ("private" as const) : ("public" as const);
+      }).pipe(
+        Effect.mapError(
+          providerError("getRepositoryVisibility", input.cwd, { repository: input.repository }),
         ),
       ),
     createRepository: (input) =>

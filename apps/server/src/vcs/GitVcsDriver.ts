@@ -38,6 +38,8 @@ import {
   PATCH_RENDER_PREFIX_ARGS,
   splitNullSeparatedGitStdoutPaths,
 } from "./GitVcsDriverCore.ts";
+import * as GitHubProfileAuth from "../sourceControl/GitHubProfileAuth.ts";
+import type { TrustedGitConfig } from "./HostGitSecurity.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
@@ -47,6 +49,8 @@ export interface ExecuteGitInput {
   readonly args: ReadonlyArray<string>;
   readonly stdin?: string;
   readonly env?: NodeJS.ProcessEnv;
+  /** A single validated HTTP header for the exact HTTPS URL named by a clone command. */
+  readonly trustedConfig?: TrustedGitConfig;
   readonly allowNonZeroExit?: boolean;
   readonly timeoutMs?: number | null;
   readonly maxOutputBytes?: number;
@@ -1333,5 +1337,7 @@ export const make = Effect.gen(function* () {
   return GitVcsDriver.of(git);
 });
 
-export const layerVcs = Layer.effect(VcsDriver.VcsDriver, makeVcsDriver);
-export const layer = Layer.effect(GitVcsDriver, make);
+export const layerVcs = Layer.effect(VcsDriver.VcsDriver, makeVcsDriver).pipe(
+  Layer.provide(GitHubProfileAuth.layer),
+);
+export const layer = Layer.effect(GitVcsDriver, make).pipe(Layer.provide(GitHubProfileAuth.layer));

@@ -16,6 +16,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Scope from "effect/Scope";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -30,6 +31,7 @@ import {
   type WorktreeSubmodules,
 } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
+import * as GitHubProfileAuth from "../sourceControl/GitHubProfileAuth.ts";
 import { gitCommandDuration } from "../observability/Metrics.ts";
 import {
   makeGitVcsDriverCore,
@@ -56,6 +58,276 @@ const layerServerConfig = ServerConfig.layerTest(process.cwd(), {
 const layerTest = GitVcsDriver.layer.pipe(
   Layer.provide(layerServerConfig),
   Layer.provideMerge(NodeServices.layer),
+);
+
+it.effect.each(["awtprod", "ccn"] as const)(
+  "uses the %s profile for only the exact HTTPS GitHub push URL",
+  (account) =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTmpDir();
+      yield* initRepoWithCommit(cwd);
+      const remoteUrl = `https://github.com/${account}/sample.git`;
+      yield* git(cwd, ["remote", "add", "origin", remoteUrl]);
+      const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const captured: Array<{ args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (
+          ChildProcess.isStandardCommand(command) &&
+          gitSubcommandArgs(command.args)[0] === "push"
+        ) {
+          captured.push({ args: command.args, env: command.options.env ?? {} });
+          return Effect.succeed(makeSuccessfulHandle(""));
+        }
+        return delegate.spawn(command);
+      });
+      const profile = GitHubProfileAuth.GitHubProfileAuth.of({
+        get: (owner) =>
+          owner === account
+            ? Effect.succeed({ account, token: Redacted.make("fake-token"), fingerprint: "test" })
+            : Effect.fail(new GitHubProfileAuth.GitHubProfileUnavailableError({ account: owner })),
+      });
+      const driver = yield* makeGitVcsDriverCore().pipe(
+        Effect.provideService(GitHubProfileAuth.GitHubProfileAuth, profile),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provide(layerServerConfig),
+      );
+      yield* driver.execute({
+        operation: "GitVcsDriver.test.scopedPush",
+        cwd,
+        args: ["push", "-u", "origin", "HEAD:refs/heads/main"],
+      });
+      assert.equal(captured.length, 1);
+      const pushed = captured[0];
+      assert.ok(pushed);
+      const count = Number(pushed.env.GIT_CONFIG_COUNT);
+      const entries = Array.from({ length: count }, (_, index) => [
+        pushed.env[`GIT_CONFIG_KEY_${index}`],
+        pushed.env[`GIT_CONFIG_VALUE_${index}`],
+      ]);
+      assert.deepInclude(entries, [
+        `http.${remoteUrl}.extraheader`,
+        "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46ZmFrZS10b2tlbg==",
+      ]);
+      assert.notInclude(pushed.args.join(" "), "fake-token");
+      assert.include(pushed.args, "credential.helper=");
+      assert.equal(yield* git(cwd, ["remote", "get-url", "origin"]), remoteUrl);
+      const config = yield* driver.execute({
+        operation: "GitVcsDriver.test.readPersistentHeader",
+        cwd,
+        args: ["config", "--local", "--get-regexp", "extraheader"],
+        allowNonZeroExit: true,
+      });
+      assert.notEqual(config.exitCode, 0);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rejects a local credential helper before reading the profile or pushing", () =>
+  Effect.gen(function* () {
+    const cwd = yield* makeTmpDir();
+    yield* initRepoWithCommit(cwd);
+    yield* git(cwd, ["remote", "add", "origin", "https://github.com/awtprod/sample.git"]);
+    yield* git(cwd, ["config", "credential.helper", "!echo unsafe"]);
+    let credentialReads = 0;
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(
+        GitHubProfileAuth.GitHubProfileAuth,
+        GitHubProfileAuth.GitHubProfileAuth.of({
+          get: () => {
+            credentialReads += 1;
+            return Effect.fail(
+              new GitHubProfileAuth.GitHubProfileUnavailableError({ account: "awtprod" }),
+            );
+          },
+        }),
+      ),
+      Effect.provide(layerServerConfig),
+    );
+    const error = yield* Effect.flip(
+      driver.execute({
+        operation: "GitVcsDriver.test.scopedPush",
+        cwd,
+        args: ["push", "-u", "origin", "HEAD:refs/heads/main"],
+      }),
+    );
+    assert.equal(error.detail, "Local Git configuration is unsafe for authenticated Git.");
+    assert.equal(credentialReads, 0);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rejects worktree HTTP settings before reading the profile", () =>
+  Effect.gen(function* () {
+    const cwd = yield* makeTmpDir();
+    yield* initRepoWithCommit(cwd);
+    yield* git(cwd, ["remote", "add", "origin", "https://github.com/awtprod/sample.git"]);
+    yield* git(cwd, ["config", "extensions.worktreeConfig", "true"]);
+    yield* git(cwd, [
+      "config",
+      "--worktree",
+      "http.https://github.com/awtprod/sample.git.proxy",
+      "https://example.invalid",
+    ]);
+    let credentialReads = 0;
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(
+        GitHubProfileAuth.GitHubProfileAuth,
+        GitHubProfileAuth.GitHubProfileAuth.of({
+          get: () => {
+            credentialReads += 1;
+            return Effect.fail(
+              new GitHubProfileAuth.GitHubProfileUnavailableError({ account: "awtprod" }),
+            );
+          },
+        }),
+      ),
+      Effect.provide(layerServerConfig),
+    );
+    const error = yield* Effect.flip(
+      driver.execute({
+        operation: "GitVcsDriver.test.scopedPush",
+        cwd,
+        args: ["push", "-u", "origin", "HEAD:refs/heads/main"],
+      }),
+    );
+    assert.equal(error.detail, "Local Git configuration is unsafe for authenticated Git.");
+    assert.equal(credentialReads, 0);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rejects a different push destination on a managed fetch remote", () =>
+  Effect.gen(function* () {
+    const cwd = yield* makeTmpDir();
+    yield* initRepoWithCommit(cwd);
+    yield* git(cwd, ["remote", "add", "origin", "https://github.com/awtprod/sample.git"]);
+    yield* git(cwd, ["config", "remote.origin.pushurl", "https://example.invalid/other.git"]);
+    let credentialReads = 0;
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(
+        GitHubProfileAuth.GitHubProfileAuth,
+        GitHubProfileAuth.GitHubProfileAuth.of({
+          get: () => {
+            credentialReads += 1;
+            return Effect.fail(
+              new GitHubProfileAuth.GitHubProfileUnavailableError({ account: "awtprod" }),
+            );
+          },
+        }),
+      ),
+      Effect.provide(layerServerConfig),
+    );
+    const error = yield* Effect.flip(
+      driver.execute({
+        operation: "GitVcsDriver.test.scopedPush",
+        cwd,
+        args: ["push", "-u", "origin", "HEAD:refs/heads/main"],
+      }),
+    );
+    assert.equal(error.detail, "GitHub remote has multiple or conflicting URLs.");
+    assert.equal(credentialReads, 0);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rejects a rewritten GitHub URL before reading the profile or starting push", () =>
+  Effect.gen(function* () {
+    const cwd = yield* makeTmpDir();
+    yield* initRepoWithCommit(cwd);
+    yield* git(cwd, ["remote", "add", "origin", "https://github.com/awtprod/sample.git"]);
+    yield* git(cwd, ["config", "url.https://example.invalid/.insteadOf", "https://github.com/"]);
+    const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+    let pushes = 0;
+    let credentialReads = 0;
+    const spawner = ChildProcessSpawner.make((command) => {
+      if (
+        ChildProcess.isStandardCommand(command) &&
+        gitSubcommandArgs(command.args)[0] === "push"
+      ) {
+        pushes += 1;
+      }
+      return delegate.spawn(command);
+    });
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(
+        GitHubProfileAuth.GitHubProfileAuth,
+        GitHubProfileAuth.GitHubProfileAuth.of({
+          get: () => {
+            credentialReads += 1;
+            return Effect.fail(
+              new GitHubProfileAuth.GitHubProfileUnavailableError({ account: "awtprod" }),
+            );
+          },
+        }),
+      ),
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provide(layerServerConfig),
+    );
+    const error = yield* Effect.flip(
+      driver.execute({
+        operation: "GitVcsDriver.test.scopedPush",
+        cwd,
+        args: ["push", "-u", "origin", "HEAD:refs/heads/main"],
+      }),
+    );
+    assert.equal(error.detail, "GitHub remote URL rewrite is not allowed for authenticated Git.");
+    assert.equal(credentialReads, 0);
+    assert.equal(pushes, 0);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("keeps authenticated clone headers out of the URL and refuses local URL rewrites", () =>
+  Effect.gen(function* () {
+    const cwd = yield* makeTmpDir();
+    yield* initRepoWithCommit(cwd);
+    const remoteUrl = "https://github.com/awtprod/sample.git";
+    const trustedConfig = {
+      remoteUrl,
+      key: `http.${remoteUrl}.extraheader`,
+      value: Redacted.make("AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46ZmFrZS10b2tlbg=="),
+    };
+    const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const clones: Array<{ args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
+    const spawner = ChildProcessSpawner.make((command) => {
+      if (
+        ChildProcess.isStandardCommand(command) &&
+        gitSubcommandArgs(command.args)[0] === "clone"
+      ) {
+        clones.push({ args: command.args, env: command.options.env ?? {} });
+        return Effect.succeed(makeSuccessfulHandle(""));
+      }
+      return delegate.spawn(command);
+    });
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provide(layerServerConfig),
+    );
+    const cloneInput = {
+      operation: "SourceControlRepositoryService.cloneRepository",
+      cwd,
+      args: ["clone", "--", remoteUrl, "sample"],
+      trustedConfig,
+    };
+    yield* driver.execute(cloneInput);
+    assert.equal(clones.length, 1);
+    assert.notInclude(clones[0]!.args.join(" "), "fake-token");
+    const entries = Array.from({ length: Number(clones[0]!.env.GIT_CONFIG_COUNT) }, (_, index) => [
+      clones[0]!.env[`GIT_CONFIG_KEY_${index}`],
+      clones[0]!.env[`GIT_CONFIG_VALUE_${index}`],
+    ]);
+    assert.deepInclude(entries, [trustedConfig.key, Redacted.value(trustedConfig.value)]);
+
+    yield* git(cwd, ["config", "url.https://example.invalid/.insteadOf", "https://github.com/"]);
+    const error = yield* Effect.flip(driver.execute(cloneInput));
+    assert.equal(error.detail, "URL rewrites are not allowed for authenticated clone.");
+    assert.equal(clones.length, 1);
+
+    yield* git(cwd, ["config", "--unset", "url.https://example.invalid/.insteadOf"]);
+    yield* git(cwd, [
+      "config",
+      "http.https://github.com/awtprod/sample.git.proxy",
+      "https://example.invalid",
+    ]);
+    const unsafe = yield* Effect.flip(driver.execute(cloneInput));
+    assert.equal(unsafe.detail, "Local Git configuration is unsafe for authenticated Git.");
+    assert.equal(clones.length, 1);
+  }).pipe(Effect.provide(layerTest)),
 );
 
 const makeNonRepositoryHandle = () =>

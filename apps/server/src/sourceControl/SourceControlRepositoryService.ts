@@ -1,12 +1,16 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Base64 from "effect/encoding/Base64";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Result from "effect/Result";
+import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
 import {
+  GitCommandError,
   SourceControlProviderError,
   SourceControlRepositoryError,
   type SourceControlCloneRepositoryInput,
@@ -29,6 +33,9 @@ import {
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as BitbucketApi from "@t3tools/source-control-bitbucket/server/BitbucketApi";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
+import * as GitHubProfileAuth from "./GitHubProfileAuth.ts";
+import * as GitHubApi from "@t3tools/source-control-github/server/GitHubApi";
+import { parseGitHubRepositorySelector } from "@t3tools/source-control-github/server/gitHubRepositoryResolution";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 const isSourceControlRepositoryError = Schema.is(SourceControlRepositoryError);
 const isSourceControlProviderError = Schema.is(SourceControlProviderError);
@@ -163,6 +170,16 @@ function selectRemoteUrl(
   }
 }
 
+function managedGitHubRepository(repository: string) {
+  const locator = parseGitHubRepositorySelector(repository, "github.com");
+  if (locator?.host !== "github.com") return { profile: null, repository: repository.trim() };
+  const profile = GitHubProfileAuth.approvedGitHubProfileForOwner(locator.owner);
+  return {
+    profile,
+    repository: profile === null ? repository.trim() : `${locator.owner}/${locator.name}`,
+  };
+}
+
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
@@ -170,6 +187,7 @@ export const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const path = yield* Path.Path;
   const providers = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
+  const profileAuth = yield* GitHubProfileAuth.GitHubProfileAuth;
 
   const ensureConcreteProvider = (input: {
     readonly operation: string;
@@ -196,10 +214,37 @@ export const make = Effect.gen(function* () {
       provider: input.provider,
     });
     const provider = yield* providers.get(providerKind);
-    const urls = yield* provider.getRepositoryCloneUrls({
+    const selected =
+      providerKind === "github"
+        ? managedGitHubRepository(input.repository)
+        : { profile: null, repository: input.repository.trim() };
+    const selectedProfile = selected.profile;
+    const profile =
+      selectedProfile === null
+        ? null
+        : yield* profileAuth.get(selectedProfile).pipe(
+            Effect.mapError(
+              () =>
+                new SourceControlRepositoryError({
+                  operation: "lookupRepository",
+                  provider: providerKind,
+                  detail: `GitHub profile ${selectedProfile} is unavailable.`,
+                }),
+            ),
+          );
+    const lookup = provider.getRepositoryCloneUrls({
       cwd: input.cwd ?? config.cwd,
-      repository: input.repository.trim(),
+      repository: selected.repository,
     });
+    const urls = yield* profile === null
+      ? lookup
+      : lookup.pipe(
+          Effect.provideService(GitHubApi.PinnedGitHubCredential, {
+            host: "github.com",
+            token: profile.token,
+            credentialFingerprint: profile.fingerprint,
+          }),
+        );
     return toRepositoryInfo(providerKind, urls);
   });
 
@@ -270,6 +315,14 @@ export const make = Effect.gen(function* () {
         cwd: preparedDestination.parentPath,
       });
       remoteUrl = selectRemoteUrl(repository, input.protocol);
+      if (
+        provider === "github" &&
+        GitHubProfileAuth.approvedGitHubProfileForOwner(
+          repository.nameWithOwner.split("/")[0] ?? "",
+        ) !== null
+      ) {
+        remoteUrl = `https://github.com/${repository.nameWithOwner}.git`;
+      }
       provider = input.provider;
     }
 
@@ -279,6 +332,13 @@ export const make = Effect.gen(function* () {
         provider,
         detail: "Enter a repository path or clone URL before cloning.",
       });
+    }
+    const managedSsh =
+      /^git@github\.com:(awtprod|ccn|charlottecomedynetwork)\/([A-Za-z0-9_.-]+)\.git$/iu.exec(
+        remoteUrl,
+      );
+    if (managedSsh !== null) {
+      remoteUrl = `https://github.com/${managedSsh[1]}/${managedSsh[2]}.git`;
     }
 
     return {
@@ -294,6 +354,37 @@ export const make = Effect.gen(function* () {
     options?: SourceControlCloneOptions,
   ) {
     const prepared = yield* prepareClone(input);
+    const managedUrl =
+      /^https:\/\/github\.com\/(awtprod|ccn|charlottecomedynetwork)\/([A-Za-z0-9_.-]+)\.git$/iu.exec(
+        prepared.cloneUrl,
+      );
+    const selectedProfile =
+      managedUrl === null
+        ? null
+        : GitHubProfileAuth.approvedGitHubProfileForOwner(managedUrl[1] ?? "");
+    const profile =
+      selectedProfile === null
+        ? null
+        : yield* profileAuth.get(selectedProfile).pipe(
+            Effect.mapError(
+              () =>
+                new SourceControlRepositoryError({
+                  operation: "cloneRepository",
+                  provider: SourceControlProviderKind.make("github"),
+                  detail: `GitHub profile ${selectedProfile} is unavailable.`,
+                }),
+            ),
+          );
+    const trustedConfig =
+      profile === null
+        ? undefined
+        : {
+            remoteUrl: prepared.cloneUrl,
+            key: `http.${prepared.cloneUrl}.extraheader`,
+            value: Redacted.make(
+              `AUTHORIZATION: basic ${Base64.encode(`x-access-token:${Redacted.value(profile.token)}`)}`,
+            ),
+          };
     const onProgress = options?.onProgress;
     // Git interleaves progress redraws with its real messages on stderr. The
     // last non-progress lines are what explain a failure ("Repository not
@@ -329,6 +420,7 @@ export const make = Effect.gen(function* () {
         appendTruncationMarker: true,
         keepLineCallbacksAfterTruncation: true,
         env: CLONE_ENV,
+        ...(trustedConfig === undefined ? {} : { trustedConfig }),
         progress: { onStderrLine },
       })
       .pipe(
@@ -409,17 +501,212 @@ export const make = Effect.gen(function* () {
         provider: input.provider,
       });
       const provider = yield* providers.get(providerKind);
-      const urls = yield* provider.createRepository({
+      const selected =
+        providerKind === "github"
+          ? managedGitHubRepository(input.repository)
+          : { profile: null, repository: input.repository.trim() };
+      const repository = selected.repository;
+      const selectedProfile = selected.profile;
+      const preferredName = input.remoteName?.trim() || "origin";
+      if (selectedProfile !== null && !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(preferredName)) {
+        return yield* new SourceControlRepositoryError({
+          operation: "publishRepository",
+          provider: providerKind,
+          detail: "Choose a valid Git remote name.",
+        });
+      }
+      const profile =
+        selectedProfile === null
+          ? null
+          : yield* profileAuth.get(selectedProfile).pipe(
+              Effect.mapError(
+                () =>
+                  new SourceControlRepositoryError({
+                    operation: "publishRepository",
+                    provider: providerKind,
+                    detail: `GitHub profile ${selectedProfile} is unavailable.`,
+                  }),
+              ),
+            );
+      if (input.resumeExisting && profile === null) {
+        return yield* new SourceControlRepositoryError({
+          operation: "publishRepository",
+          provider: providerKind,
+          detail: "Continuing an existing repository requires a selected GitHub profile.",
+        });
+      }
+      const create = provider.createRepository({
         cwd: input.cwd,
-        repository: input.repository.trim(),
+        repository,
         visibility: input.visibility,
       });
-      const remoteUrl = selectRemoteUrl(urls, input.protocol);
-      const remoteName = yield* git.ensureRemote({
-        cwd: input.cwd,
-        preferredName: input.remoteName?.trim() || "origin",
-        url: remoteUrl,
-      });
+      const loadRepository = input.resumeExisting
+        ? Effect.gen(function* () {
+            if (provider.getRepositoryVisibility === undefined) {
+              return yield* new SourceControlRepositoryError({
+                operation: "publishRepository",
+                provider: providerKind,
+                detail: "This provider cannot verify an existing repository.",
+              });
+            }
+            const urls = yield* provider.getRepositoryCloneUrls({ cwd: input.cwd, repository });
+            const visibility = yield* provider.getRepositoryVisibility({
+              cwd: input.cwd,
+              repository,
+            });
+            if (visibility !== input.visibility) {
+              return yield* new SourceControlRepositoryError({
+                operation: "publishRepository",
+                provider: providerKind,
+                detail: "Existing repository visibility differs from the selected visibility.",
+              });
+            }
+            return urls;
+          })
+        : create;
+      const urls = yield* profile === null
+        ? loadRepository
+        : loadRepository.pipe(
+            Effect.provideService(GitHubApi.PinnedGitHubCredential, {
+              host: "github.com",
+              token: profile.token,
+              credentialFingerprint: profile.fingerprint,
+            }),
+          );
+      if (
+        profile !== null &&
+        (urls.nameWithOwner.toLowerCase() !== repository.toLowerCase() ||
+          urls.url !== `https://github.com/${urls.nameWithOwner}` ||
+          urls.sshUrl !== `git@github.com:${urls.nameWithOwner}.git`)
+      ) {
+        return yield* new SourceControlRepositoryError({
+          operation: "publishRepository",
+          provider: providerKind,
+          detail: "GitHub returned a repository different from the selected account and name.",
+        });
+      }
+      const remoteUrl =
+        profile === null
+          ? selectRemoteUrl(urls, input.protocol)
+          : `https://github.com/${urls.nameWithOwner}.git`;
+      if (input.resumeExisting) {
+        const existing = yield* git.execute({
+          operation: "SourceControlRepositoryService.publishRepository.existingRemote",
+          cwd: input.cwd,
+          args: ["remote", "get-url", "--push", "--all", preferredName],
+          allowNonZeroExit: true,
+        });
+        const existingUrl = existing.stdout.trim();
+        if (
+          existing.exitCode === 0 &&
+          existingUrl !== "" &&
+          existingUrl !== remoteUrl &&
+          existingUrl !== urls.sshUrl
+        ) {
+          return yield* new SourceControlRepositoryError({
+            operation: "publishRepository",
+            provider: providerKind,
+            detail: "The selected remote points to a different repository.",
+          });
+        }
+      }
+      const remoteOutcome = yield* Effect.result(
+        git.ensureRemote({
+          cwd: input.cwd,
+          preferredName,
+          url: remoteUrl,
+        }),
+      );
+      const partial = (
+        status: "remote_failed" | "push_failed",
+        remoteName: string,
+        error?: GitCommandError,
+      ) =>
+        git
+          .execute({
+            operation: "SourceControlRepositoryService.publishRepository.partialBranch",
+            cwd: input.cwd,
+            args: ["branch", "--show-current"],
+            allowNonZeroExit: true,
+          })
+          .pipe(
+            Effect.map((result) => result.stdout.trim() || "HEAD"),
+            Effect.orElseSucceed(() => "HEAD"),
+            Effect.map((branch) => ({
+              repository: toRepositoryInfo(providerKind, urls),
+              remoteName,
+              remoteUrl,
+              branch,
+              status,
+              ...(error?.reason === undefined ? {} : { failureReason: error.reason }),
+            })),
+          );
+      if (Result.isFailure(remoteOutcome)) {
+        if (profile === null) return yield* remoteOutcome.failure;
+        return yield* partial("remote_failed", preferredName, remoteOutcome.failure);
+      }
+      const remoteName = remoteOutcome.success;
+      if (profile !== null) {
+        const readRemoteUrls = Effect.gen(function* () {
+          const [fetch, push, effective] = yield* Effect.all([
+            git.execute({
+              operation: "SourceControlRepositoryService.publishRepository.fetchUrl",
+              cwd: input.cwd,
+              args: ["config", "--get-all", `remote.${remoteName}.url`],
+              allowNonZeroExit: true,
+            }),
+            git.execute({
+              operation: "SourceControlRepositoryService.publishRepository.pushUrl",
+              cwd: input.cwd,
+              args: ["config", "--get-all", `remote.${remoteName}.pushurl`],
+              allowNonZeroExit: true,
+            }),
+            git.execute({
+              operation: "SourceControlRepositoryService.publishRepository.effectivePushUrl",
+              cwd: input.cwd,
+              args: ["remote", "get-url", "--push", "--all", remoteName],
+              allowNonZeroExit: true,
+            }),
+          ]);
+          return {
+            fetch: fetch.exitCode === 0 ? fetch.stdout.trim() : "",
+            push: push.exitCode === 0 ? push.stdout.trim() : "",
+            effective: effective.exitCode === 0 ? effective.stdout.trim() : "",
+          };
+        });
+        const safeRemote = yield* Effect.result(
+          Effect.gen(function* () {
+            let configured = yield* readRemoteUrls;
+            if (
+              configured.fetch === urls.sshUrl &&
+              (configured.push === "" || configured.push === urls.sshUrl) &&
+              configured.effective === urls.sshUrl
+            ) {
+              yield* git.execute({
+                operation: "SourceControlRepositoryService.publishRepository.useHttps",
+                cwd: input.cwd,
+                args: ["remote", "set-url", remoteName, remoteUrl],
+              });
+              if (configured.push !== "") {
+                yield* git.execute({
+                  operation: "SourceControlRepositoryService.publishRepository.useHttpsPush",
+                  cwd: input.cwd,
+                  args: ["remote", "set-url", "--push", remoteName, remoteUrl, urls.sshUrl],
+                });
+              }
+              configured = yield* readRemoteUrls;
+            }
+            return (
+              configured.fetch === remoteUrl &&
+              (configured.push === "" || configured.push === remoteUrl) &&
+              configured.effective === remoteUrl
+            );
+          }),
+        );
+        if (Result.isFailure(safeRemote) || !safeRemote.success) {
+          return yield* partial("remote_failed", remoteName);
+        }
+      }
 
       // An empty local repo (no commits) would make `git push HEAD:...` fail
       // with an opaque "src refspec HEAD does not match any". Treat this as a
@@ -446,7 +733,14 @@ export const make = Effect.gen(function* () {
         };
       }
 
-      const pushResult = yield* git.pushCurrentBranch(input.cwd, null, { remoteName });
+      const pushOutcome = yield* Effect.result(
+        git.pushCurrentBranch(input.cwd, null, { remoteName }),
+      );
+      if (Result.isFailure(pushOutcome)) {
+        if (profile === null) return yield* pushOutcome.failure;
+        return yield* partial("push_failed", remoteName, pushOutcome.failure);
+      }
+      const pushResult = pushOutcome.success;
 
       return {
         repository: toRepositoryInfo(providerKind, urls),

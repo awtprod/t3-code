@@ -559,6 +559,33 @@ describe("GitHubSourceControlProvider writes", () => {
       assert.strictEqual(requests.length, 2);
     });
   });
+
+  it.effect("verifies exact GitHub repository visibility before publication resumes", () =>
+    Effect.gen(function* () {
+      const requests: string[] = [];
+      const gh = yield* makeProvider({
+        rest: (input) =>
+          Effect.sync(() => {
+            requests.push(input.path);
+            return restResponse({
+              full_name: "awtprod/sample",
+              html_url: "https://github.com/awtprod/sample",
+              ssh_url: "git@github.com:awtprod/sample.git",
+              private: true,
+            });
+          }),
+      });
+      assert.equal(
+        yield* gh.getRepositoryVisibility!({ cwd: "/repo", repository: "awtprod/sample" }),
+        "private",
+      );
+      assert.deepStrictEqual(requests, ["repos/awtprod/sample"]);
+      const wrong = yield* Effect.flip(
+        gh.getRepositoryVisibility!({ cwd: "/repo", repository: "ccn/sample" }),
+      );
+      assert.include(wrong.message, "incomplete repository visibility");
+    }),
+  );
 });
 
 describe("GitHubSourceControlProvider.checkoutChangeRequest", () => {

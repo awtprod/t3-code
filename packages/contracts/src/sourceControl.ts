@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { GitCommandFailureReason } from "./gitFailureReason.ts";
 import { VcsDriverKind } from "./vcs.ts";
 
 /**
@@ -97,10 +98,17 @@ export const SourceControlPublishRepositoryInput = Schema.Struct({
   visibility: SourceControlRepositoryVisibility,
   remoteName: Schema.optional(TrimmedNonEmptyString),
   protocol: Schema.optional(SourceControlCloneProtocol),
+  /** Explicitly continue publication of an existing, verified GitHub repository. */
+  resumeExisting: Schema.optional(Schema.Boolean),
 });
 export type SourceControlPublishRepositoryInput = typeof SourceControlPublishRepositoryInput.Type;
 
-export const SourceControlPublishStatus = Schema.Literals(["pushed", "remote_added"]);
+export const SourceControlPublishStatus = Schema.Literals([
+  "pushed",
+  "remote_added",
+  "remote_failed",
+  "push_failed",
+]);
 export type SourceControlPublishStatus = typeof SourceControlPublishStatus.Type;
 
 export const SourceControlPublishRepositoryResult = Schema.Struct({
@@ -110,6 +118,8 @@ export const SourceControlPublishRepositoryResult = Schema.Struct({
   branch: TrimmedNonEmptyString,
   upstreamBranch: Schema.optional(TrimmedNonEmptyString),
   status: SourceControlPublishStatus,
+  /** A closed GitCommandFailureReason tag from the server; never raw Git output. */
+  failureReason: Schema.optional(GitCommandFailureReason),
 });
 export type SourceControlPublishRepositoryResult = typeof SourceControlPublishRepositoryResult.Type;
 
