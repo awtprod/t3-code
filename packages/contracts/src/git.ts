@@ -8,6 +8,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { SourceControlProviderError, SourceControlProviderInfo } from "./sourceControl.ts";
+import { GitCommandFailureReason as GitCommandFailureReasonSchema } from "./gitFailureReason.ts";
 import { VcsDriverKind } from "./vcs.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
@@ -367,18 +368,8 @@ export type VcsPullResult = typeof VcsPullResult.Type;
 // a closed set of diagnostic tags. Git's stderr itself stays off the error: it
 // echoes argv and remote URLs, which can hold credentials. The tag names the
 // cause for logs and callers; it does not select a message.
-export const GitCommandFailureReason = Schema.Literals([
-  "authentication_failed",
-  "branch_already_exists",
-  "branch_checked_out_in_worktree",
-  "host_key_unverified",
-  "not_a_repository",
-  "path_already_exists",
-  "remote_unreachable",
-  "tag_would_be_clobbered",
-]);
+export const GitCommandFailureReason = GitCommandFailureReasonSchema;
 export type GitCommandFailureReason = typeof GitCommandFailureReason.Type;
-
 export class GitCommandError extends Schema.TaggedError<GitCommandError>()("GitCommandError", {
   operation: Schema.String,
   command: Schema.String,

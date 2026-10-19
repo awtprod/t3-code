@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 const state = vi.hoisted(() => ({
   scopes: new Map<string, Set<string>>(),
   requests: [] as { action: string; environmentId: string | null }[],
+  publishPayloads: [] as unknown[],
 }));
 
 vi.mock("react", () => ({ useCallback: (callback: unknown) => callback }));
@@ -29,11 +30,12 @@ vi.mock("./query", () => ({ useEnvironmentQuery: () => ({ refresh: () => {} }) }
 vi.mock("./use-atom-command", () => ({
   useAtomCommand:
     (command: { action: string; environmentId?: string }) =>
-    async (input: { environmentId?: string }) => {
+    async (input: { environmentId?: string; input?: unknown }) => {
       state.requests.push({
         action: command.action,
         environmentId: input.environmentId ?? command.environmentId ?? null,
       });
+      if (command.action === "publish") state.publishPayloads.push(input.input);
       return AsyncResult.success({});
     },
 }));
@@ -126,6 +128,32 @@ beforeEach(() => {
     [secondary, new Set<string>()],
   ]);
   state.requests = [];
+  state.publishPayloads = [];
+});
+
+it("sends an explicit resume request for the selected existing repository", async () => {
+  state.scopes.get(secondary)!.add(AuthSourceControlWriteScope);
+  const action = useSourceControlPublishRepositoryAction(scope);
+  const result = await action.run({
+    provider: SourceControlProviderKind.make("github"),
+    repository: "exampleowner/sample",
+    visibility: "private",
+    remoteName: "origin",
+    protocol: "https",
+    resumeExisting: true,
+  });
+  expect(result._tag).toBe("Success");
+  expect(state.publishPayloads).toEqual([
+    {
+      cwd: "/repo",
+      provider: "github",
+      repository: "exampleowner/sample",
+      visibility: "private",
+      remoteName: "origin",
+      protocol: "https",
+      resumeExisting: true,
+    },
+  ]);
 });
 
 describe("source control callback grants", () => {

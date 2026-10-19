@@ -627,6 +627,18 @@ export function unsafeHostGitConfigKey(contents: string): string | undefined {
   return continuingValue ? "<malformed>" : undefined;
 }
 
+/** Inspect the effective local config names before giving Git a credential. */
+export function unsafeHostGitConfigName(name: string): string | undefined {
+  const first = name.indexOf(".");
+  const last = name.lastIndexOf(".");
+  if (first < 1 || last === name.length - 1) return "<malformed>";
+  const section = name.slice(0, first).toLowerCase();
+  const variable = name.slice(last + 1).toLowerCase();
+  if (section === "http" || section === "url") return `${section}.*`;
+  if (section === "submodule" && variable === "update") return "submodule.*.update";
+  return executableConfigKey(section, variable, "");
+}
+
 /**
  * One trusted Git config entry a caller may add to a single `git` command: the
  * HTTP authorization header for the exact https remote that command talks to.

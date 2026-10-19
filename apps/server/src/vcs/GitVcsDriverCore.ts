@@ -4,10 +4,15 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Base64 from "effect/encoding/Base64";
+import * as Redacted from "effect/Redacted";
 import {
   hardenedHostGitArguments,
   hardenedHostGitEnvironment,
   resolveTrustedHostExecutable,
+  unsafeHostGitConfigName,
+  validateTrustedGitConfig,
+  withGitConfigEntries,
 } from "./HostGitSecurity.ts";
 import * as Hex from "effect/encoding/Hex";
 import * as Exit from "effect/Exit";
@@ -48,9 +53,62 @@ import {
   parseRemoteRefWithRemoteNames,
 } from "../git/remoteRefs.ts";
 import * as ServerConfig from "../config.ts";
+import * as GitHubProfileAuth from "../sourceControl/GitHubProfileAuth.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const gitProcesses = Semaphore.makeUnsafe(8);
+
+function parseGitInvocation(args: readonly string[]): {
+  readonly globals: readonly string[];
+  readonly verbIndex: number;
+  readonly hasCommandConfig: boolean;
+} | null {
+  let index = 0;
+  let hasCommandConfig = false;
+  while (index < args.length) {
+    const option = args[index];
+    if (option === undefined || !option.startsWith("-")) break;
+    if (
+      option === "--git-dir" ||
+      option === "--work-tree" ||
+      option === "-C" ||
+      option === "-c" ||
+      option === "--namespace" ||
+      option === "--config-env"
+    ) {
+      if (args[index + 1] === undefined) return null;
+      hasCommandConfig ||= option === "-c" || option === "--config-env";
+      index += 2;
+    } else if (
+      option.startsWith("--git-dir=") ||
+      option.startsWith("--work-tree=") ||
+      option.startsWith("--namespace=") ||
+      option.startsWith("--config-env=") ||
+      (option.startsWith("-C") && option.length > 2) ||
+      (option.startsWith("-c") && option.length > 2)
+    ) {
+      hasCommandConfig ||= option.startsWith("--config-env=") || option.startsWith("-c");
+      index += 1;
+    } else if (
+      option === "--bare" ||
+      option === "--no-pager" ||
+      option === "--paginate" ||
+      option === "-p" ||
+      option === "-P" ||
+      option === "--no-replace-objects" ||
+      option === "--literal-pathspecs" ||
+      option === "--glob-pathspecs" ||
+      option === "--noglob-pathspecs" ||
+      option === "--icase-pathspecs" ||
+      option === "--no-optional-locks"
+    ) {
+      index += 1;
+    } else {
+      return null;
+    }
+  }
+  return { globals: args.slice(0, index), verbIndex: index, hasCommandConfig };
+}
 // `git worktree add` checks out the full tree, so on large repositories it can
 // take well beyond the default 30s (e.g. a 375k-file repo takes ~40s on an idle
 // machine). Give it generous headroom while still bounding a genuinely hung git.
@@ -1015,169 +1073,203 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const { worktreesDir } = yield* ServerConfig.ServerConfig;
   const crypto = yield* Crypto.Crypto;
   const hostPlatform = yield* HostProcess.Platform;
+  const profileAuth = yield* Effect.serviceOption(GitHubProfileAuth.GitHubProfileAuth);
 
-  const executeRaw: GitVcsDriver.GitVcsDriver["Service"]["execute"] = Effect.fnUntraced(
-    function* (input) {
-      const commandInput = {
-        ...input,
-        args: [...input.args],
-      } as const;
-      const timeoutMs = input.timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : input.timeoutMs;
-      const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-      const appendTruncationMarker = input.appendTruncationMarker ?? false;
+  const executeRaw = Effect.fnUntraced(function* (
+    input: GitVcsDriver.ExecuteGitInput,
+    scopedAuth: { readonly remoteUrl: string; readonly entry: readonly [string, string] } | null,
+  ) {
+    const commandInput = {
+      ...input,
+      args: [...input.args],
+    } as const;
+    const timeoutMs = input.timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : input.timeoutMs;
+    const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    const appendTruncationMarker = input.appendTruncationMarker ?? false;
 
-      const runGitCommand = Effect.fn("runGitCommand")(function* () {
-        const writableRoots = [commandInput.cwd, worktreesDir];
-        const gitExecutable = resolveTrustedHostExecutable("git", { writableRoots });
-        if (gitExecutable === undefined) {
-          return yield* new GitCommandError({
-            ...gitCommandContext(commandInput),
-            detail: "Refused to resolve Git outside repository-writable command roots.",
-          });
-        }
-        const trace2Monitor = yield* createTrace2Monitor(commandInput, input.progress).pipe(
-          Effect.provideService(Path.Path, path),
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
+    const runGitCommand = Effect.fn("runGitCommand")(function* () {
+      const writableRoots = [commandInput.cwd, worktreesDir];
+      const gitExecutable = resolveTrustedHostExecutable("git", { writableRoots });
+      if (gitExecutable === undefined) {
+        return yield* new GitCommandError({
+          ...gitCommandContext(commandInput),
+          detail: "Refused to resolve Git outside repository-writable command roots.",
+        });
+      }
+      const trace2Monitor = yield* createTrace2Monitor(commandInput, input.progress).pipe(
+        Effect.provideService(Path.Path, path),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.mapError(
+          (cause) =>
+            new GitCommandError({
+              ...gitCommandContext(commandInput),
+              detail: "Failed to create Git trace monitor.",
+              cause,
+            }),
+        ),
+      );
+      // Exact environment: inherited Git execution/location controls never
+      // survive (HostGitSecurity). The hardened environment already sets
+      // GIT_OPTIONAL_LOCKS=0; Windows long-path support is appended through
+      // GIT_CONFIG_* on top of it.
+      const hardenedEnv = hardenedHostGitEnvironment([input.env, trace2Monitor.env], {
+        allowIndexFile: operationUsesPrivateIndex(input.operation),
+        writableRoots,
+      });
+      const commandEnv =
+        scopedAuth === null ? hardenedEnv : withGitConfigEntries(hardenedEnv, [scopedAuth.entry]);
+      const child = yield* commandSpawner
+        .spawn(
+          ChildProcess.make(
+            gitExecutable,
+            hardenedHostGitArguments(
+              scopedAuth === null
+                ? commandInput.args
+                : [
+                    "-c",
+                    "http.sslVerify=true",
+                    "-c",
+                    "http.followRedirects=false",
+                    "-c",
+                    "http.proxy=",
+                    "-c",
+                    "credential.helper=",
+                    "-c",
+                    `http.${scopedAuth.remoteUrl}.sslVerify=true`,
+                    "-c",
+                    `http.${scopedAuth.remoteUrl}.followRedirects=false`,
+                    "-c",
+                    `http.${scopedAuth.remoteUrl}.proxy=`,
+                    ...commandInput.args,
+                  ],
+              { safeDirectory: commandInput.cwd },
+            ),
+            {
+              cwd: commandInput.cwd,
+              env: { ...commandEnv, ...windowsLongPathConfigEnv(hostPlatform, commandEnv) },
+              extendEnv: false,
+            },
+          ),
+        )
+        .pipe(
           Effect.mapError(
             (cause) =>
               new GitCommandError({
                 ...gitCommandContext(commandInput),
-                detail: "Failed to create Git trace monitor.",
+                detail: "Failed to spawn Git process.",
                 cause,
               }),
           ),
         );
-        // Exact environment: inherited Git execution/location controls never
-        // survive (HostGitSecurity). The hardened environment already sets
-        // GIT_OPTIONAL_LOCKS=0; Windows long-path support is appended through
-        // GIT_CONFIG_* on top of it.
-        const hardenedEnv = hardenedHostGitEnvironment([input.env, trace2Monitor.env], {
-          allowIndexFile: operationUsesPrivateIndex(input.operation),
-          writableRoots,
-        });
-        const child = yield* commandSpawner
-          .spawn(
-            ChildProcess.make(
-              gitExecutable,
-              hardenedHostGitArguments(commandInput.args, { safeDirectory: commandInput.cwd }),
-              {
-                cwd: commandInput.cwd,
-                env: { ...hardenedEnv, ...windowsLongPathConfigEnv(hostPlatform, hardenedEnv) },
-                extendEnv: false,
-              },
-            ),
-          )
-          .pipe(
+
+      const [stdout, stderr, exitCode] = yield* Effect.all(
+        [
+          collectOutput(
+            commandInput,
+            child.stdout,
+            maxOutputBytes,
+            appendTruncationMarker,
+            input.progress?.onStdoutLine,
+            input.keepLineCallbacksAfterTruncation,
+          ),
+          collectOutput(
+            commandInput,
+            child.stderr,
+            maxOutputBytes,
+            appendTruncationMarker,
+            input.progress?.onStderrLine,
+            input.keepLineCallbacksAfterTruncation,
+          ),
+          child.exitCode.pipe(
             Effect.mapError(
               (cause) =>
                 new GitCommandError({
                   ...gitCommandContext(commandInput),
-                  detail: "Failed to spawn Git process.",
+                  detail: "Failed to read Git process exit code.",
                   cause,
                 }),
             ),
-          );
-
-        const [stdout, stderr, exitCode] = yield* Effect.all(
-          [
-            collectOutput(
-              commandInput,
-              child.stdout,
-              maxOutputBytes,
-              appendTruncationMarker,
-              input.progress?.onStdoutLine,
-              input.keepLineCallbacksAfterTruncation,
-            ),
-            collectOutput(
-              commandInput,
-              child.stderr,
-              maxOutputBytes,
-              appendTruncationMarker,
-              input.progress?.onStderrLine,
-              input.keepLineCallbacksAfterTruncation,
-            ),
-            child.exitCode.pipe(
-              Effect.mapError(
-                (cause) =>
-                  new GitCommandError({
-                    ...gitCommandContext(commandInput),
-                    detail: "Failed to read Git process exit code.",
-                    cause,
-                  }),
-              ),
-            ),
-            input.stdin === undefined
-              ? Effect.void
-              : Stream.run(Stream.encodeText(Stream.make(input.stdin)), child.stdin).pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new GitCommandError({
-                        ...gitCommandContext(commandInput),
-                        detail: "Failed to write Git process input.",
-                        cause,
-                      }),
-                  ),
+          ),
+          input.stdin === undefined
+            ? Effect.void
+            : Stream.run(Stream.encodeText(Stream.make(input.stdin)), child.stdin).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new GitCommandError({
+                      ...gitCommandContext(commandInput),
+                      detail: "Failed to write Git process input.",
+                      cause,
+                    }),
                 ),
-          ],
-          { concurrency: "unbounded" },
-        ).pipe(Effect.map(([stdout, stderr, exitCode]) => [stdout, stderr, exitCode] as const));
-        yield* trace2Monitor.flush;
+              ),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.map(([stdout, stderr, exitCode]) => [stdout, stderr, exitCode] as const));
+      yield* trace2Monitor.flush;
 
-        if (!input.allowNonZeroExit && exitCode !== 0) {
-          const reason = classifyGitFailure(stderr.text);
-          return yield* new GitCommandError({
-            ...gitCommandContext(commandInput),
-            ...(reason === null ? {} : { reason }),
-            detail: "Git command exited with a non-zero status.",
-            exitCode,
-            stdoutLength: stdout.text.length,
-            stderrLength: stderr.text.length,
-          });
-        }
-
-        return {
+      if (!input.allowNonZeroExit && exitCode !== 0) {
+        const reason = classifyGitFailure(stderr.text);
+        return yield* new GitCommandError({
+          ...gitCommandContext(commandInput),
+          ...(reason === null ? {} : { reason }),
+          detail: "Git command exited with a non-zero status.",
           exitCode,
-          stdout: stdout.text,
-          stderr: stderr.text,
-          stdoutTruncated: stdout.truncated,
-          stderrTruncated: stderr.truncated,
-        } satisfies GitVcsDriver.ExecuteGitResult;
-      });
-
-      const execution = runGitCommand().pipe(Effect.scoped);
-      if (timeoutMs === null) {
-        return yield* execution;
+          stdoutLength: stdout.text.length,
+          stderrLength: stderr.text.length,
+        });
       }
 
-      return yield* execution.pipe(
-        Effect.timeoutOption(timeoutMs),
-        Effect.flatMap((result) =>
-          Effect.fromOption(
-            result,
-            () =>
-              new GitCommandError({
-                ...gitCommandContext(commandInput),
-                detail: "Git command timed out.",
-              }),
-          ),
+      return {
+        exitCode,
+        stdout: stdout.text,
+        stderr: stderr.text,
+        stdoutTruncated: stdout.truncated,
+        stderrTruncated: stderr.truncated,
+      } satisfies GitVcsDriver.ExecuteGitResult;
+    });
+
+    const execution = runGitCommand().pipe(Effect.scoped);
+    if (timeoutMs === null) {
+      return yield* execution;
+    }
+
+    return yield* execution.pipe(
+      Effect.timeoutOption(timeoutMs),
+      Effect.flatMap((result) =>
+        Effect.fromOption(
+          result,
+          () =>
+            new GitCommandError({
+              ...gitCommandContext(commandInput),
+              detail: "Git command timed out.",
+            }),
         ),
-      );
-    },
-  );
+      ),
+    );
+  });
 
   const execute: GitVcsDriver.GitVcsDriver["Service"]["execute"] = (input) =>
-    executeRaw(input).pipe(
-      withMetrics({
-        counter: gitCommandsTotal,
-        timer: gitCommandDuration,
-        attributes: {
-          operation: input.operation,
-        },
-      }),
-      (execution) =>
-        input.timeoutMs === null || (input.timeoutMs ?? DEFAULT_TIMEOUT_MS) > DEFAULT_TIMEOUT_MS
+    scopedGitHubAuth(input).pipe(
+      Effect.mapError(
+        (detail) =>
+          new GitCommandError({
+            ...gitCommandContext(input),
+            detail: typeof detail === "string" ? detail : "Could not inspect GitHub remote safely.",
+          }),
+      ),
+      Effect.flatMap((scopedAuth) => {
+        const execution = executeRaw(input, scopedAuth).pipe(
+          withMetrics({
+            counter: gitCommandsTotal,
+            timer: gitCommandDuration,
+            attributes: { operation: input.operation },
+          }),
+        );
+        return input.timeoutMs === null ||
+          (input.timeoutMs ?? DEFAULT_TIMEOUT_MS) > DEFAULT_TIMEOUT_MS
           ? execution
-          : gitProcesses.withPermits(1)(execution),
+          : gitProcesses.withPermits(1)(execution);
+      }),
       Effect.withSpan(input.operation, {
         kind: "client",
         attributes: {
@@ -1258,6 +1350,122 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       Effect.map((result) => result.stdout),
     );
 
+  const inspectAuthenticatedGitConfig = Effect.fn("GitVcsDriver.scopedAuth.inspectConfig")(
+    function* (cwd: string, globals: readonly string[]) {
+      // --local omits config.worktree. Inspect every effective file source,
+      // including conditional includes, while ignoring our pinned -c entries.
+      const config = yield* executeGit(
+        "GitVcsDriver.scopedAuth.configNames",
+        cwd,
+        [...globals, "config", "--includes", "--show-origin", "--name-only", "-z", "--list"],
+        { allowNonZeroExit: true },
+      );
+      if (config.exitCode !== 0 || config.stdoutTruncated) {
+        return yield* Effect.fail("Could not inspect local Git configuration safely.");
+      }
+      const fields = config.stdout.split("\0");
+      if (fields.at(-1) !== "") {
+        return yield* Effect.fail("Could not inspect local Git configuration safely.");
+      }
+      fields.pop();
+      if (fields.length % 2 !== 0) {
+        return yield* Effect.fail("Could not inspect local Git configuration safely.");
+      }
+      for (let index = 0; index < fields.length; index += 2) {
+        const origin = fields[index];
+        const name = fields[index + 1];
+        if (!origin || !name) {
+          return yield* Effect.fail("Could not inspect local Git configuration safely.");
+        }
+        if (origin !== "command line:" && unsafeHostGitConfigName(name) !== undefined) {
+          return yield* Effect.fail("Local Git configuration is unsafe for authenticated Git.");
+        }
+      }
+    },
+  );
+
+  const scopedGitHubAuth = Effect.fn("GitVcsDriver.scopedGitHubAuth")(function* (
+    input: GitVcsDriver.ExecuteGitInput,
+  ) {
+    if (!input.operation.startsWith("GitVcsDriver.")) return null;
+    // Only leading global options can precede the verb. Values, refs, and
+    // remotes named "fetch" or "push" are never transport commands.
+    const invocation = parseGitInvocation(input.args);
+    if (invocation === null) return yield* Effect.fail("Unsupported leading Git option.");
+    const { globals, verbIndex, hasCommandConfig } = invocation;
+    const verb = input.args[verbIndex];
+    if (verb !== "push" && verb !== "fetch" && verb !== "pull") return null;
+    if (hasCommandConfig)
+      return yield* Effect.fail("Authenticated Git cannot use command configuration overrides.");
+    const explicitRemote = input.args.slice(verbIndex + 1).find((arg) => !arg.startsWith("-"));
+    const remoteName =
+      explicitRemote ?? (yield* resolveCurrentUpstream(input.cwd, globals))?.remoteName;
+    if (!remoteName || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(remoteName)) return null;
+    const rawUrl = (yield* runGitStdout(
+      "GitVcsDriver.scopedAuth.rawUrl",
+      input.cwd,
+      [...globals, "config", "--get-all", `remote.${remoteName}.url`],
+      true,
+    ))
+      .trim()
+      .split("\n");
+    const rawPushUrl =
+      verb === "push"
+        ? (yield* runGitStdout(
+            "GitVcsDriver.scopedAuth.rawPushUrl",
+            input.cwd,
+            [...globals, "config", "--get-all", `remote.${remoteName}.pushurl`],
+            true,
+          )).trim()
+        : "";
+    const configuredUrl = rawPushUrl || rawUrl[0] || "";
+    const managedUrl = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)(?:\.git)?$/iu;
+    const fetchMatch = managedUrl.exec(rawUrl[0] ?? "");
+    if (
+      fetchMatch !== null &&
+      GitHubProfileAuth.approvedGitHubProfileForOwner(fetchMatch[1] ?? "") !== null &&
+      configuredUrl !== rawUrl[0]
+    ) {
+      return yield* Effect.fail("GitHub remote has multiple or conflicting URLs.");
+    }
+    const match = managedUrl.exec(configuredUrl);
+    if (match === null) return null;
+    const owner = GitHubProfileAuth.approvedGitHubProfileForOwner(match[1] ?? "");
+    if (owner === null) return null;
+    if (rawUrl.length !== 1 || rawUrl[0] !== configuredUrl || rawPushUrl.includes("\n")) {
+      return yield* Effect.fail("GitHub remote has multiple or conflicting URLs.");
+    }
+    const effectiveUrl = (yield* runGitStdout("GitVcsDriver.scopedAuth.effectiveUrl", input.cwd, [
+      ...globals,
+      "remote",
+      "get-url",
+      ...(verb === "push" ? ["--push"] : []),
+      "--all",
+      remoteName,
+    ])).trim();
+    if (effectiveUrl !== configuredUrl || effectiveUrl.includes("\n")) {
+      return yield* Effect.fail("GitHub remote URL rewrite is not allowed for authenticated Git.");
+    }
+    yield* inspectAuthenticatedGitConfig(input.cwd, globals);
+    if (Option.isNone(profileAuth)) {
+      return yield* Effect.fail("The selected GitHub profile is unavailable.");
+    }
+    const credential = yield* profileAuth.value
+      .get(owner)
+      .pipe(Effect.mapError(() => `GitHub profile ${owner} is unavailable.`));
+    const trusted = validateTrustedGitConfig({
+      remoteUrl: configuredUrl,
+      key: `http.${configuredUrl}.extraheader`,
+      value: Redacted.make(
+        `AUTHORIZATION: basic ${Base64.encode(`x-access-token:${Redacted.value(credential.token)}`)}`,
+      ),
+    });
+    if ("rejected" in trusted) {
+      return yield* Effect.fail("GitHub remote is not safe for authenticated Git.");
+    }
+    return { remoteUrl: configuredUrl, entry: trusted.entry };
+  });
+
   /**
    * Runs `git worktree list --porcelain -z`. Git before 2.36 rejects `-z`, so a failed run
    * retries the line form and returns it NUL-delimited, the same shape as `-z` output.
@@ -1329,11 +1537,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     });
   });
 
-  const resolveCurrentUpstream = Effect.fn("resolveCurrentUpstream")(function* (cwd: string) {
+  const resolveCurrentUpstream = Effect.fn("resolveCurrentUpstream")(function* (
+    cwd: string,
+    globals: readonly string[] = [],
+  ) {
     const upstreamRef = yield* runGitStdout(
       "GitVcsDriver.resolveCurrentUpstream",
       cwd,
-      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+      [...globals, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
       true,
     ).pipe(Effect.map((stdout) => stdout.trim()));
 
@@ -1341,7 +1552,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       return null;
     }
 
-    const remoteNames = yield* runGitStdout("GitVcsDriver.listRemoteNames", cwd, ["remote"]).pipe(
+    const remoteNames = yield* runGitStdout("GitVcsDriver.listRemoteNames", cwd, [
+      ...globals,
+      "remote",
+    ]).pipe(
       Effect.map(parseRemoteNames),
       Effect.orElseSucceed((): ReadonlyArray<string> => []),
     );

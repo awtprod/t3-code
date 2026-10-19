@@ -559,6 +559,58 @@ describe("GitHubSourceControlProvider writes", () => {
       assert.strictEqual(requests.length, 2);
     });
   });
+
+  it.effect("verifies exact GitHub repository visibility before publication resumes", () =>
+    Effect.gen(function* () {
+      const requests: string[] = [];
+      const gh = yield* makeProvider({
+        rest: (input) =>
+          Effect.sync(() => {
+            requests.push(input.path);
+            return restResponse({
+              full_name: "exampleowner/sample",
+              html_url: "https://github.com/exampleowner/sample",
+              ssh_url: "git@github.com:exampleowner/sample.git",
+              private: true,
+            });
+          }),
+      });
+      assert.equal(
+        yield* gh.getRepositoryVisibility!({ cwd: "/repo", repository: "exampleowner/sample" }),
+        "private",
+      );
+      assert.deepStrictEqual(requests, ["repos/exampleowner/sample"]);
+      const wrong = yield* Effect.flip(
+        gh.getRepositoryVisibility!({ cwd: "/repo", repository: "exampleorg/sample" }),
+      );
+      assert.include(wrong.message, "incomplete repository visibility");
+    }),
+  );
+
+  it.effect("checks whether an existing repository is empty before resuming publication", () =>
+    Effect.gen(function* () {
+      const requests: Array<{
+        operation: string;
+        variables: Readonly<Record<string, unknown>> | undefined;
+      }> = [];
+      const gh = yield* makeProvider({
+        graphql: (input) =>
+          Effect.sync(() => {
+            requests.push({ operation: input.operation, variables: input.variables });
+            return encodeJson({ data: { repository: { isEmpty: true } } });
+          }),
+      });
+      assert.isTrue(
+        yield* gh.getRepositoryIsEmpty!({ cwd: "/repo", repository: "exampleowner/sample" }),
+      );
+      assert.deepStrictEqual(requests, [
+        {
+          operation: "getRepositoryIsEmpty",
+          variables: { owner: "exampleowner", name: "sample" },
+        },
+      ]);
+    }),
+  );
 });
 
 describe("GitHubSourceControlProvider.checkoutChangeRequest", () => {
