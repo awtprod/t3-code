@@ -281,6 +281,7 @@ export function useSourceControlPublishRepositoryAction(scope: SourceControlActi
       visibility: SourceControlRepositoryVisibility;
       remoteName: string;
       protocol: SourceControlCloneProtocol;
+      resumeExisting?: boolean;
     }) => {
       const target = resolveScope(scope);
       if (target === null) {

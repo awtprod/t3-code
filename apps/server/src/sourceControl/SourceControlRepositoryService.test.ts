@@ -1,13 +1,14 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { afterAll, assert, beforeAll, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as Redacted from "effect/Redacted";
 import { ChildProcessSpawner } from "effect/process";
 
 import { GitCommandError, SourceControlProviderError } from "@t3tools/contracts";
@@ -19,8 +20,22 @@ import * as BitbucketSourceControlProvider from "@t3tools/source-control-bitbuck
 import type * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as SourceControlRepositoryService from "./SourceControlRepositoryService.ts";
+import * as GitHubProfileAuth from "./GitHubProfileAuth.ts";
+import * as GitHubApi from "@t3tools/source-control-github/server/GitHubApi";
 
 const isSourceControlProviderError = Schema.is(SourceControlProviderError);
+
+const previousProfileMap = process.env.COMMAND_CENTER_GITHUB_PROFILE_MAP;
+beforeAll(() => {
+  process.env.COMMAND_CENTER_GITHUB_PROFILE_MAP = JSON.stringify({
+    exampleowner: { profile: "primary", login: "exampleowner" },
+    exampleorg: { profile: "secondary", login: "examplelogin" },
+  });
+});
+afterAll(() => {
+  if (previousProfileMap === undefined) delete process.env.COMMAND_CENTER_GITHUB_PROFILE_MAP;
+  else process.env.COMMAND_CENTER_GITHUB_PROFILE_MAP = previousProfileMap;
+});
 
 const CLONE_URLS = {
   nameWithOwner: "octocat/t3code",
@@ -44,6 +59,7 @@ function makeProvider(
     createChangeRequest: () => unsupported("createChangeRequest"),
     getRepositoryCloneUrls: () => Effect.succeed(CLONE_URLS),
     createRepository: () => Effect.succeed(CLONE_URLS),
+    getRepositoryIsEmpty: () => Effect.succeed(true),
     getDefaultBranch: () => Effect.succeed(null),
     checkoutChangeRequest: () => unsupported("checkoutChangeRequest"),
     ...overrides,
@@ -60,10 +76,38 @@ function processOutput(): GitVcsDriver.ExecuteGitResult {
   };
 }
 
+function managedRemoteExecute(
+  fetchUrl: string,
+  initialPushUrl = "",
+): GitVcsDriver.GitVcsDriver["Service"]["execute"] {
+  let configuredFetch = fetchUrl;
+  let configuredPush = initialPushUrl;
+  return (input) =>
+    Effect.sync(() => {
+      const args = input.args;
+      if (args[0] === "remote" && args[1] === "set-url") {
+        if (args[2] === "--push") configuredPush = args[4] ?? "";
+        else configuredFetch = args[3] ?? "";
+      }
+      const stdout =
+        args[0] === "remote" && args[1] === "get-url"
+          ? `${configuredPush || configuredFetch}\n`
+          : args[0] === "config" && args[1] === "--get-all"
+            ? args[2]?.endsWith(".pushurl")
+              ? configuredPush
+              : args[2]?.endsWith(".url")
+                ? configuredFetch
+                : ""
+            : "";
+      return { ...processOutput(), stdout };
+    });
+}
+
 function layer(input: {
   readonly provider?: SourceControlProvider.SourceControlProvider["Service"];
   readonly git?: Partial<GitVcsDriver.GitVcsDriver["Service"]>;
   readonly fileSystem?: FileSystem.FileSystem;
+  readonly profile?: GitHubProfileAuth.GitHubProfileAuth["Service"];
 }) {
   const layerService = SourceControlRepositoryService.layer.pipe(
     Layer.provide(
@@ -71,6 +115,18 @@ function layer(input: {
         resolveLink: () => undefined,
         get: () => Effect.succeed(input.provider ?? makeProvider()),
       }),
+    ),
+    Layer.provide(
+      Layer.succeed(
+        GitHubProfileAuth.GitHubProfileAuth,
+        input.profile ??
+          GitHubProfileAuth.GitHubProfileAuth.of({
+            get: () =>
+              Effect.fail(
+                new GitHubProfileAuth.GitHubProfileUnavailableError({ account: "unknown" }),
+              ),
+          }),
+      ),
     ),
     Layer.provide(
       Layer.mock(GitVcsDriver.GitVcsDriver)({
@@ -127,6 +183,638 @@ it.effect("looks up repositories through the requested provider without search",
     assert.deepStrictEqual(calls, [{ cwd: "/workspace", repository: "octocat/t3code" }]);
   }).pipe(Effect.provide(layer({ provider })));
 });
+
+it.effect("publishes exampleowner through its selected credential and an HTTPS remote", () => {
+  const pins: Array<string | null> = [];
+  const remotes: string[] = [];
+  const provider = makeProvider({
+    createRepository: () =>
+      Effect.gen(function* () {
+        const pin = yield* GitHubApi.PinnedGitHubCredential;
+        pins.push(pin?.credentialFingerprint ?? null);
+        return {
+          nameWithOwner: "exampleowner/test-repo",
+          url: "https://github.com/exampleowner/test-repo",
+          sshUrl: "git@github.com:exampleowner/test-repo.git",
+        };
+      }),
+  });
+  return Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    const result = yield* service.publishRepository({
+      cwd: "/workspace",
+      provider: SourceControlProviderKind.make("github"),
+      repository: "exampleowner/test-repo",
+      visibility: "private",
+      protocol: "ssh",
+    });
+    assert.deepStrictEqual(pins, ["github.com:test-fingerprint"]);
+    assert.deepStrictEqual(remotes, ["https://github.com/exampleowner/test-repo.git"]);
+    assert.equal(result.remoteUrl, "https://github.com/exampleowner/test-repo.git");
+  }).pipe(
+    Effect.provide(
+      layer({
+        provider,
+        profile: GitHubProfileAuth.GitHubProfileAuth.of({
+          get: (owner) =>
+            owner === "exampleowner"
+              ? Effect.succeed({
+                  account: "exampleowner",
+                  token: Redacted.make("fake-token"),
+                  fingerprint: "github.com:test-fingerprint",
+                })
+              : Effect.fail(
+                  new GitHubProfileAuth.GitHubProfileUnavailableError({ account: owner }),
+                ),
+        }),
+        git: {
+          ensureRemote: (input) =>
+            Effect.sync(() => {
+              remotes.push(input.url);
+              return "origin";
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("normalizes a managed GitHub URL before selecting its profile", () => {
+  const requested: string[] = [];
+  const pins: Array<string | null> = [];
+  const provider = makeProvider({
+    getRepositoryCloneUrls: (input) =>
+      Effect.gen(function* () {
+        requested.push(input.repository);
+        pins.push((yield* GitHubApi.PinnedGitHubCredential)?.credentialFingerprint ?? null);
+        return {
+          nameWithOwner: "exampleowner/sample",
+          url: "https://github.com/exampleowner/sample",
+          sshUrl: "git@github.com:exampleowner/sample.git",
+        };
+      }),
+  });
+  return Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    yield* service.lookupRepository({
+      provider: SourceControlProviderKind.make("github"),
+      repository: "https://github.com/exampleowner/sample",
+      cwd: "/workspace",
+    });
+    assert.deepStrictEqual(requested, ["exampleowner/sample"]);
+    assert.deepStrictEqual(pins, ["github.com:test-fingerprint"]);
+  }).pipe(
+    Effect.provide(
+      layer({
+        provider,
+        profile: GitHubProfileAuth.GitHubProfileAuth.of({
+          get: (owner) =>
+            owner === "exampleowner"
+              ? Effect.succeed({
+                  account: "exampleowner",
+                  token: Redacted.make("fake-token"),
+                  fingerprint: "github.com:test-fingerprint",
+                })
+              : Effect.fail(
+                  new GitHubProfileAuth.GitHubProfileUnavailableError({ account: owner }),
+                ),
+        }),
+      }),
+    ),
+  );
+});
+
+it.effect("refuses a different push URL before publishing source", () => {
+  const urls = {
+    nameWithOwner: "exampleowner/sample",
+    url: "https://github.com/exampleowner/sample",
+    sshUrl: "git@github.com:exampleowner/sample.git",
+  };
+  let pushes = 0;
+  return Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    const result = yield* service.publishRepository({
+      cwd: "/workspace",
+      provider: SourceControlProviderKind.make("github"),
+      repository: urls.nameWithOwner,
+      visibility: "private",
+    });
+    assert.equal(result.status, "remote_failed");
+    assert.equal(pushes, 0);
+  }).pipe(
+    Effect.provide(
+      layer({
+        provider: makeProvider({ createRepository: () => Effect.succeed(urls) }),
+        profile: GitHubProfileAuth.GitHubProfileAuth.of({
+          get: () =>
+            Effect.succeed({
+              account: "exampleowner",
+              token: Redacted.make("fake-token"),
+              fingerprint: "test",
+            }),
+        }),
+        git: {
+          execute: managedRemoteExecute(
+            "https://github.com/exampleowner/sample.git",
+            "https://example.invalid/other.git",
+          ),
+          pushCurrentBranch: () => {
+            pushes += 1;
+            return Effect.die("unexpected push");
+          },
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("converts a matching SSH remote before the first managed publish", () => {
+  const urls = {
+    nameWithOwner: "exampleowner/sample",
+    url: "https://github.com/exampleowner/sample",
+    sshUrl: "git@github.com:exampleowner/sample.git",
+  };
+  const commands: string[][] = [];
+  const execute = managedRemoteExecute(urls.sshUrl);
+  let pushes = 0;
+  return Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    const result = yield* service.publishRepository({
+      cwd: "/workspace",
+      provider: SourceControlProviderKind.make("github"),
+      repository: urls.nameWithOwner,
+      visibility: "public",
+    });
+    assert.equal(result.status, "pushed");
+    assert.equal(pushes, 1);
+    assert.deepStrictEqual(
+      commands.filter((args) => args[0] === "remote" && args[1] === "set-url"),
+      [["remote", "set-url", "origin", "https://github.com/exampleowner/sample.git"]],
+    );
+  }).pipe(
+    Effect.provide(
+      layer({
+        provider: makeProvider({ createRepository: () => Effect.succeed(urls) }),
+        profile: GitHubProfileAuth.GitHubProfileAuth.of({
+          get: () =>
+            Effect.succeed({
+              account: "exampleowner",
+              token: Redacted.make("fake-token"),
+              fingerprint: "test",
+            }),
+        }),
+        git: {
+          execute: (input) => {
+            commands.push([...input.args]);
+            return execute(input);
+          },
+          pushCurrentBranch: () => {
+            pushes += 1;
+            return Effect.succeed({
+              status: "pushed" as const,
+              branch: "main",
+              upstreamBranch: "origin/main",
+              setUpstream: true,
+            });
+          },
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("reports a partial publication when HTTPS remote migration fails", () => {
+  const urls = {
+    nameWithOwner: "exampleowner/sample",
+    url: "https://github.com/exampleowner/sample",
+    sshUrl: "git@github.com:exampleowner/sample.git",
+  };
+  const execute = managedRemoteExecute(urls.sshUrl);
+  let pushes = 0;
+  return Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    const result = yield* service.publishRepository({
+      cwd: "/workspace",
+      provider: SourceControlProviderKind.make("github"),
+      repository: urls.nameWithOwner,
+      visibility: "public",
+    });
+    assert.equal(result.status, "remote_failed");
+    assert.equal(result.repository.url, urls.url);
+    assert.equal(pushes, 0);
+  }).pipe(
+    Effect.provide(
+      layer({
+        provider: makeProvider({ createRepository: () => Effect.succeed(urls) }),
+        profile: GitHubProfileAuth.GitHubProfileAuth.of({
+          get: () =>
+            Effect.succeed({
+              account: "exampleowner",
+              token: Redacted.make("fake-token"),
+              fingerprint: "test",
+            }),
+        }),
+        git: {
+          execute: (input) =>
+            input.args[0] === "remote" && input.args[1] === "set-url"
+              ? Effect.fail(
+                  new GitCommandError({
+                    operation: input.operation,
+                    command: "git remote set-url",
+                    cwd: input.cwd,
+                    detail: "Git command exited with a non-zero status.",
+                  }),
+                )
+              : execute(input),
+          pushCurrentBranch: () => {
+            pushes += 1;
+            return Effect.die("unexpected push");
+          },
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("validates a managed remote name before creating the repository", () => {
+  let creates = 0;
+  return Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    const error = yield* Effect.flip(
+      service.publishRepository({
+        cwd: "/workspace",
+        provider: SourceControlProviderKind.make("github"),
+        repository: "exampleowner/sample",
+        visibility: "private",
+        remoteName: "bad name",
+      }),
+    );
+    assert.equal(error.detail, "Choose a valid Git remote name.");
+    assert.equal(creates, 0);
+  }).pipe(
+    Effect.provide(
+      layer({
+        provider: makeProvider({
+          createRepository: () =>
+            Effect.sync(() => {
+              creates += 1;
+              return CLONE_URLS;
+            }),
+        }),
+      }),
+    ),
+  );
+});
+
+it.effect(
+  "continues a verified partial GitHub publish without creating a second repository",
+  () => {
+    const urls = {
+      nameWithOwner: "exampleowner/sample",
+      url: "https://github.com/exampleowner/sample",
+      sshUrl: "git@github.com:exampleowner/sample.git",
+    };
+    let creates = 0;
+    let lookups = 0;
+    let pushes = 0;
+    const provider = makeProvider({
+      createRepository: () =>
+        Effect.sync(() => {
+          creates += 1;
+          return urls;
+        }),
+      getRepositoryCloneUrls: () =>
+        Effect.sync(() => {
+          lookups += 1;
+          return urls;
+        }),
+      getRepositoryVisibility: () => Effect.succeed("private"),
+    });
+    return Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      const input = {
+        cwd: "/workspace",
+        provider: SourceControlProviderKind.make("github"),
+        repository: "exampleowner/sample",
+        visibility: "private" as const,
+        remoteName: "origin",
+      };
+      const partial = yield* service.publishRepository(input);
+      assert.equal(partial.status, "push_failed");
+      assert.equal(partial.failureReason, "authentication_failed");
+      assert.equal(partial.repository.url, urls.url);
+
+      const completed = yield* service.publishRepository({ ...input, resumeExisting: true });
+      assert.equal(completed.status, "pushed");
+      assert.equal(creates, 1);
+      assert.equal(lookups, 1);
+      assert.equal(pushes, 2);
+    }).pipe(
+      Effect.provide(
+        layer({
+          provider,
+          profile: GitHubProfileAuth.GitHubProfileAuth.of({
+            get: () =>
+              Effect.succeed({
+                account: "exampleowner",
+                token: Redacted.make("fake-token"),
+                fingerprint: "test",
+              }),
+          }),
+          git: {
+            execute: managedRemoteExecute("https://github.com/exampleowner/sample.git"),
+            pushCurrentBranch: () =>
+              Effect.sync(() => {
+                pushes += 1;
+                if (pushes === 1) return null;
+                return {
+                  status: "pushed" as const,
+                  branch: "main",
+                  upstreamBranch: "origin/main",
+                  setUpstream: true,
+                };
+              }).pipe(
+                Effect.flatMap((result) =>
+                  result === null
+                    ? Effect.fail(
+                        new GitCommandError({
+                          operation: "GitVcsDriver.pushCurrentBranch.pushWithRequestedRemote",
+                          command: "git push",
+                          cwd: "/workspace",
+                          detail: "Git command exited with a non-zero status.",
+                          reason: "authentication_failed",
+                        }),
+                      )
+                    : Effect.succeed(result),
+                ),
+              ),
+          },
+        }),
+      ),
+    );
+  },
+);
+
+it.effect("reports a remote setup failure and resumes only after verifying visibility", () => {
+  const urls = {
+    nameWithOwner: "exampleorg/sample",
+    url: "https://github.com/exampleorg/sample",
+    sshUrl: "git@github.com:exampleorg/sample.git",
+  };
+  let creates = 0;
+  let remotes = 0;
+  let pushes = 0;
+  const provider = makeProvider({
+    createRepository: () =>
+      Effect.sync(() => {
+        creates += 1;
+        return urls;
+      }),
+    getRepositoryCloneUrls: () => Effect.succeed(urls),
+    getRepositoryVisibility: () => Effect.succeed("public"),
+  });
+  return Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    const input = {
+      cwd: "/workspace",
+      provider: SourceControlProviderKind.make("github"),
+      repository: "exampleorg/sample",
+      visibility: "public" as const,
+      remoteName: "origin",
+    };
+    const partial = yield* service.publishRepository(input);
+    assert.equal(partial.status, "remote_failed");
+    assert.equal(partial.repository.url, urls.url);
+    const completed = yield* service.publishRepository({ ...input, resumeExisting: true });
+    assert.equal(completed.status, "pushed");
+    assert.equal(creates, 1);
+    assert.equal(remotes, 2);
+    assert.equal(pushes, 1);
+  }).pipe(
+    Effect.provide(
+      layer({
+        provider,
+        profile: GitHubProfileAuth.GitHubProfileAuth.of({
+          get: () =>
+            Effect.succeed({
+              account: "exampleorg",
+              token: Redacted.make("fake-token"),
+              fingerprint: "test",
+            }),
+        }),
+        git: {
+          execute: managedRemoteExecute("https://github.com/exampleorg/sample.git"),
+          ensureRemote: () =>
+            Effect.sync(() => {
+              remotes += 1;
+              return remotes;
+            }).pipe(
+              Effect.flatMap((attempt) =>
+                attempt === 1
+                  ? Effect.fail(
+                      new GitCommandError({
+                        operation: "ensureRemote",
+                        command: "git remote add",
+                        cwd: "/workspace",
+                        detail: "Git command exited with a non-zero status.",
+                      }),
+                    )
+                  : Effect.succeed("origin"),
+              ),
+            ),
+          pushCurrentBranch: () =>
+            Effect.sync(() => {
+              pushes += 1;
+              return {
+                status: "pushed" as const,
+                branch: "main",
+                upstreamBranch: "origin/main",
+                setUpstream: true,
+              };
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("refuses to resume a repository with different visibility", () => {
+  let creates = 0;
+  let remotes = 0;
+  const provider = makeProvider({
+    createRepository: () =>
+      Effect.sync(() => {
+        creates += 1;
+        return CLONE_URLS;
+      }),
+    getRepositoryCloneUrls: () =>
+      Effect.succeed({
+        nameWithOwner: "exampleowner/sample",
+        url: "https://github.com/exampleowner/sample",
+        sshUrl: "git@github.com:exampleowner/sample.git",
+      }),
+    getRepositoryVisibility: () => Effect.succeed("public"),
+  });
+  return Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    const error = yield* Effect.flip(
+      service.publishRepository({
+        cwd: "/workspace",
+        provider: SourceControlProviderKind.make("github"),
+        repository: "exampleowner/sample",
+        visibility: "private",
+        resumeExisting: true,
+      }),
+    );
+    assert.equal(
+      error.detail,
+      "Existing repository visibility differs from the selected visibility.",
+    );
+    assert.equal(creates, 0);
+    assert.equal(remotes, 0);
+  }).pipe(
+    Effect.provide(
+      layer({
+        provider,
+        profile: GitHubProfileAuth.GitHubProfileAuth.of({
+          get: () =>
+            Effect.succeed({
+              account: "exampleowner",
+              token: Redacted.make("fake-token"),
+              fingerprint: "test",
+            }),
+        }),
+        git: {
+          ensureRemote: () =>
+            Effect.sync(() => {
+              remotes += 1;
+              return "origin";
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("refuses to resume a repository that already contains source", () => {
+  let creates = 0;
+  let remotes = 0;
+  const provider = makeProvider({
+    createRepository: () =>
+      Effect.sync(() => {
+        creates += 1;
+        return CLONE_URLS;
+      }),
+    getRepositoryCloneUrls: () =>
+      Effect.succeed({
+        nameWithOwner: "exampleowner/sample",
+        url: "https://github.com/exampleowner/sample",
+        sshUrl: "git@github.com:exampleowner/sample.git",
+      }),
+    getRepositoryVisibility: () => Effect.succeed("private"),
+    getRepositoryIsEmpty: () => Effect.succeed(false),
+  });
+  return Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    const error = yield* Effect.flip(
+      service.publishRepository({
+        cwd: "/workspace",
+        provider: SourceControlProviderKind.make("github"),
+        repository: "exampleowner/sample",
+        visibility: "private",
+        resumeExisting: true,
+      }),
+    );
+    assert.equal(
+      error.detail,
+      "The existing repository contains source. Inspect it before pushing.",
+    );
+    assert.equal(creates, 0);
+    assert.equal(remotes, 0);
+  }).pipe(
+    Effect.provide(
+      layer({
+        provider,
+        profile: GitHubProfileAuth.GitHubProfileAuth.of({
+          get: () =>
+            Effect.succeed({
+              account: "primary",
+              token: Redacted.make("fake-token"),
+              fingerprint: "test",
+            }),
+        }),
+        git: {
+          ensureRemote: () =>
+            Effect.sync(() => {
+              remotes += 1;
+              return "origin";
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect(
+  "continues the earlier SSH partial publish by switching only its matching remote to HTTPS",
+  () => {
+    const urls = {
+      nameWithOwner: "exampleowner/sample",
+      url: "https://github.com/exampleowner/sample",
+      sshUrl: "git@github.com:exampleowner/sample.git",
+    };
+    const commands: string[][] = [];
+    const execute = managedRemoteExecute(urls.sshUrl);
+    let creates = 0;
+    const provider = makeProvider({
+      createRepository: () =>
+        Effect.sync(() => {
+          creates += 1;
+          return urls;
+        }),
+      getRepositoryCloneUrls: () => Effect.succeed(urls),
+      getRepositoryVisibility: () => Effect.succeed("public"),
+    });
+    return Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      const result = yield* service.publishRepository({
+        cwd: "/workspace",
+        provider: SourceControlProviderKind.make("github"),
+        repository: "exampleowner/sample",
+        visibility: "public",
+        remoteName: "origin",
+        resumeExisting: true,
+      });
+      assert.equal(result.status, "pushed");
+      assert.equal(result.remoteUrl, "https://github.com/exampleowner/sample.git");
+      assert.equal(creates, 0);
+      assert.deepStrictEqual(
+        commands.filter((args) => args[0] === "remote" && args[1] === "set-url"),
+        [["remote", "set-url", "origin", "https://github.com/exampleowner/sample.git"]],
+      );
+    }).pipe(
+      Effect.provide(
+        layer({
+          provider,
+          profile: GitHubProfileAuth.GitHubProfileAuth.of({
+            get: () =>
+              Effect.succeed({
+                account: "exampleowner",
+                token: Redacted.make("fake-token"),
+                fingerprint: "test",
+              }),
+          }),
+          git: {
+            execute: (input) => {
+              commands.push([...input.args]);
+              return execute(input);
+            },
+          },
+        }),
+      ),
+    );
+  },
+);
 
 it.effect("preserves provider failures without deriving the repository message from them", () => {
   const providerCause = new SourceControlProviderError({

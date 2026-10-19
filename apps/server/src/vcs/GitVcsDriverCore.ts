@@ -4,10 +4,15 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Base64 from "effect/encoding/Base64";
+import * as Redacted from "effect/Redacted";
 import {
   hardenedHostGitArguments,
   hardenedHostGitEnvironment,
   resolveTrustedHostExecutable,
+  unsafeHostGitConfigName,
+  validateTrustedGitConfig,
+  withGitConfigEntries,
 } from "./HostGitSecurity.ts";
 import * as Hex from "effect/encoding/Hex";
 import * as Exit from "effect/Exit";
@@ -48,6 +53,7 @@ import {
   parseRemoteRefWithRemoteNames,
 } from "../git/remoteRefs.ts";
 import * as ServerConfig from "../config.ts";
+import * as GitHubProfileAuth from "../sourceControl/GitHubProfileAuth.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const gitProcesses = Semaphore.makeUnsafe(8);
@@ -1015,9 +1021,13 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const { worktreesDir } = yield* ServerConfig.ServerConfig;
   const crypto = yield* Crypto.Crypto;
   const hostPlatform = yield* HostProcess.Platform;
+  const profileAuth = yield* Effect.serviceOption(GitHubProfileAuth.GitHubProfileAuth);
 
-  const executeRaw: GitVcsDriver.GitVcsDriver["Service"]["execute"] = Effect.fnUntraced(
-    function* (input) {
+  const executeRaw = Effect.fnUntraced(
+    function* (
+      input: GitVcsDriver.ExecuteGitInput,
+      scopedAuth: { readonly remoteUrl: string; readonly entry: readonly [string, string] } | null,
+    ) {
       const commandInput = {
         ...input,
         args: [...input.args],
@@ -1055,14 +1065,37 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           allowIndexFile: operationUsesPrivateIndex(input.operation),
           writableRoots,
         });
+        const commandEnv =
+          scopedAuth === null ? hardenedEnv : withGitConfigEntries(hardenedEnv, [scopedAuth.entry]);
         const child = yield* commandSpawner
           .spawn(
             ChildProcess.make(
               gitExecutable,
-              hardenedHostGitArguments(commandInput.args, { safeDirectory: commandInput.cwd }),
+              hardenedHostGitArguments(
+                scopedAuth === null
+                  ? commandInput.args
+                  : [
+                      "-c",
+                      "http.sslVerify=true",
+                      "-c",
+                      "http.followRedirects=false",
+                      "-c",
+                      "http.proxy=",
+                      "-c",
+                      "credential.helper=",
+                      "-c",
+                      `http.${scopedAuth.remoteUrl}.sslVerify=true`,
+                      "-c",
+                      `http.${scopedAuth.remoteUrl}.followRedirects=false`,
+                      "-c",
+                      `http.${scopedAuth.remoteUrl}.proxy=`,
+                      ...commandInput.args,
+                    ],
+                { safeDirectory: commandInput.cwd },
+              ),
               {
                 cwd: commandInput.cwd,
-                env: { ...hardenedEnv, ...windowsLongPathConfigEnv(hostPlatform, hardenedEnv) },
+                env: { ...commandEnv, ...windowsLongPathConfigEnv(hostPlatform, commandEnv) },
                 extendEnv: false,
               },
             ),
@@ -1166,18 +1199,26 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   );
 
   const execute: GitVcsDriver.GitVcsDriver["Service"]["execute"] = (input) =>
-    executeRaw(input).pipe(
-      withMetrics({
-        counter: gitCommandsTotal,
-        timer: gitCommandDuration,
-        attributes: {
-          operation: input.operation,
-        },
-      }),
-      (execution) =>
-        input.timeoutMs === null || (input.timeoutMs ?? DEFAULT_TIMEOUT_MS) > DEFAULT_TIMEOUT_MS
+    scopedGitHubAuth(input).pipe(
+      Effect.mapError(
+        (detail) =>
+          new GitCommandError({
+            ...gitCommandContext(input),
+            detail: typeof detail === "string" ? detail : "Could not inspect GitHub remote safely.",
+          }),
+      ),
+      Effect.flatMap((scopedAuth) => {
+        const execution = executeRaw(input, scopedAuth).pipe(
+          withMetrics({
+            counter: gitCommandsTotal,
+            timer: gitCommandDuration,
+            attributes: { operation: input.operation },
+          }),
+        );
+        return input.timeoutMs === null || (input.timeoutMs ?? DEFAULT_TIMEOUT_MS) > DEFAULT_TIMEOUT_MS
           ? execution
-          : gitProcesses.withPermits(1)(execution),
+          : gitProcesses.withPermits(1)(execution);
+      }),
       Effect.withSpan(input.operation, {
         kind: "client",
         attributes: {
@@ -1257,6 +1298,115 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     executeGit(operation, cwd, args, { allowNonZeroExit }).pipe(
       Effect.map((result) => result.stdout),
     );
+
+  const inspectAuthenticatedGitConfig = Effect.fn("GitVcsDriver.scopedAuth.inspectConfig")(
+    function* (cwd: string) {
+      // --local omits config.worktree. Inspect every effective file source,
+      // including conditional includes, while ignoring our pinned -c entries.
+      const config = yield* executeGit(
+        "GitVcsDriver.scopedAuth.configNames",
+        cwd,
+        ["config", "--includes", "--show-origin", "--name-only", "-z", "--list"],
+        { allowNonZeroExit: true },
+      );
+      if (config.exitCode !== 0 || config.stdoutTruncated) {
+        return yield* Effect.fail("Could not inspect local Git configuration safely.");
+      }
+      const fields = config.stdout.split("\0");
+      if (fields.at(-1) !== "") {
+        return yield* Effect.fail("Could not inspect local Git configuration safely.");
+      }
+      fields.pop();
+      if (fields.length % 2 !== 0) {
+        return yield* Effect.fail("Could not inspect local Git configuration safely.");
+      }
+      for (let index = 0; index < fields.length; index += 2) {
+        const origin = fields[index];
+        const name = fields[index + 1];
+        if (!origin || !name) {
+          return yield* Effect.fail("Could not inspect local Git configuration safely.");
+        }
+        if (origin !== "command line:" && unsafeHostGitConfigName(name) !== undefined) {
+          return yield* Effect.fail("Local Git configuration is unsafe for authenticated Git.");
+        }
+      }
+    },
+  );
+
+  const scopedGitHubAuth = Effect.fn("GitVcsDriver.scopedGitHubAuth")(function* (
+    input: GitVcsDriver.ExecuteGitInput,
+  ) {
+    if (!input.operation.startsWith("GitVcsDriver.")) return null;
+    // Internal transport calls pass the Git subcommand first. A ref or remote
+    // named "push" must never turn an unrelated command into a transport.
+    const verb = input.args[0];
+    if (verb !== "push" && verb !== "fetch" && verb !== "pull") return null;
+    const explicitRemote = input.args.slice(1).find((arg) => !arg.startsWith("-"));
+    const remoteName = explicitRemote ?? (yield* resolveCurrentUpstream(input.cwd))?.remoteName;
+    if (!remoteName || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(remoteName)) return null;
+    const rawUrl = (yield* runGitStdout(
+      "GitVcsDriver.scopedAuth.rawUrl",
+      input.cwd,
+      ["config", "--get-all", `remote.${remoteName}.url`],
+      true,
+    ))
+      .trim()
+      .split("\n");
+    const rawPushUrl =
+      verb === "push"
+        ? (yield* runGitStdout(
+            "GitVcsDriver.scopedAuth.rawPushUrl",
+            input.cwd,
+            ["config", "--get-all", `remote.${remoteName}.pushurl`],
+            true,
+          )).trim()
+        : "";
+    const configuredUrl = rawPushUrl || rawUrl[0] || "";
+    const managedUrl = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)(?:\.git)?$/iu;
+    const fetchMatch = managedUrl.exec(rawUrl[0] ?? "");
+    if (
+      fetchMatch !== null &&
+      GitHubProfileAuth.approvedGitHubProfileForOwner(fetchMatch[1] ?? "") !== null &&
+      configuredUrl !== rawUrl[0]
+    ) {
+      return yield* Effect.fail("GitHub remote has multiple or conflicting URLs.");
+    }
+    const match = managedUrl.exec(configuredUrl);
+    if (match === null) return null;
+    const owner = GitHubProfileAuth.approvedGitHubProfileForOwner(match[1] ?? "");
+    if (owner === null) return null;
+    if (rawUrl.length !== 1 || rawUrl[0] !== configuredUrl || rawPushUrl.includes("\n")) {
+      return yield* Effect.fail("GitHub remote has multiple or conflicting URLs.");
+    }
+    const effectiveUrl = (yield* runGitStdout("GitVcsDriver.scopedAuth.effectiveUrl", input.cwd, [
+      "remote",
+      "get-url",
+      ...(verb === "push" ? ["--push"] : []),
+      "--all",
+      remoteName,
+    ])).trim();
+    if (effectiveUrl !== configuredUrl || effectiveUrl.includes("\n")) {
+      return yield* Effect.fail("GitHub remote URL rewrite is not allowed for authenticated Git.");
+    }
+    yield* inspectAuthenticatedGitConfig(input.cwd);
+    if (Option.isNone(profileAuth)) {
+      return yield* Effect.fail("The selected GitHub profile is unavailable.");
+    }
+    const credential = yield* profileAuth.value
+      .get(owner)
+      .pipe(Effect.mapError(() => `GitHub profile ${owner} is unavailable.`));
+    const trusted = validateTrustedGitConfig({
+      remoteUrl: configuredUrl,
+      key: `http.${configuredUrl}.extraheader`,
+      value: Redacted.make(
+        `AUTHORIZATION: basic ${Base64.encode(`x-access-token:${Redacted.value(credential.token)}`)}`,
+      ),
+    });
+    if ("rejected" in trusted) {
+      return yield* Effect.fail("GitHub remote is not safe for authenticated Git.");
+    }
+    return { remoteUrl: configuredUrl, entry: trusted.entry };
+  });
 
   /**
    * Runs `git worktree list --porcelain -z`. Git before 2.36 rejects `-z`, so a failed run

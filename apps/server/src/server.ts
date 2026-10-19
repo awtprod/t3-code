@@ -111,6 +111,7 @@ import * as SourceControlProviderRegistry from "./sourceControl/SourceControlPro
 import * as PullRequestReadCache from "./pullRequest/PullRequestReadCache.ts";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
+import * as GitHubProfileAuth from "./sourceControl/GitHubProfileAuth.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as Observability from "./observability/Observability.ts";
 import * as HeapSnapshot from "./observability/HeapSnapshot.ts";
@@ -468,6 +469,7 @@ const layerGitWorkflow = GitWorkflowService.layer.pipe(
 const layerSourceControlRepositoryService = SourceControlRepositoryService.layer.pipe(
   Layer.provideMerge(GitVcsDriver.layer),
   Layer.provideMerge(layerSourceControlProviderRegistry),
+  Layer.provide(GitHubProfileAuth.layer),
 );
 
 const layerProjectCloneTracker = ProjectCloneTracker.layer.pipe(

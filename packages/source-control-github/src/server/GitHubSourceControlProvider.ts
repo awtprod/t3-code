@@ -347,6 +347,7 @@ const RawRepositorySchema = Schema.Struct({
   full_name: TrimmedNonEmptyString,
   html_url: TrimmedNonEmptyString,
   ssh_url: TrimmedNonEmptyString,
+  private: Schema.optional(Schema.Boolean),
   default_branch: Schema.optional(Schema.NullOr(Schema.String)),
 });
 const decodeRawRepository = decodeJsonResult(RawRepositorySchema);
@@ -1046,6 +1047,58 @@ export const make = Effect.gen(function* () {
       }).pipe(
         Effect.mapError(
           providerError("getRepositoryCloneUrls", input.cwd, { repository: input.repository }),
+        ),
+      ),
+    getRepositoryVisibility: (input) =>
+      Effect.gen(function* () {
+        const locator = parseGitHubRepositorySelector(input.repository, "github.com");
+        if (locator === null || locator.host !== "github.com") {
+          return yield* failure("Repositories are named owner/name.");
+        }
+        const repository = yield* readRepository(locator);
+        if (
+          repository.private === undefined ||
+          repository.full_name.toLowerCase() !== input.repository.toLowerCase()
+        ) {
+          return yield* failure("GitHub returned incomplete repository visibility.");
+        }
+        return repository.private ? ("private" as const) : ("public" as const);
+      }).pipe(
+        Effect.mapError(
+          providerError("getRepositoryVisibility", input.cwd, { repository: input.repository }),
+        ),
+      ),
+    getRepositoryIsEmpty: (input) =>
+      Effect.gen(function* () {
+        const locator = parseGitHubRepositorySelector(input.repository, "github.com");
+        if (locator === null || locator.host !== "github.com") {
+          return yield* failure("Repositories are named owner/name.");
+        }
+        const response = yield* graphqlJson(
+          {
+            host: locator.host,
+            operation: "getRepositoryIsEmpty",
+            query:
+              "query RepositoryEmpty($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { isEmpty } }",
+            variables: { owner: locator.owner, name: locator.name },
+            allowReserve: true,
+          },
+          decodeJsonResult(
+            Schema.Struct({
+              data: Schema.Struct({
+                repository: Schema.NullOr(Schema.Struct({ isEmpty: Schema.Boolean })),
+              }),
+            }),
+          ),
+          "GitHub returned an invalid repository state.",
+        );
+        if (response.data.repository === null) {
+          return yield* failure("GitHub could not verify the existing repository.");
+        }
+        return response.data.repository.isEmpty;
+      }).pipe(
+        Effect.mapError(
+          providerError("getRepositoryIsEmpty", input.cwd, { repository: input.repository }),
         ),
       ),
     createRepository: (input) =>
