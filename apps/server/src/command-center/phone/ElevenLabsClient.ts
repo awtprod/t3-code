@@ -120,7 +120,7 @@ const decodeResponse = Schema.decodeUnknownOption(Schema.fromJsonString(Outbound
 const isConversationId = Schema.is(ElevenLabsConversationId);
 
 /** Clip and redact text from the provider: phone-number-like digit runs keep their last four. */
-const redactProviderText = (text: string): string => {
+export const redactProviderText = (text: string): string => {
   const redacted = text
     .replace(/\+?\d[\d\s().-]{5,}\d/gu, (match) => `…${match.replace(/\D/gu, "").slice(-4)}`)
     .replace(/\s+/gu, " ")
@@ -131,7 +131,7 @@ const redactProviderText = (text: string): string => {
 };
 
 /** Reads at most `maxBytes` of the body; a longer body is cut off and the stream canceled. */
-const readBoundedText = async (response: Response, maxBytes: number): Promise<string> => {
+export const readBoundedText = async (response: Response, maxBytes: number): Promise<string> => {
   if (response.body === null) return "";
   const reader = response.body.getReader();
   const chunks: Array<Uint8Array> = [];
