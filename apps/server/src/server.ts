@@ -224,11 +224,15 @@ import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
 import * as SpaceActivityReactor from "./command-center/SpaceActivityReactor.ts";
 import * as GoogleActivity from "./command-center/GoogleActivity.ts";
 import * as GoogleActivityPoller from "./command-center/GoogleActivityPoller.ts";
+import * as ConferenceCalls from "./command-center/phone/ConferenceCalls.ts";
+import * as ConferenceCallState from "./command-center/phone/ConferenceCallState.ts";
+import { conferenceRoutesLayer } from "./command-center/phone/ConferenceRoutes.ts";
 import * as ElevenLabsClient from "./command-center/phone/ElevenLabsClient.ts";
 import * as PhoneCallProposals from "./command-center/phone/PhoneCallProposals.ts";
 import * as PhoneCalls from "./command-center/phone/PhoneCalls.ts";
 import * as PhoneConnection from "./command-center/phone/PhoneConnection.ts";
 import * as PhoneWebhook from "./command-center/phone/PhoneWebhook.ts";
+import * as TwilioClient from "./command-center/phone/TwilioClient.ts";
 import * as RunLifecycle from "./command-center/RunLifecycle.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import * as OrchestrationBridge from "./command-center/OrchestrationBridge.ts";
@@ -875,7 +879,16 @@ const layerSpaceAgentWaker = SpaceAgentWaker.layer.pipe(
 
 const layerPhoneConnection = PhoneConnection.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
+/** Conference-mode third-party calls; also serves the conference routes. */
+const layerPhoneConference = ConferenceCalls.layer.pipe(
+  Layer.provide(TwilioClient.layer),
+  Layer.provide(ConferenceCallState.layer),
+  Layer.provide(layerCommandCenterBase),
+  Layer.provide(layerPersistence),
+);
+
 const layerPhoneCalls = PhoneCalls.layer.pipe(
+  Layer.provideMerge(layerPhoneConference),
   Layer.provideMerge(layerPhoneConnection),
   Layer.provide(ElevenLabsClient.layer),
   Layer.provide(layerCommandCenterBase),
@@ -1157,6 +1170,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerStaticAndDevRoute,
     webhookHttpRouteLayer,
     PhoneWebhook.phoneWebhookHttpRouteLayer,
+    conferenceRoutesLayer,
     Ws.layer,
   ),
   // The MCP session registry is provided globally (shared with V2 provider

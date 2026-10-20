@@ -15,7 +15,8 @@ calls and SMS are not supported.
   the agent has since been disabled or lost `cc.phone.call` (a `Phone: not placed …` row says so).
 - During any call the voice agent can bridge the owner in ("patch me in") through ElevenLabs'
   `transfer_to_number` tool in conference mode. The owner hears a short brief before the callee is
-  connected.
+  connected, and the voice agent leaves the call. With [conference mode](#5-conference-mode) the
+  agent instead steps out while the owner talks and takes the call back when he hangs up.
 - Every call leaves Space activity rows: `Phone: calling …` when it starts, then `Phone: ended …`
   with the summary, the outcome, and the conversation link, or `Phone: not connected …`. Numbers
   are masked to their last four digits.
@@ -145,3 +146,111 @@ pnpm credentials:phone -- status --base-dir /absolute/runtime
 reads stdin. `status` prints whether a valid connection is stored, the owner's masked number, and the
 agent ids, never the API key or the webhook secret. The server reads the secret on every call, so a
 change takes effect without a restart.
+
+## 5. Conference mode
+
+In the default mode a third-party call is an ElevenLabs outbound call, and bridging the owner in
+with `transfer_to_number` removes the voice agent from the call. Conference mode keeps the agent:
+Command Center owns a Twilio Conference for each third-party call and the third-party agent is one
+participant in it. When the callee needs the owner (a bank verifying the card holder, for example),
+the agent calls the `bring_owner_in` server tool: the owner's phone rings with a short spoken brief,
+the agent is put on hold and muted (it neither hears nor is heard, so the owner's answers never
+reach its transcript), and when the owner hangs up the agent is taken off hold, hears "<owner> has
+finished and left the call. Continue with the callee.", and continues. Owner calls
+(`cc_phone_call_me`) are unchanged.
+
+How a call runs:
+
+1. Approving the call dials the agent leg: Twilio calls the second number (below) from
+   `callerId.owner`; ElevenLabs answers it with the third-party agent, which waits in silence.
+2. Before answering, ElevenLabs fetches the call's dynamic variables from Command Center (the
+   initiation webhook). That request writes the `Phone: calling …` row, exactly as in the default
+   mode. Only a call to the agent's number from the caller id of the agent leg (`callerId.owner`)
+   is matched; any other caller, or a call without a caller id, is refused. An agent leg that
+   answers without fetching them is ended (`Phone: not connected …`).
+3. Command Center then dials the callee from `callerId.callee`. The conference starts when the
+   callee answers and ends when the callee hangs up. A callee who does not answer leaves
+   `Phone: not connected …`.
+4. `bring_owner_in` writes `Phone: bringing <owner> in — <reason>`; when the owner leaves,
+   `Phone: <owner> left; assistant continued`. The post-call webhook writes `Phone: ended …` as
+   always.
+
+### Twilio and ElevenLabs setup
+
+1. Buy a second voice-capable Twilio number (the agent's number) in the same Twilio account, import
+   it into ElevenLabs natively (as in step 1), and assign it to the third-party agent.
+2. To show the owner's mobile to callees, add it in Twilio as a Verified Caller ID and use it as
+   `callerId.callee`; otherwise use the main Twilio number. `callerId.owner` should be the main
+   Twilio number; it is also the caller id of the agent leg.
+3. Generate a tool secret (at least 32 characters, for example
+   `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`) and store it as an ElevenLabs
+   workspace secret.
+4. On the third-party agent:
+   - **Security → conversation initiation data for inbound Twilio calls:** on, webhook URL
+     `<publicBaseUrl>/elevenlabs/initiation`, with the secret sent in the `x-cc-phone-token` header.
+   - **Server tool** `bring_owner_in`: `POST <publicBaseUrl>/elevenlabs/tool/bring-owner-in`, same
+     header, JSON body `{ "reason": string, "conversation_id"?: string, "call_sid"?: string }`
+     (`reason`: what the callee needs from the owner, one sentence; fill the other two from the
+     system variables `system__conversation_id` and `system__call_sid`). Set the tool's response
+     timeout to at least 60 seconds: the tool answers when the owner has joined, did not answer, or
+     after 45 seconds of ringing. It answers `{ "status", "message" }`; `status` is `joined`,
+     `no-answer`, `busy`, `failed`, `refused`, or `calling`, and `message` tells the agent what to
+     say or do.
+   - Empty first message, a long silence timeout, and no `transfer_to_number`. The prompt tells the
+     agent to stay quiet until the callee speaks, to put the callee on hold before calling
+     `bring_owner_in`, to stay silent while the owner talks, and never to end the call while waiting
+     for him.
+5. Publish the sub-paths of the webhook mount: Twilio and ElevenLabs reach
+   `/api/command-center/phone/webhook/twilio/…` and `/api/command-center/phone/webhook/elevenlabs/…`
+   under the same public prefix as the post-call webhook.
+
+### Connection keys
+
+Add both blocks to the connection JSON from step 4 (they are set together or not at all) and store
+it again with `pnpm credentials:phone -- set`:
+
+```json
+{
+  "twilio": {
+    "accountSid": "AC00000000000000000000000000000000",
+    "authToken": "<Twilio auth token>"
+  },
+  "conference": {
+    "inboundNumber": "+15555550111",
+    "callerId": { "callee": "+15555550112", "owner": "+15555550113" },
+    "publicBaseUrl": "https://cc.example.com/api/command-center/phone/webhook",
+    "toolSecret": "<tool secret>"
+  }
+}
+```
+
+`publicBaseUrl` is the public URL of the webhook mount: https, no port, query, or trailing slash.
+Twilio signs the exact URL it calls, and Command Center checks every Twilio request against URLs it
+builds from this value (never from request headers), so it must match what Twilio is given. `status`
+reports conference mode with masked numbers and never prints the Twilio credentials, the tool
+secret, or the URL. Removing both blocks returns to the default mode.
+
+### Authentication
+
+Twilio routes accept only requests whose `X-Twilio-Signature` matches the Auth Token and whose
+`AccountSid` is the configured account. ElevenLabs routes accept only the `x-cc-phone-token` header.
+Without a conference-mode connection every route answers like a bad credential. Bodies are capped at
+1 MiB, and malformed input gets 400, never a server error.
+
+### Limits and untested behavior
+
+| Limit                      | Value                                                                    |
+| -------------------------- | ------------------------------------------------------------------------ |
+| Conference calls in flight | 1 per server; another approved call is not placed ("in progress")        |
+| Call tracking              | 2 hours; then the call is ended if still live and marked outcome unknown |
+| Bringing the owner in      | counts as an owner call (3 per day), never during quiet hours            |
+| `bring_owner_in` wait      | 45 seconds from dialing the owner, then `calling`                        |
+| Twilio requests            | 15 s each, not retried; holding the agent is bounded to 10 s             |
+| Ringing                    | agent 20 s, callee 45 s, owner 30 s                                      |
+
+The call record lives in `<state dir>/phone/active-call.json` (mode 0600) so a restart does not lose
+a live call; an unreadable record blocks new conference calls until it is removed. If the post-call
+webhook never arrives, the call still ends normally but has no `Phone: ended …` row.
+
+Not built yet: voicemail detection on the callee leg, relaying keypad tones the owner presses
+(whether DTMF crosses a Twilio Conference is untested), more than one call at a time, and recording.
