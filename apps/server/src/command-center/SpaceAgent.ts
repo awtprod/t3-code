@@ -272,6 +272,10 @@ const make = Effect.gen(function* () {
       attachments: [],
     };
     const commandId = CommandId.make(`space-agent:${space.id}:turn:${nonce}`);
+    // Every turn carries the Space's configured model, so a change to
+    // `agent.model` applies on the next wake, not only when the thread is
+    // created. The orchestrator runs the turn on it and saves it on the thread.
+    const modelSelection = commandCenterModelSelection(resolveSpaceAgentModel(space));
     // A follow-up turn on the agent's thread, or its first turn creating it.
     if (existing !== undefined) {
       const dispatched = yield* projection
@@ -280,6 +284,7 @@ const make = Effect.gen(function* () {
           commandId,
           threadId,
           message,
+          modelSelection,
           runtimeMode: existing.runtimeMode,
           interactionMode: existing.interactionMode,
           createdAt: now,
@@ -291,8 +296,6 @@ const make = Effect.gen(function* () {
         );
       return { threadId, created: false, sequence: dispatched.sequence };
     }
-    const model = resolveSpaceAgentModel(space);
-    const modelSelection = commandCenterModelSelection(model);
     const projectId = yield* resolveProject(space, modelSelection, now);
     const title = `${space.displayName} agent`.slice(0, 80);
     const dispatched = yield* projection

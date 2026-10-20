@@ -19,6 +19,7 @@ import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts
 import * as ConnectionHealth from "./ConnectionHealth.ts";
 import * as OrchestrationBridge from "./OrchestrationBridge.ts";
 import { GoogleActivityBrief, type GoogleActivityBriefShape } from "./GoogleActivity.ts";
+import * as CommandCenterService from "./Service.ts";
 import { layer as commandCenterServiceLayer } from "./Service.ts";
 import * as SpaceAgent from "./SpaceAgent.ts";
 import * as SpaceAgentWaker from "./SpaceAgentWaker.ts";
@@ -27,7 +28,13 @@ import type { SpaceBriefMailCalendar } from "./SpaceBrief.ts";
 const decodeSpace = Schema.decodeUnknownSync(Space);
 const fixtureTimestamp = "2026-01-01T00:00:00.000Z";
 
-const makeSpace = (id: string, agent?: { readonly enabled: boolean }) =>
+const makeSpace = (
+  id: string,
+  agent?: {
+    readonly enabled: boolean;
+    readonly model?: { readonly providerId: string; readonly modelId: string };
+  },
+) =>
   decodeSpace({
     id,
     slug: id,
@@ -91,6 +98,11 @@ const makeHarness = (
   /** Replaces the fixed `mailCalendar` read (still recorded in `briefSections`). */
   section?: GoogleActivityBriefShape["section"],
 ) => {
+  let currentConfig = config;
+  /** Replaces the loaded config, as an operator editing a Space would. */
+  const setConfig = (next: LoadedCommandCenterConfig) => {
+    currentConfig = next;
+  };
   const dispatched: Array<OrchestrationBridge.CommandCenterOrchestrationCommand> = [];
   const threads = new Map<string, OrchestrationV2ThreadShell>();
   const briefSections: Array<string> = [];
@@ -113,7 +125,7 @@ const makeHarness = (
         CommandCenterConfig,
         CommandCenterConfig.of({
           configDirectory: "runtime-config",
-          load: Effect.succeed(config),
+          load: Effect.sync(() => currentConfig),
           resolveGoogleAccount: () => Effect.die("unused"),
         }),
       ),
@@ -146,7 +158,7 @@ const makeHarness = (
       ...overrides,
     } as OrchestrationV2ThreadShell);
   };
-  return { layer, dispatched, seedThread, briefSections };
+  return { layer, dispatched, seedThread, briefSections, setConfig };
 };
 
 describe("Space agent", () => {
@@ -289,8 +301,38 @@ describe("Space agent", () => {
       expect(harness.dispatched).toHaveLength(1);
       const turn = asTurnStart(harness.dispatched[0]);
       expect(turn.bootstrap).toBeUndefined();
-      expect(turn.modelSelection).toBeUndefined();
+      expect(turn.modelSelection).toEqual({ instanceId: "claudeAgent", model: "claude-opus-5-5" });
       expect(turn.runtimeMode).toBe("approval-required");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("applies a changed agent model to later turns on the existing thread", () => {
+    const modelA = { providerId: "claudeAgent", modelId: "claude-opus-5-5" };
+    const modelB = { providerId: "claudeAgent", modelId: "claude-haiku-5-5" };
+    const harness = makeHarness(
+      configWith([makeSpace("agent-space", { enabled: true, model: modelA })]),
+    );
+    return Effect.gen(function* () {
+      const spaceAgent = yield* SpaceAgent.SpaceAgent;
+      const first = yield* spaceAgent.sendTurn("agent-space", { text: "Hello.", reason: "manual" });
+      expect(first).toMatchObject({ created: true });
+      const created = asTurnStart(harness.dispatched.at(-1));
+      expect(created.bootstrap?.createThread).toMatchObject({
+        modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+      });
+
+      // The thread now exists on model A; the operator switches the Space to B.
+      harness.seedThread({
+        modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+      } as Partial<OrchestrationV2ThreadShell>);
+      harness.setConfig(configWith([makeSpace("agent-space", { enabled: true, model: modelB })]));
+      yield* (yield* CommandCenterService.CommandCenterService).syncConfiguration({ force: true });
+
+      const next = yield* spaceAgent.sendTurn("agent-space", { text: "Wake.", reason: "wake" });
+      expect(next).toMatchObject({ created: false });
+      const turn = asTurnStart(harness.dispatched.at(-1));
+      expect(turn.bootstrap).toBeUndefined();
+      expect(turn.modelSelection).toEqual({ instanceId: "claudeAgent", model: "claude-haiku-5-5" });
     }).pipe(Effect.provide(harness.layer));
   });
 
