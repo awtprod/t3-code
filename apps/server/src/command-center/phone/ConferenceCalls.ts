@@ -108,13 +108,13 @@ const AGENT_RING_SECONDS = 20;
 const CALLEE_RING_SECONDS = 45;
 const OWNER_RING_SECONDS = 30;
 /** How long `bring_owner_in` waits for the owner to answer or the attempt to fail. */
-export const BRIDGE_WAIT_MS = 45_000;
+const BRIDGE_WAIT_MS = 45_000;
 /** The hold happens while Twilio waits for the owner's TwiML (15 s fetch timeout). */
 const OWNER_HOLD_TIMEOUT_MS = 10_000;
 const REASON_CHARS = 300;
 const STATUS_EVENTS = ["answered", "completed"] as const;
 
-export const CALL_IN_PROGRESS_REASON =
+const CALL_IN_PROGRESS_REASON =
   "Another phone call is in progress; only one conference call runs at a time. Try again after it ends.";
 
 // ── TwiML ────────────────────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ export const announceTwiml = (ownerName: string) =>
 
 const hangupTwiml = (text: string) => twiml(say(text), "<Hangup/>");
 
-export const CALL_ALREADY_ENDED_TWIML = hangupTwiml(
+const CALL_ALREADY_ENDED_TWIML = hangupTwiml(
   "Command Center. This call has already ended. Goodbye.",
 );
 
@@ -250,7 +250,7 @@ const legStatusOf = (callStatus: string): LegStatus | undefined => {
  * The leg after a status event, or `None` for a duplicate or late event. A
  * terminal leg never changes again; `completed` means the call was answered.
  */
-export const nextLeg = (
+const nextLeg = (
   previous: ConferenceLeg,
   status: LegStatus,
   updatedAt: string,

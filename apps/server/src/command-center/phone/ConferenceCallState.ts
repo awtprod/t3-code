@@ -180,7 +180,7 @@ export class ConferenceCallStateStore extends Context.Service<
 >()("@awtprod/command-center/command-center/phone/ConferenceCallState/ConferenceCallStateStore") {}
 
 /** A file-backed store in `directory` (created 0700). */
-export const makeFileStore = (directory: string) =>
+const makeFileStore = (directory: string) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;

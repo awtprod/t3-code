@@ -60,7 +60,7 @@ import { PHONE_WEBHOOK_HTTP_PATH } from "./PhoneWebhook.ts";
 import { TwilioCallSid } from "./TwilioClient.ts";
 import { TWILIO_SIGNATURE_HEADER, verifyTwilioSignature } from "./TwilioSignature.ts";
 
-export const PHONE_TOKEN_HEADER = "x-cc-phone-token";
+const PHONE_TOKEN_HEADER = "x-cc-phone-token";
 
 export const ConferenceRoute = Schema.Literals([
   "elevenlabs/initiation",
@@ -98,7 +98,7 @@ const unavailable = json(503, { error: "webhook_unavailable" });
 const sha256 = (value: string) => NodeCrypto.createHash("sha256").update(value, "utf8").digest();
 
 /** Constant-time comparison of the `x-cc-phone-token` header with the tool secret. */
-export const phoneTokenMatches = (header: string | undefined, secret: string): boolean =>
+const phoneTokenMatches = (header: string | undefined, secret: string): boolean =>
   NodeCrypto.timingSafeEqual(sha256(header ?? ""), sha256(secret)) && header !== undefined;
 
 const OptionalText = (max: number) =>
@@ -175,7 +175,7 @@ const isCallSid = Schema.is(TwilioCallSid);
  * The call id (and leg) of a Twilio request whose signature matches the URL
  * Command Center gave Twilio for this route; `None` for anything else.
  */
-export const authenticateTwilioRequest = (input: {
+const authenticateTwilioRequest = (input: {
   readonly connection: PhoneConferenceConnection;
   readonly route: TwilioCallbackRoute;
   readonly request: ConferenceHttpRequest;
