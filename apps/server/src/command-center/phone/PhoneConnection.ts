@@ -71,6 +71,68 @@ const OwnerName = Schema.String.check(
   ),
 );
 
+/** Twilio Account SIDs: `AC` and 32 lowercase hex digits. */
+export const TwilioAccountSid = Schema.String.check(
+  Schema.isPattern(/^AC[0-9a-f]{32}$/u, {
+    message: "The Twilio Account SID must be AC followed by 32 hex digits.",
+  }),
+);
+
+/** REST credentials of the Twilio account that owns both numbers. */
+export const TwilioCredentials = Schema.Struct({
+  accountSid: TwilioAccountSid,
+  authToken: SecretToken,
+});
+export type TwilioCredentials = typeof TwilioCredentials.Type;
+
+/**
+ * Where Twilio and ElevenLabs reach this server's phone webhook mount
+ * (`/api/command-center/phone/webhook` behind the public proxy). Twilio signs
+ * the exact URL it requests and drops the port of an https voice URL, so the
+ * value is a plain https origin plus path: no port, credentials, query,
+ * fragment, or trailing slash. Signatures are checked against this value,
+ * never against request headers.
+ */
+export const PhonePublicBaseUrl = Schema.String.check(
+  Schema.isMaxLength(300),
+  Schema.makeFilter((value) => {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      return "The public base URL must be an absolute https URL.";
+    }
+    return (
+      (url.protocol === "https:" &&
+        url.port === "" &&
+        url.username === "" &&
+        url.password === "" &&
+        url.search === "" &&
+        url.hash === "" &&
+        !value.endsWith("/") &&
+        `${url.origin}${url.pathname}` === value) ||
+      "The public base URL must be https, with no port, query, fragment, or trailing slash."
+    );
+  }),
+);
+
+/** Shared secret of the ElevenLabs initiation webhook and server tool header. */
+const ToolSecret = SecretToken.check(Schema.isMinLength(32));
+
+/**
+ * Conference mode for third-party calls: Command Center owns a Twilio
+ * Conference and the third-party agent joins it as one participant.
+ */
+export const PhoneConferenceConfig = Schema.Struct({
+  /** The second Twilio number, imported into ElevenLabs and assigned to `agentId`. */
+  inboundNumber: PhoneNumberE164,
+  /** Caller ids for the callee and owner legs: the main number or a Twilio Verified Caller ID. */
+  callerId: Schema.Struct({ callee: PhoneNumberE164, owner: PhoneNumberE164 }),
+  publicBaseUrl: PhonePublicBaseUrl,
+  toolSecret: ToolSecret,
+});
+export type PhoneConferenceConfig = typeof PhoneConferenceConfig.Type;
+
 export const PhoneConnection = Schema.Struct({
   /** ElevenLabs API key (`xi-api-key`). */
   apiKey: SecretToken,
@@ -84,8 +146,29 @@ export const PhoneConnection = Schema.Struct({
   phoneNumberId: ElevenLabsResourceId,
   ownerNumber: PhoneNumberE164,
   ownerName: OwnerName,
-});
+  /** Twilio REST credentials; present exactly when `conference` is. */
+  twilio: Schema.optional(TwilioCredentials),
+  /** Conference mode for third-party calls; absent means ElevenLabs outbound calls. */
+  conference: Schema.optional(PhoneConferenceConfig),
+}).check(
+  Schema.makeFilter(
+    (value) =>
+      (value.twilio === undefined) === (value.conference === undefined) ||
+      "`twilio` and `conference` are set together or not at all.",
+  ),
+);
 export type PhoneConnection = typeof PhoneConnection.Type;
+
+/** A connection in conference mode. */
+export type PhoneConferenceConnection = PhoneConnection & {
+  readonly twilio: TwilioCredentials;
+  readonly conference: PhoneConferenceConfig;
+};
+
+export const isPhoneConferenceConnection = (
+  connection: PhoneConnection,
+): connection is PhoneConferenceConnection =>
+  connection.twilio !== undefined && connection.conference !== undefined;
 
 const decodeConnection = Schema.decodeUnknownOption(PhoneConnection, {
   onExcessProperty: "error",

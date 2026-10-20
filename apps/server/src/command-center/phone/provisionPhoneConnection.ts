@@ -10,7 +10,8 @@
  * atomically to `<base-dir>/userdata/secrets/command-center-phone-connection.bin`
  * (0600, directory 0700). `--from-json -` reads stdin. `status` prints whether
  * a valid connection is stored and the masked numbers; it never prints the API
- * key, the webhook secret, or a full phone number.
+ * key, the webhook secret, the Twilio credentials, the tool secret, the public
+ * URL, or a full phone number.
  */
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -28,7 +29,8 @@ const USAGE = `Usage:
   pnpm credentials:phone -- set --from-json <file|-> --base-dir /absolute/runtime
   pnpm credentials:phone -- status --base-dir /absolute/runtime
 
-The JSON is {"apiKey","webhookSecret","agentId","ownerAgentId","phoneNumberId","ownerNumber","ownerName"}
+The JSON is {"apiKey","webhookSecret","agentId","ownerAgentId","phoneNumberId","ownerNumber","ownerName"},
+plus "twilio" and "conference" together for conference mode (docs/operations/phone-calls.md)
 (numbers in E.164, e.g. +15550100000). It is stored in the server secret store, never in Git.`;
 
 export type PhoneCliCommand =
@@ -121,6 +123,17 @@ export function phoneConnectionStatus(baseDir: string): ReadonlyArray<string> {
     `Third-party agent: ${value.agentId}`,
     `Owner agent: ${value.ownerAgentId}`,
     `Phone number id: ${value.phoneNumberId}`,
+    ...(value.twilio === undefined || value.conference === undefined
+      ? ["Conference mode: off (third-party calls are ElevenLabs outbound calls)"]
+      : [
+          "Conference mode: on",
+          `Twilio account: AC…${value.twilio.accountSid.slice(-4)} (auth token not shown)`,
+          `Agent inbound number: ${maskPhoneNumber(value.conference.inboundNumber)}`,
+          `Caller id for callees: ${maskPhoneNumber(value.conference.callerId.callee)}`,
+          `Caller id for the owner: ${maskPhoneNumber(value.conference.callerId.owner)}`,
+          "Public base URL: set (not shown)",
+          "Tool secret: set (not shown)",
+        ]),
   ];
 }
 
