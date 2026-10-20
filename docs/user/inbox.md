@@ -4,7 +4,9 @@ Inbox is the default Command Center workspace for decisions, questions, proposed
 
 Use the Space menu to view one Space or all Spaces. **Actionable** excludes completed and canceled items. **Recent** includes completed results as well as dismissed items. **Snoozed** follows the environment's current server state, including wake-time expiry. Command Center reads each Space independently and loads more items on demand; counts with a plus sign describe only the loaded page, and an empty Space remains empty instead of showing sample activity.
 
-An Inbox link stays attached to its selected environment, Space, and item when that environment is offline. The page shows the connection or reconnect error without silently opening the same path against another environment.
+Inbox normally opens on the same remote Command Center server used by Command. Choosing another environment remembers that choice for later visits on this browser. An explicit Inbox link still wins over that preference and stays attached to its selected environment, Space, and item when the environment is offline; use the environment menu on the disconnected screen to switch deliberately.
+
+The daily digest is collapsed below the Inbox filters so the item list remains the primary workspace. Expand it to review the current digest, change quiet hours or time zone, refresh it, or mark it viewed.
 
 ## Review an item
 

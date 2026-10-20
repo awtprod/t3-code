@@ -4,6 +4,11 @@ import type {
   CommandCenterInboxProposalPayload,
 } from "@t3tools/contracts";
 
+import {
+  type CommandCenterEnvironmentCandidate,
+  resolveCommandCenterRouterEnvironmentId,
+} from "../CommandCenterExecution.logic";
+
 export const INBOX_PAGE_SIZE = 25;
 export const INBOX_HISTORY_PAGE_SIZE = 30;
 export const INBOX_COMMENT_MAX_CHARS = 20_000;
@@ -40,6 +45,7 @@ export interface InboxPendingReply {
 export type InboxMutationOutcome = "success" | "conflict" | "rejected" | "ambiguous";
 
 const MAX_ROUTE_VALUE_CHARS = 200;
+const ENVIRONMENT_STORAGE_KEY = "t3.commandCenter.inboxEnvironment.v1";
 const DRAFT_STORAGE_PREFIX = "t3.commandCenter.inboxDraft.v1";
 const PENDING_REPLY_STORAGE_PREFIX = "t3.commandCenter.inboxPendingReply.v1";
 const MUTATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
@@ -63,17 +69,50 @@ export function validateInboxSearch(raw: Record<string, unknown>): InboxSearch {
 
 export function resolveInboxEnvironmentId(input: {
   readonly requestedEnvironmentId?: string | undefined;
-  readonly activeEnvironmentId?: string | null | undefined;
+  readonly preferredEnvironmentId?: string | null | undefined;
   readonly primaryEnvironmentId?: string | null | undefined;
-  readonly environmentIds: ReadonlyArray<string>;
+  readonly environments: readonly CommandCenterEnvironmentCandidate[];
 }): string | null {
   if (input.requestedEnvironmentId !== undefined) return input.requestedEnvironmentId;
+  const preferred = input.environments.find(
+    (environment) => environment.id === input.preferredEnvironmentId,
+  );
+  if (preferred !== undefined) return preferred.id;
+  const primaryEnvironmentId =
+    input.environments.find((environment) => environment.id === input.primaryEnvironmentId)?.id ??
+    null;
   return (
-    input.environmentIds.find((id) => id === input.activeEnvironmentId) ??
-    input.environmentIds.find((id) => id === input.primaryEnvironmentId) ??
-    input.environmentIds[0] ??
+    resolveCommandCenterRouterEnvironmentId({
+      primaryEnvironmentId,
+      environments: input.environments,
+    }) ??
+    input.environments[0]?.id ??
     null
   );
+}
+
+export function inboxEnvironmentPreference(
+  storage: Pick<Storage, "getItem" | "setItem"> | null | undefined,
+  environmentId?: string,
+): string | null {
+  try {
+    const target =
+      storage === undefined
+        ? typeof window === "undefined"
+          ? null
+          : window.localStorage
+        : storage;
+    if (target === null) return null;
+    const stored = environmentId ?? target.getItem(ENVIRONMENT_STORAGE_KEY);
+    if (typeof stored !== "string") return null;
+    const value = stored.trim();
+    if (value.length === 0 || value.length > MAX_ROUTE_VALUE_CHARS) return null;
+    if (environmentId === undefined) return value;
+    target.setItem(ENVIRONMENT_STORAGE_KEY, value);
+    return value;
+  } catch {
+    return null;
+  }
 }
 
 export function resolveInboxDraftScopeId(input: {

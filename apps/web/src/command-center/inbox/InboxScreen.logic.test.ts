@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
+import { EnvironmentId } from "@t3tools/contracts";
 
 import {
   classifyInboxMutationResult,
   inboxDraftStorageKey,
+  inboxEnvironmentPreference,
   inboxDraftAfterAcknowledgedReply,
   inboxPendingReplyAfterAttempt,
   inboxPendingReplyForSubmit,
@@ -49,22 +51,144 @@ describe("Inbox route and draft logic", () => {
     expect(validateInboxSearch({ tab: "snoozed" })).toEqual({ tab: "snoozed" });
   });
 
-  it("preserves an explicit environment deep link instead of falling back", () => {
+  it("prefers the shared remote Command Center default over the local Windows primary", () => {
+    const desktop = EnvironmentId.make("JVL3RP2");
+    const server = EnvironmentId.make("openclaw-server");
+    const environments = [
+      {
+        id: desktop,
+        label: "JVL3RP2",
+        isPrimary: true,
+        platformOs: "windows" as const,
+        connected: true,
+      },
+      {
+        id: server,
+        label: "openclaw-server",
+        isPrimary: false,
+        platformOs: "linux" as const,
+        connected: true,
+      },
+    ];
+
     expect(
       resolveInboxEnvironmentId({
-        requestedEnvironmentId: "offline-environment",
-        activeEnvironmentId: "connected-environment",
-        primaryEnvironmentId: "connected-environment",
-        environmentIds: ["connected-environment", "offline-environment"],
+        primaryEnvironmentId: desktop,
+        environments,
       }),
-    ).toBe("offline-environment");
+    ).toBe(server);
+    expect(
+      resolveInboxEnvironmentId({
+        preferredEnvironmentId: desktop,
+        primaryEnvironmentId: desktop,
+        environments,
+      }),
+    ).toBe(desktop);
+  });
+
+  it("preserves explicit links, ignores deleted preferences, and exposes disconnected choices", () => {
+    const connected = EnvironmentId.make("connected-environment");
+    const disconnected = EnvironmentId.make("offline-environment");
+    const environments = [
+      {
+        id: connected,
+        label: "Connected",
+        isPrimary: true,
+        platformOs: "windows" as const,
+        connected: true,
+      },
+      {
+        id: disconnected,
+        label: "Offline",
+        isPrimary: false,
+        platformOs: "unknown" as const,
+        connected: false,
+      },
+    ];
+
+    expect(
+      resolveInboxEnvironmentId({
+        requestedEnvironmentId: disconnected,
+        preferredEnvironmentId: connected,
+        primaryEnvironmentId: connected,
+        environments,
+      }),
+    ).toBe(disconnected);
     expect(
       resolveInboxEnvironmentId({
         requestedEnvironmentId: "temporarily-missing-environment",
-        activeEnvironmentId: "connected-environment",
-        environmentIds: ["connected-environment"],
+        primaryEnvironmentId: connected,
+        environments,
       }),
     ).toBe("temporarily-missing-environment");
+    expect(
+      resolveInboxEnvironmentId({
+        preferredEnvironmentId: "deleted-environment",
+        primaryEnvironmentId: connected,
+        environments,
+      }),
+    ).toBe(connected);
+  });
+
+  it("re-evaluates an automatic fallback when remote configuration hydrates", () => {
+    const desktop = EnvironmentId.make("desktop");
+    const server = EnvironmentId.make("server");
+    const desktopCandidate = {
+      id: desktop,
+      label: "Desktop",
+      isPrimary: true,
+      platformOs: "windows" as const,
+      connected: true,
+    };
+    expect(
+      resolveInboxEnvironmentId({
+        primaryEnvironmentId: desktop,
+        environments: [desktopCandidate],
+      }),
+    ).toBe(desktop);
+    expect(
+      resolveInboxEnvironmentId({
+        primaryEnvironmentId: desktop,
+        environments: [
+          desktopCandidate,
+          {
+            id: server,
+            label: "openclaw-server",
+            isPrimary: false,
+            platformOs: "linux",
+            connected: true,
+          },
+        ],
+      }),
+    ).toBe(server);
+  });
+
+  it("guards environment preference storage and never replaces it from a deep link", () => {
+    const storage = memoryStorage();
+    expect(inboxEnvironmentPreference(storage, " desktop ")).toBe("desktop");
+    expect(inboxEnvironmentPreference(storage)).toBe("desktop");
+
+    resolveInboxEnvironmentId({
+      requestedEnvironmentId: "deep-link",
+      preferredEnvironmentId: inboxEnvironmentPreference(storage),
+      environments: [],
+    });
+    expect(inboxEnvironmentPreference(storage)).toBe("desktop");
+
+    storage.setItem("t3.commandCenter.inboxEnvironment.v1", "   ");
+    expect(inboxEnvironmentPreference(storage)).toBeNull();
+    storage.setItem("t3.commandCenter.inboxEnvironment.v1", "x".repeat(201));
+    expect(inboxEnvironmentPreference(storage)).toBeNull();
+    const blocked = {
+      getItem: () => {
+        throw new Error("blocked");
+      },
+      setItem: () => {
+        throw new Error("blocked");
+      },
+    };
+    expect(inboxEnvironmentPreference(blocked)).toBeNull();
+    expect(inboxEnvironmentPreference(blocked, "server")).toBeNull();
   });
 
   it("uses a relay account only for a confirmed relay target", () => {
