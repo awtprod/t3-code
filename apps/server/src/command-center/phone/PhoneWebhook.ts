@@ -59,7 +59,7 @@ import {
   phoneTitleFromStart,
 } from "./PhoneCalls.ts";
 
-const PHONE_WEBHOOK_HTTP_PATH = "/api/command-center/phone/webhook";
+export const PHONE_WEBHOOK_HTTP_PATH = "/api/command-center/phone/webhook";
 const ELEVENLABS_SIGNATURE_HEADER = "elevenlabs-signature";
 /**
  * ElevenLabs documents no per-conversation dashboard URL, so rows link the

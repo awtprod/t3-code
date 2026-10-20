@@ -27,6 +27,12 @@
  * `'phone-uncertain:<kind>:<space id>:<attempt id>'`, and event sequence 0,
  * which the activity reactor's resume cursor ignores.
  *
+ * When the connection has a `conference` block, a third-party call is a
+ * Twilio Conference that Command Center owns (`ConferenceCalls`, reached
+ * through `PhoneConferenceDialer`); the cap check and the lock are the same.
+ * Bringing the owner into such a call rings him, so its `phone-bridge:` row
+ * counts as an owner call.
+ *
  * @module PhoneCalls
  */
 import { type SpaceAgentConfig, SpaceId } from "@command-center/core";
@@ -62,20 +68,24 @@ import {
   PhoneNumberE164,
 } from "./PhoneConnection.ts";
 
-const PHONE_OWNER_CALLS_PER_DAY = 3;
+export const PHONE_OWNER_CALLS_PER_DAY = 3;
 const PHONE_THIRD_PARTY_CALLS_PER_DAY = 5;
 const PHONE_BRIEF_MAX_CHARS = 1_500;
 /** Activity rows looked at for a daily count; well above both caps. */
 const DAILY_COUNT_SCAN_ROWS = 50;
 /** A local day is at most 25 h (DST); scan a little more and filter by local date. */
 const DAILY_COUNT_WINDOW_MS = 26 * 60 * 60 * 1000;
-const START_SUMMARY_CHARS = 300;
+export const START_SUMMARY_CHARS = 300;
 
 export const PHONE_ACTIVITY_SOURCE_KIND = "run" as const;
 export const PhoneCallStatus = {
   callingOwner: "calling-owner",
   askingOwner: "asking-owner",
   callingThirdParty: "calling-third-party",
+  /** Conference mode: the owner is being rung into a third-party call. Counts as an owner call. */
+  bridgingOwner: "bridging-owner",
+  /** Conference mode: the owner left a third-party call and the agent continued. */
+  bridgeEnded: "bridge-ended",
   ended: "ended",
   notConnected: "not-connected",
   notPlaced: "not-placed",
@@ -83,15 +93,23 @@ export const PhoneCallStatus = {
   outcomeUnknown: "outcome-unknown",
 } as const;
 export type PhoneCallKind = "owner" | "third-party";
-const OWNER_CALL_STATUSES = [PhoneCallStatus.callingOwner, PhoneCallStatus.askingOwner];
+const OWNER_CALL_STATUSES = [
+  PhoneCallStatus.callingOwner,
+  PhoneCallStatus.askingOwner,
+  PhoneCallStatus.bridgingOwner,
+];
 const THIRD_PARTY_CALL_STATUSES = [PhoneCallStatus.callingThirdParty];
 
 export const phoneStartSourceId = (conversationId: string) => `phone-start:${conversationId}`;
 export const phoneEndSourceId = (conversationId: string) => `phone-end:${conversationId}`;
-const phoneUncertainSourceId = (kind: PhoneCallKind, spaceId: string, attemptId: string) =>
+export const phoneUncertainSourceId = (kind: PhoneCallKind, spaceId: string, attemptId: string) =>
   `phone-uncertain:${kind}:${spaceId}:${attemptId}`;
 
 const START_TITLE_PREFIX = "Phone: calling ";
+
+/** The start row's title, "Phone: calling <callee> — <purpose>". */
+export const phoneCallingTitle = (calleeLabel: string, purpose: string) =>
+  `${START_TITLE_PREFIX}${calleeLabel} — ${purpose}`;
 
 /** "Phone: calling X — purpose" becomes "Phone: <verb> X — purpose". */
 export const phoneTitleFromStart = (startTitle: string, verb: string): string =>
@@ -99,7 +117,7 @@ export const phoneTitleFromStart = (startTitle: string, verb: string): string =>
     ? `Phone: ${verb} ${startTitle.slice(START_TITLE_PREFIX.length)}`
     : `Phone: ${verb} call`;
 
-const clip = (text: string, max: number) =>
+export const clip = (text: string, max: number) =>
   text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 
 const singleLine = (max: number) =>
@@ -171,6 +189,21 @@ export const phoneCallTarget = (plan: Pick<PhoneCallPlan, "calleeName" | "to">) 
   id: `${plan.calleeName} (${maskPhoneNumber(plan.to)})`,
 });
 
+/** What the third-party agent is told about a call, in either mode. */
+export const thirdPartyDynamicVariables = (
+  plan: PhoneCallPlan,
+  ownerName: string,
+): PhoneCallDynamicVariables => ({
+  purpose: plan.purpose,
+  brief: plan.brief,
+  allowed_outcomes: plan.allowedOutcomes.join("; "),
+  owner_name: ownerName,
+  callee_name: plan.calleeName,
+  patch_in_when: plan.patchInWhen ?? "",
+  call_kind: "third_party",
+  question: "",
+});
+
 export const PHONE_NOT_CONFIGURED_REASON =
   "Phone calls are not set up on this server (no ElevenLabs connection is stored).";
 
@@ -184,6 +217,81 @@ const refused = (reason: string): PhoneCallOutcome => ({ placed: false, reason }
 export const phoneCallTimezone = (
   agent: Pick<SpaceAgentConfig, "checkIns" | "quietHours"> | undefined,
 ): string => agent?.quietHours?.timezone ?? spaceAgentTimezone(agent ?? {});
+
+/**
+ * One call is checked, placed, and recorded at a time per server process: owner
+ * calls, third-party calls, and conference bridges all take this lock, so a
+ * daily cap cannot be passed on a stale count.
+ */
+export class PhoneDialLock extends Context.Reference<Semaphore.Semaphore>(
+  "@awtprod/command-center/command-center/phone/PhoneCalls/PhoneDialLock",
+  { defaultValue: () => Semaphore.makeUnsafe(1) },
+) {}
+
+export const CONFERENCE_UNAVAILABLE_REASON =
+  "The phone connection is in conference mode, but conference calls are not available in this server process.";
+
+export interface PhoneConferenceDialerShape {
+  /**
+   * Starts a conference-mode third-party call. The caller holds `PhoneDialLock`
+   * and has checked the daily cap.
+   */
+  readonly start: (input: {
+    readonly plan: PhoneCallPlan;
+    readonly attemptId: string;
+    readonly connection: PhoneConnection;
+  }) => Effect.Effect<PhoneCallOutcome, CommandCenterError>;
+}
+
+/** Provided by `ConferenceCalls`; without it a conference-mode connection places no calls. */
+export class PhoneConferenceDialer extends Context.Service<
+  PhoneConferenceDialer,
+  PhoneConferenceDialerShape
+>()("@awtprod/command-center/command-center/phone/PhoneCalls/PhoneConferenceDialer") {}
+
+/**
+ * Calls of `kind` started today (local day in `timezone`), including those
+ * whose outcome is unknown and, for the owner, conference bridges. Phone rows
+ * are selected in SQL before the scan limit, so other activity cannot crowd
+ * them out.
+ */
+export const countPhoneCallsToday = Effect.fn("PhoneCalls.callsToday")(function* (input: {
+  readonly spaceId: string;
+  readonly kind: PhoneCallKind;
+  readonly nowMs: number;
+  readonly timezone: string;
+}) {
+  const sql = yield* SqlClient.SqlClient;
+  const now = DateTime.formatIso(DateTime.makeUnsafe(input.nowMs));
+  const since = DateTime.formatIso(DateTime.makeUnsafe(input.nowMs - DAILY_COUNT_WINDOW_MS));
+  const statuses = input.kind === "owner" ? OWNER_CALL_STATUSES : THIRD_PARTY_CALL_STATUSES;
+  const uncertainPrefix = `phone-uncertain:${input.kind}:%`;
+  const rows = yield* sql<{ readonly occurredAt: string }>`
+    SELECT occurred_at AS "occurredAt"
+    FROM command_center_space_activity
+    WHERE space_id = ${input.spaceId}
+      AND source_kind = ${PHONE_ACTIVITY_SOURCE_KIND}
+      AND (
+        ((source_id LIKE 'phone-start:%' OR source_id LIKE 'phone-bridge:%')
+          AND status IN ${sql.in(statuses)})
+        OR (source_id LIKE ${uncertainPrefix} AND status = ${PhoneCallStatus.outcomeUnknown})
+      )
+      AND occurred_at >= ${since}
+    ORDER BY occurred_at DESC
+    LIMIT ${DAILY_COUNT_SCAN_ROWS}
+  `.pipe(
+    Effect.mapError(
+      (cause) =>
+        new CommandCenterError({
+          reason: "persistence",
+          message: "Could not count today's phone calls.",
+          cause,
+        }),
+    ),
+  );
+  const today = localDateAt(now, input.timezone);
+  return rows.filter((row) => localDateAt(row.occurredAt, input.timezone) === today).length;
+});
 
 export interface PhoneCallsShape {
   readonly callOwner: (
@@ -223,10 +331,14 @@ const isPhoneCallMayBeLive = Schema.is(PhoneCallMayBeLive);
 export const phoneCallMayBeLive = (error: CommandCenterError): boolean =>
   isPhoneCallMayBeLive(error.cause);
 
-const outcomeUnknownError = (error: ElevenLabsCallError, recorded: boolean) => {
+export const outcomeUnknownError = (
+  error: { readonly message: string },
+  recorded: boolean,
+  provider: "ElevenLabs" | "Twilio" = "ElevenLabs",
+) => {
   const message = [
     `Call outcome unknown — do not retry. ${error.message}`,
-    "ElevenLabs may have started the call, so it may be ringing now.",
+    `${provider} may have started the call, so it may be ringing now.`,
     recorded
       ? "It counts toward today's call limit."
       : "It could not be recorded, so it does not count toward today's call limit.",
@@ -250,44 +362,11 @@ const make = Effect.gen(function* () {
   const commandCenter = yield* CommandCenterService.CommandCenterService;
   const activity = yield* SpaceActivity.SpaceActivity;
   // One call is checked, placed, and recorded at a time (per server process).
-  const dialLock = yield* Semaphore.make(1);
+  const dialLock = yield* PhoneDialLock;
+  const conferenceDialer = yield* Effect.serviceOption(PhoneConferenceDialer);
 
-  /** Calls of `kind` started today, including those whose outcome is unknown. */
-  const callsToday = Effect.fn("PhoneCalls.callsToday")(function* (input: {
-    readonly spaceId: string;
-    readonly kind: PhoneCallKind;
-    readonly nowMs: number;
-    readonly timezone: string;
-  }) {
-    const now = DateTime.formatIso(DateTime.makeUnsafe(input.nowMs));
-    const since = DateTime.formatIso(DateTime.makeUnsafe(input.nowMs - DAILY_COUNT_WINDOW_MS));
-    const statuses = input.kind === "owner" ? OWNER_CALL_STATUSES : THIRD_PARTY_CALL_STATUSES;
-    const uncertainPrefix = `phone-uncertain:${input.kind}:%`;
-    const rows = yield* sql<{ readonly occurredAt: string }>`
-      SELECT occurred_at AS "occurredAt"
-      FROM command_center_space_activity
-      WHERE space_id = ${input.spaceId}
-        AND source_kind = ${PHONE_ACTIVITY_SOURCE_KIND}
-        AND (
-          (source_id LIKE 'phone-start:%' AND status IN ${sql.in(statuses)})
-          OR (source_id LIKE ${uncertainPrefix} AND status = ${PhoneCallStatus.outcomeUnknown})
-        )
-        AND occurred_at >= ${since}
-      ORDER BY occurred_at DESC
-      LIMIT ${DAILY_COUNT_SCAN_ROWS}
-    `.pipe(
-      Effect.mapError(
-        (cause) =>
-          new CommandCenterError({
-            reason: "persistence",
-            message: "Could not count today's phone calls.",
-            cause,
-          }),
-      ),
-    );
-    const today = localDateAt(now, input.timezone);
-    return rows.filter((row) => localDateAt(row.occurredAt, input.timezone) === today).length;
-  });
+  const callsToday = (input: Parameters<typeof countPhoneCallsToday>[0]) =>
+    countPhoneCallsToday(input).pipe(Effect.provideService(SqlClient.SqlClient, sql));
 
   const requireConnection = store.load;
 
@@ -373,7 +452,7 @@ const make = Effect.gen(function* () {
         sourceKind: PHONE_ACTIVITY_SOURCE_KIND,
         sourceId: phoneStartSourceId(started.conversationId),
         projectId: null,
-        title: `${START_TITLE_PREFIX}${input.calleeLabel} — ${input.purpose}`,
+        title: phoneCallingTitle(input.calleeLabel, input.purpose),
         status: input.status,
         text: input.summary,
         eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
@@ -482,6 +561,14 @@ const make = Effect.gen(function* () {
             );
           }
           const value = connection.value;
+          if (value.conference !== undefined) {
+            if (Option.isNone(conferenceDialer)) return refused(CONFERENCE_UNAVAILABLE_REASON);
+            return yield* conferenceDialer.value.start({
+              plan,
+              attemptId: options?.attemptId ?? (yield* newAttemptId),
+              connection: value,
+            });
+          }
           return yield* dialAndRecord({
             kind: "third-party",
             attemptId: options?.attemptId ?? (yield* newAttemptId),
@@ -493,16 +580,7 @@ const make = Effect.gen(function* () {
             purpose: plan.purpose,
             status: PhoneCallStatus.callingThirdParty,
             summary: clip(plan.brief, START_SUMMARY_CHARS),
-            dynamicVariables: {
-              purpose: plan.purpose,
-              brief: plan.brief,
-              allowed_outcomes: plan.allowedOutcomes.join("; "),
-              owner_name: value.ownerName,
-              callee_name: plan.calleeName,
-              patch_in_when: plan.patchInWhen ?? "",
-              call_kind: "third_party",
-              question: "",
-            },
+            dynamicVariables: thirdPartyDynamicVariables(plan, value.ownerName),
           });
         }),
       );
