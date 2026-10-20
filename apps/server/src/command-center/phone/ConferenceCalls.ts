@@ -607,11 +607,14 @@ export const make = Effect.gen(function* () {
           const bySid = request.callSid !== undefined && request.callSid === record.agent.callSid;
           // Twilio gives ElevenLabs the sid of its own (inbound) leg, so most initiations
           // match by number: the agent number, called from the caller id Command Center uses
-          // for the agent leg. Anyone else dialing the agent number is not this call.
+          // for the agent leg. Anyone else dialing the agent number, or a call without a
+          // caller id, is not this call. (ElevenLabs cannot prove the Twilio-leg binding; the
+          // request is already authenticated by the shared secret, and the window is the
+          // dialing phase only.)
           const byNumber =
             request.calledNumber === connection.conference.inboundNumber &&
-            (request.callerId === undefined ||
-              sameNumber(request.callerId, connection.conference.callerId.owner));
+            request.callerId !== undefined &&
+            sameNumber(request.callerId, connection.conference.callerId.owner);
           if (record.phase !== "dialing-agent" || !(bySid || byNumber)) return notFound;
           // The start row first: without it the call would neither count nor get its end row.
           yield* writeRow(record, {

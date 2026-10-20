@@ -478,6 +478,8 @@ describe("conference-mode third-party calls", () => {
       expect(stranger as unknown).toMatchObject({ status: 404 });
       const anonymous = yield* initiate({ caller_id: "anonymous", conversation_id: "conv_y" });
       expect(anonymous as unknown).toMatchObject({ status: 404 });
+      const missing = yield* initiate({ caller_id: "", conversation_id: "conv_z" });
+      expect(missing as unknown).toMatchObject({ status: 404 });
       expect((yield* loadRecord).conversationId).toBeUndefined();
       expect(yield* phoneRows).toEqual([]);
       // The agent leg itself still matches, formatting aside.
