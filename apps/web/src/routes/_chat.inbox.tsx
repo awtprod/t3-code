@@ -1,11 +1,13 @@
 import { AuthCommandCenterApproveScope, type EnvironmentId } from "@t3tools/contracts";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { PlugZapIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
+import type { CommandCenterEnvironmentCandidate } from "../command-center/CommandCenterExecution.logic";
 import { DigestCard } from "../command-center/DigestCard";
 import { InboxScreen } from "../command-center/inbox/InboxScreen";
 import {
+  inboxEnvironmentPreference,
   type InboxSearch,
   resolveInboxEnvironmentId,
   validateInboxSearch,
@@ -13,7 +15,6 @@ import {
 import { Button } from "../components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { SidebarInset } from "../components/ui/sidebar";
-import { useActiveEnvironmentId } from "../state/entities";
 import { commandCenterEnvironment } from "../state/commandCenter";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useEnvironmentQuery } from "../state/query";
@@ -27,9 +28,11 @@ export const Route = createFileRoute("/_chat/inbox")({
 function InboxRouteView() {
   const search = Route.useSearch();
   const navigate = useNavigate({ from: "/inbox" });
-  const activeEnvironmentId = useActiveEnvironmentId();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const { environments, isReady } = useEnvironments();
+  const [preferredEnvironmentId, setPreferredEnvironmentId] = useState(() =>
+    inboxEnvironmentPreference(undefined),
+  );
   const environmentOptions = useMemo(
     () =>
       environments.map((environment) => ({
@@ -41,11 +44,22 @@ function InboxRouteView() {
       })),
     [environments],
   );
+  const environmentCandidates = useMemo<readonly CommandCenterEnvironmentCandidate[]>(
+    () =>
+      environments.map((environment) => ({
+        id: environment.environmentId,
+        label: environment.label,
+        isPrimary: environment.entry.target._tag === "PrimaryConnectionTarget",
+        platformOs: environment.serverConfig?.environment.platform.os ?? "unknown",
+        connected: environment.connection.phase === "connected",
+      })),
+    [environments],
+  );
   const resolvedEnvironmentId = resolveInboxEnvironmentId({
     requestedEnvironmentId: search.environment,
-    activeEnvironmentId,
+    preferredEnvironmentId,
     primaryEnvironmentId,
-    environmentIds: environmentOptions.map((environment) => environment.id),
+    environments: environmentCandidates,
   });
   const environmentId =
     resolvedEnvironmentId === null ? null : (resolvedEnvironmentId as EnvironmentId);
@@ -71,11 +85,14 @@ function InboxRouteView() {
     [navigate],
   );
 
-  useEffect(() => {
-    if (environmentId !== null && search.environment === undefined) {
-      updateSearch({ environment: environmentId }, true);
-    }
-  }, [environmentId, search.environment, updateSearch]);
+  const selectEnvironment = useCallback(
+    (nextEnvironmentId: EnvironmentId) => {
+      inboxEnvironmentPreference(undefined, nextEnvironmentId);
+      setPreferredEnvironmentId(nextEnvironmentId);
+      updateSearch({ environment: nextEnvironmentId, space: undefined, item: undefined });
+    },
+    [updateSearch],
+  );
 
   if (!isReady) {
     return (
@@ -123,6 +140,25 @@ function InboxRouteView() {
               its environment, Space, and item while the connection recovers.
               {error ? ` ${error}` : ""}
             </EmptyDescription>
+            {environmentOptions.length > 0 ? (
+              <label className="mt-4 grid gap-1 text-left text-sm">
+                Environment
+                <select
+                  className="h-9 w-full min-w-0 max-w-56 rounded-lg border border-input bg-background px-3 text-sm"
+                  onChange={(event) => selectEnvironment(event.target.value as EnvironmentId)}
+                  value={environmentId}
+                >
+                  {!environmentOptions.some((option) => option.id === environmentId) ? (
+                    <option value={environmentId}>{environmentId} — unavailable</option>
+                  ) : null}
+                  {environmentOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <Button className="mt-4" render={<Link to="/settings/connections" />} size="sm">
               Open Connections
             </Button>
@@ -138,6 +174,7 @@ function InboxRouteView() {
         environmentId={environmentId}
         environmentOptions={environmentOptions}
         search={search}
+        onEnvironmentChange={selectEnvironment}
         updateSearch={updateSearch}
       />
     </SidebarInset>
@@ -148,6 +185,7 @@ function InboxEnvironmentRoute({
   environmentId,
   environmentOptions,
   search,
+  onEnvironmentChange,
   updateSearch,
 }: {
   readonly environmentId: EnvironmentId;
@@ -156,6 +194,7 @@ function InboxEnvironmentRoute({
     readonly label: string;
   }>;
   readonly search: InboxSearch;
+  readonly onEnvironmentChange: (environmentId: EnvironmentId) => void;
   readonly updateSearch: (patch: Partial<InboxSearch>, replace?: boolean) => void;
 }) {
   const bootstrapQuery = useEnvironmentQuery(
@@ -205,20 +244,16 @@ function InboxEnvironmentRoute({
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
-      <div className="max-h-[40vh] shrink-0 overflow-y-auto border-b border-border/60 p-3 sm:p-4">
-        <DigestCard environmentId={environmentId} />
-      </div>
       <InboxScreen
         canApprove={session.data?.scopes?.includes(AuthCommandCenterApproveScope) === true}
         environmentId={environmentId}
         environmentOptions={environmentOptions}
+        digest={<DigestCard environmentId={environmentId} key={environmentId} />}
         draftScopeId={draftScopeId}
         itemId={selectedItemId}
-        onEnvironmentChange={(nextEnvironmentId) =>
-          updateSearch({ environment: nextEnvironmentId, space: undefined, item: undefined })
-        }
+        onEnvironmentChange={onEnvironmentChange}
         onItemChange={(item) => updateSearch({ item })}
-        onSelectItem={(space, item) => updateSearch({ space, item })}
+        onSelectItem={(space, item) => updateSearch({ environment: environmentId, space, item })}
         onSpaceChange={(space) => updateSearch({ space, item: undefined })}
         onTabChange={(tab) => updateSearch({ tab, item: undefined })}
         runs={bootstrapQuery.data.runs}

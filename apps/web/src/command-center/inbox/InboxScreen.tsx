@@ -30,7 +30,7 @@ import {
   SendIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as Option from "effect/Option";
 
 import { WorkspacePageHeader } from "../../components/WorkspacePageHeader";
@@ -77,6 +77,7 @@ export interface InboxEnvironmentOption {
 
 interface InboxScreenProps {
   readonly canApprove: boolean;
+  readonly digest?: ReactNode;
   readonly environmentId: EnvironmentId;
   readonly environmentOptions: ReadonlyArray<InboxEnvironmentOption>;
   readonly draftScopeId?: string | undefined;
@@ -218,7 +219,7 @@ function InboxSpaceList({
   );
 
   return (
-    <section aria-labelledby={`inbox-space-${space.id}`} className="flex flex-col gap-2">
+    <section aria-labelledby={`inbox-space-${space.id}`} className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between px-1">
         <h2
           className="text-xs font-semibold tracking-widest text-muted-foreground uppercase"
@@ -242,13 +243,13 @@ function InboxSpaceList({
         </div>
       ) : null}
       {query.isPending && items.length === 0 ? (
-        <div className="flex items-center gap-2 rounded-xl border border-border/60 p-4 text-sm text-muted-foreground">
+        <div className="flex items-center gap-2 px-1 py-1.5 text-sm text-muted-foreground">
           <LoaderCircleIcon className="size-4 animate-spin motion-reduce:animate-none" /> Loading
           items…
         </div>
       ) : null}
       {!query.isPending && query.error === null && items.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
+        <div className="px-1 py-1.5 text-sm text-muted-foreground">
           {`Nothing ${
             tab === "actionable"
               ? "needs attention"
@@ -262,7 +263,7 @@ function InboxSpaceList({
         <button
           aria-current={selectedItemId === summary.item.id ? "true" : undefined}
           className={cn(
-            "group w-full rounded-xl border bg-card/35 p-4 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+            "group w-full rounded-xl border bg-card/35 p-3 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
             selectedItemId === summary.item.id
               ? "border-primary/55 bg-primary/6"
               : "border-border/65 hover:border-border hover:bg-accent/35",
@@ -290,13 +291,15 @@ function InboxSpaceList({
                   {dateLabel(summary.state.updatedAt)}
                 </span>
               </span>
-              <span className="mt-1 block font-semibold text-foreground">{summary.item.title}</span>
+              <span className="mt-1 line-clamp-2 font-semibold text-foreground">
+                {summary.item.title}
+              </span>
               {summary.item.description ? (
-                <span className="mt-1 line-clamp-2 block text-sm leading-5 text-muted-foreground">
+                <span className="mt-1 line-clamp-2 text-sm leading-5 text-muted-foreground">
                   {summary.item.description}
                 </span>
               ) : null}
-              <span className="mt-3 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+              <span className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
                 <span>
                   {summary.state.unresolvedChangeRequestCount > 0
                     ? `${summary.state.unresolvedChangeRequestCount} change request${summary.state.unresolvedChangeRequestCount === 1 ? "" : "s"} open`
@@ -1179,7 +1182,7 @@ export function InboxDetailPane({
 
   return (
     <article
-      className="scrollbar-gutter-both h-full overflow-y-auto"
+      className="scrollbar-gutter-both h-full overflow-y-auto [overflow-wrap:anywhere]"
       aria-labelledby="inbox-detail-title"
     >
       <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-border/60 bg-background/92 px-4 py-3 backdrop-blur lg:hidden">
@@ -1198,16 +1201,35 @@ export function InboxDetailPane({
             <span aria-hidden="true">·</span>
             <span>{detail.item.status.replace("_", " ")}</span>
           </div>
-          <h1
+          <h2
             className="mt-2 text-balance text-2xl font-semibold tracking-tight"
             id="inbox-detail-title"
             ref={detailHeadingRef}
             tabIndex={-1}
           >
             {detail.item.title}
-          </h1>
+          </h2>
           {detail.item.description ? (
-            <p className="mt-2 leading-6 text-muted-foreground">{detail.item.description}</p>
+            detail.item.description.length > 320 ? (
+              <details className="group mt-2 text-muted-foreground">
+                <summary className="cursor-pointer list-none outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+                  <span className="line-clamp-3 leading-6 group-open:hidden">
+                    {detail.item.description}
+                  </span>
+                  <span className="mt-1 block text-xs font-medium text-primary group-open:hidden">
+                    Show full context
+                  </span>
+                  <span className="hidden text-xs font-medium text-primary group-open:block">
+                    Hide full context
+                  </span>
+                </summary>
+                <p className="mt-2 whitespace-pre-wrap leading-6">{detail.item.description}</p>
+              </details>
+            ) : (
+              <p className="mt-2 whitespace-pre-wrap leading-6 text-muted-foreground">
+                {detail.item.description}
+              </p>
+            )
           ) : null}
           <div className="mt-3 flex flex-wrap gap-2">
             {threadId !== undefined ? (
@@ -1937,6 +1959,7 @@ function SnoozeAndDismiss({
 
 export function InboxScreen({
   canApprove,
+  digest,
   environmentId,
   environmentOptions,
   draftScopeId,
@@ -1970,7 +1993,7 @@ export function InboxScreen({
       <WorkspacePageHeader className="border-b border-border/60 bg-background">
         <div className="flex min-w-0 items-center gap-2">
           <InboxIcon className="size-4 text-primary" />
-          <span className="truncate text-sm font-semibold">Inbox</span>
+          <h1 className="truncate text-sm font-semibold">Inbox</h1>
         </div>
         <div className="ml-auto flex min-w-0 items-center gap-2">
           {environmentOptions.length > 1 ? (
@@ -1979,7 +2002,7 @@ export function InboxScreen({
                 Environment
               </label>
               <select
-                className="h-8 max-w-44 rounded-md border border-input bg-background px-2 text-xs"
+                className="h-8 min-w-0 max-w-44 rounded-md border border-input bg-background px-2 text-xs"
                 id="inbox-environment"
                 onChange={(event) => onEnvironmentChange(event.target.value as EnvironmentId)}
                 value={environmentId}
@@ -2003,40 +2026,14 @@ export function InboxScreen({
         </div>
       </WorkspacePageHeader>
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="border-b border-border/60 px-4 py-4 sm:px-6">
-          <div className="mx-auto flex max-w-7xl flex-col gap-4">
-            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
-              <div>
-                <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Inbox</h1>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  Decisions, questions, and useful results that deserve a closer look.
-                </p>
-              </div>
-              <div>
-                <label className="sr-only" htmlFor="inbox-space">
-                  Filter by Space
-                </label>
-                <select
-                  className="h-9 min-w-44 rounded-lg border border-input bg-background px-3 text-sm"
-                  id="inbox-space"
-                  onChange={(event) => onSpaceChange(event.target.value || undefined)}
-                  value={selectedSpaceId ?? ""}
-                >
-                  <option value="">All Spaces</option>
-                  {spaces.map((space) => (
-                    <option key={space.id} value={space.id}>
-                      {space.displayName}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div aria-label="Inbox views" className="flex gap-1" role="tablist">
+        <div className="border-b border-border/60 px-3 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div aria-label="Inbox views" className="flex min-w-0 gap-1" role="tablist">
               {TAB_OPTIONS.map((option) => (
                 <button
                   aria-selected={tab === option.value}
                   className={cn(
-                    "rounded-lg px-3 py-2 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                    "rounded-md px-2.5 py-1.5 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                     tab === option.value
                       ? "bg-accent text-foreground"
                       : "text-muted-foreground hover:text-foreground",
@@ -2050,16 +2047,33 @@ export function InboxScreen({
                 </button>
               ))}
             </div>
+            <label className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+              <span className="shrink-0">Space</span>
+              <select
+                className="h-8 min-w-0 max-w-52 rounded-md border border-input bg-background px-2 text-sm text-foreground"
+                id="inbox-space"
+                onChange={(event) => onSpaceChange(event.target.value || undefined)}
+                value={selectedSpaceId ?? ""}
+              >
+                <option value="">All Spaces</option>
+                {spaces.map((space) => (
+                  <option key={space.id} value={space.id}>
+                    {space.displayName}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
+          {digest === undefined ? null : <div className="mt-2">{digest}</div>}
         </div>
-        <div className="mx-auto grid min-h-0 w-full max-w-7xl flex-1 lg:grid-cols-[minmax(19rem,24rem)_minmax(0,1fr)]">
+        <div className="grid min-h-0 w-full flex-1 grid-cols-1 lg:grid-cols-[minmax(21.25rem,23.5rem)_minmax(0,1fr)]">
           <div
             className={cn(
-              "min-h-0 overflow-y-auto border-r border-border/60 p-4 sm:p-5",
+              "min-h-0 overflow-y-auto border-r border-border/60 p-3",
               itemId !== undefined && "hidden lg:block",
             )}
           >
-            <div className="space-y-6">
+            <div className="space-y-4">
               {visibleSpaces.map((space) => (
                 <InboxSpaceList
                   environmentId={environmentId}
@@ -2072,14 +2086,14 @@ export function InboxScreen({
                 />
               ))}
               {visibleSpaces.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-border/70 p-6 text-center text-sm text-muted-foreground">
+                <div className="px-1 py-1.5 text-sm text-muted-foreground">
                   This environment has no Spaces. Inbox stays empty until a real Space and item
                   exist.
                 </div>
               ) : null}
             </div>
           </div>
-          <div className={cn("min-h-0", itemId === undefined && "hidden lg:block")}>
+          <div className={cn("min-h-0 min-w-0", itemId === undefined && "hidden lg:block")}>
             {itemId !== undefined && selectedSpace !== undefined ? (
               <InboxDetailPane
                 canApprove={canApprove}
