@@ -290,7 +290,14 @@ jobs:
 
   command_center_native_isolation:
     name: Command Center Native Isolation (${{ matrix.label }})
-    runs-on: ${{ matrix.os }}
+    # A same-repository PR branch can explicitly opt in to a temporary custom runner.
+    runs-on: >-
+      ${{ github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.head_ref == vars.MACOS_CI_BRANCH &&
+          vars.MACOS_CI_RUNNER_LABEL != '' &&
+          matrix.label == 'macOS' &&
+          vars.MACOS_CI_RUNNER_LABEL || matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -320,7 +327,12 @@ jobs:
 
   mobile_native_static_analysis:
     name: Mobile Native Static Analysis
-    runs-on: macos-26
+    runs-on: >-
+      ${{ github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.head_ref == vars.MACOS_CI_BRANCH &&
+          vars.MACOS_CI_RUNNER_LABEL != '' &&
+          vars.MACOS_CI_RUNNER_LABEL || 'macos-26' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
