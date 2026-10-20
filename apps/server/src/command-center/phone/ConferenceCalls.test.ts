@@ -79,7 +79,8 @@ interface Harness {
   readonly twilio: Array<{ readonly method: TwilioMethod; readonly input: unknown }>;
   readonly failures: Partial<Record<TwilioMethod, Array<TwilioRequestError>>>;
   readonly elevenLabs: Array<OutboundCallRequest>;
-  readonly ownerDialed: Deferred.Deferred<void>;
+  /** Completed by the next owner dial; replace it to wait for another. */
+  ownerDialed: Deferred.Deferred<void>;
 }
 
 const directories: Array<string> = [];
@@ -796,6 +797,9 @@ describe("bring_owner_in", () => {
       expect(body).not.toContain("<Dial>");
       expect(body).toContain("<Hangup/>");
       expect(bodyOf(yield* Fiber.join(tool))).toMatchObject({ status: "failed" });
+      // While his leg is still up, a retry does not ring him again.
+      expect(JSON.stringify(bodyOf(yield* bringOwnerIn()))).toMatch(/still ending/u);
+      expect(calls(harness, "createCall")).toHaveLength(1);
       // His hang-up still takes the agent off hold, in case the hold did apply.
       yield* status(callId, "owner", OWNER_SID, "completed");
       expect(calls(harness, "updateParticipant").slice(1)).toEqual([
@@ -805,6 +809,20 @@ describe("bring_owner_in", () => {
       ]);
       // He never joined, so there is no "left" row.
       expect((yield* phoneRows).map((row) => row.status)).not.toContain("bridge-ended");
+      // Afterwards a second bridge works.
+      harness.ownerDialed = Deferred.makeUnsafe<void>();
+      const retry = yield* Effect.forkChild(bringOwnerIn());
+      yield* Deferred.await(harness.ownerDialed);
+      const secondOwnerSid = sid("CA", 4);
+      const joinTwiml = yield* twilioRequest({
+        route: "owner-twiml",
+        callId,
+        params: { CallSid: secondOwnerSid, CallStatus: "in-progress" },
+      });
+      expect(joinTwiml.kind === "twiml" ? joinTwiml.body : "").toContain("<Dial>");
+      expect(bodyOf(yield* Fiber.join(retry))).toMatchObject({ status: "joined" });
+      expect((yield* loadRecord).owner).toMatchObject({ n: 2, state: "joined" });
+      expect((yield* phoneRows).map((row) => row.sourceId)).toContain(`phone-bridge:${callId}:2`);
     }).pipe(Effect.provide(layer));
   });
 

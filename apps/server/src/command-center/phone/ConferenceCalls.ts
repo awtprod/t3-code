@@ -280,10 +280,13 @@ const bridgeStateAfter = (bridge: OwnerBridge, leg: ConferenceLeg): OwnerBridgeS
   }
 };
 
-const bridgeActive = (record: ConferenceCallRecord): boolean =>
-  record.owner !== undefined &&
-  (record.owner.state === "calling" || record.owner.state === "joined") &&
-  !isTerminalLegStatus(record.owner.leg.status);
+/**
+ * The owner's leg is still up (ringing, hearing the brief, or talking). While
+ * it is, the call is not ended for the agent leaving and no new bridge starts,
+ * so its hang-up still finds it and takes the agent off hold.
+ */
+const ownerLegLive = (record: ConferenceCallRecord): boolean =>
+  record.owner !== undefined && !isTerminalLegStatus(record.owner.leg.status);
 
 const legOf = (record: ConferenceCallRecord, leg: ConferenceLegName) =>
   leg === "agent" ? record.agent : leg === "callee" ? record.callee : record.owner?.leg;
@@ -771,7 +774,7 @@ export const make = Effect.gen(function* () {
                   updated,
                   `the call agent did not answer (${status})`,
                 );
-              } else if (!bridgeActive(updated)) {
+              } else if (!ownerLegLive(updated)) {
                 yield* endCall(connection, updated, "ended");
               }
               // With the owner on the line, the call ends when he leaves.
@@ -890,24 +893,30 @@ export const make = Effect.gen(function* () {
       request.callSid === record.agentInboundCallSid ||
       request.callSid === record.agent.callSid);
 
-  /** The answer for a bridge that is already under way, if there is one. */
+  /** The answer while the owner's leg is still up, instead of dialing him again. */
   const bridgeInProgress = (
     connection: PhoneConferenceConnection,
     record: ConferenceCallRecord,
   ): Option.Option<BringOwnerInResult> => {
-    if (!bridgeActive(record) || record.owner === undefined) return Option.none();
+    if (!ownerLegLive(record) || record.owner === undefined) return Option.none();
     const owner = connection.ownerName;
-    return Option.some(
-      record.owner.state === "joined"
-        ? {
-            status: "joined",
-            message: `${owner} is already on the call. Stay silent until you hear that ${owner} has left.`,
-          }
-        : {
-            status: "calling",
-            message: `${owner} is already being called. Ask the callee to keep holding and stay silent.`,
-          },
-    );
+    switch (record.owner.state) {
+      case "joined":
+        return Option.some({
+          status: "joined",
+          message: `${owner} is already on the call. Stay silent until you hear that ${owner} has left.`,
+        });
+      case "calling":
+        return Option.some({
+          status: "calling",
+          message: `${owner} is already being called. Ask the callee to keep holding and stay silent.`,
+        });
+      default:
+        return Option.some({
+          status: "refused",
+          message: `${owner}'s previous call is still ending. Continue with the callee and try again in a moment.`,
+        });
+    }
   };
 
   const refused = (message: string): BringOwnerInResult => ({ status: "refused", message });
@@ -1069,7 +1078,8 @@ export const make = Effect.gen(function* () {
             if (call._tag === "Failure" && !twilioRequestMayHaveStarted(call.failure)) {
               yield* logFailure("owner leg was refused", record)(call.failure);
               yield* transition(bridging, "in-progress", {
-                owner: { ...bridge, state: "failed" },
+                // Twilio created no call, so no callback will close this leg.
+                owner: { ...bridge, state: "failed", leg: { ...bridge.leg, status: "failed" } },
               });
               return settledResult(connection, "failed");
             }
