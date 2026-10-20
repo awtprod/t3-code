@@ -274,11 +274,13 @@ const handleElevenLabs = Effect.fn("ConferenceRoutes.elevenLabs")(function* (
     const agentId = present(body.value.agent_id);
     const calledNumber = present(body.value.called_number);
     const callSid = present(body.value.call_sid);
+    const callerId = present(body.value.caller_id);
     const result = yield* calls.initiation(connection, {
       conversationId: body.value.conversation_id,
       ...(agentId === undefined ? {} : { agentId }),
       ...(calledNumber === undefined ? {} : { calledNumber }),
       ...(callSid === undefined ? {} : { callSid }),
+      ...(callerId === undefined ? {} : { callerId }),
     });
     return result.kind === "not-found"
       ? json(404, { error: "call_not_found" })

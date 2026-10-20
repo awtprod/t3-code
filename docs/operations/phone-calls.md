@@ -165,7 +165,9 @@ How a call runs:
    `callerId.owner`; ElevenLabs answers it with the third-party agent, which waits in silence.
 2. Before answering, ElevenLabs fetches the call's dynamic variables from Command Center (the
    initiation webhook). That request writes the `Phone: calling …` row, exactly as in the default
-   mode. An agent leg that answers without fetching them is ended (`Phone: not connected …`).
+   mode. Only a call to the agent's number from the caller id of the agent leg (`callerId.owner`)
+   is matched; any other caller is refused. An agent leg that answers without fetching them is
+   ended (`Phone: not connected …`).
 3. Command Center then dials the callee from `callerId.callee`. The conference starts when the
    callee answers and ends when the callee hangs up. A callee who does not answer leaves
    `Phone: not connected …`.

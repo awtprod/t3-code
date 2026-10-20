@@ -468,6 +468,26 @@ describe("conference-mode third-party calls", () => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect("do not hand the brief to another caller who dials the agent number", () => {
+    const { layer } = makeLayer();
+    return Effect.gen(function* () {
+      yield* seedSpace;
+      yield* startCall;
+      // A stranger's inbound call to the agent number during the dialing window.
+      const stranger = yield* initiate({ caller_id: "+15555550177", conversation_id: "conv_x" });
+      expect(stranger as unknown).toMatchObject({ status: 404 });
+      const anonymous = yield* initiate({ caller_id: "anonymous", conversation_id: "conv_y" });
+      expect(anonymous as unknown).toMatchObject({ status: 404 });
+      expect((yield* loadRecord).conversationId).toBeUndefined();
+      expect(yield* phoneRows).toEqual([]);
+      // The agent leg itself still matches, formatting aside.
+      const owner = conference.callerId.owner;
+      const formatted = `+1 (${owner.slice(2, 5)}) ${owner.slice(5, 8)}-${owner.slice(8)}`;
+      const agent = yield* initiate({ caller_id: formatted });
+      expect(agent).toMatchObject({ kind: "json", status: 200 });
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("dial the callee only once the agent is answered and briefed", () => {
     const { harness, layer } = makeLayer();
     return Effect.gen(function* () {

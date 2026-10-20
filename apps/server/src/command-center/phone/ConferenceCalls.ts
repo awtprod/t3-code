@@ -174,6 +174,8 @@ export interface InitiationRequest {
   readonly agentId?: string;
   readonly calledNumber?: string;
   readonly callSid?: string;
+  /** The caller id ElevenLabs saw; for the agent leg that is `conference.callerId.owner`. */
+  readonly callerId?: string;
 }
 
 export type InitiationResult =
@@ -305,6 +307,13 @@ const withLeg = (
 
 const persistence = (message: string) => (cause: unknown) =>
   new CommandCenterError({ reason: "persistence", message, cause });
+
+/** Phone numbers compared by their digits, so formatting differences do not matter. */
+const sameNumber = (a: string, b: string): boolean => {
+  const digits = (value: string) => value.replace(/\D/gu, "");
+  const left = digits(a);
+  return left.length > 0 && left === digits(b);
+};
 
 /** @public Exported so tests can build a second instance over the same state file (a restart). */
 export const make = Effect.gen(function* () {
@@ -596,7 +605,13 @@ export const make = Effect.gen(function* () {
             return record.conversationId === request.conversationId ? matched : notFound;
           }
           const bySid = request.callSid !== undefined && request.callSid === record.agent.callSid;
-          const byNumber = request.calledNumber === connection.conference.inboundNumber;
+          // Twilio gives ElevenLabs the sid of its own (inbound) leg, so most initiations
+          // match by number: the agent number, called from the caller id Command Center uses
+          // for the agent leg. Anyone else dialing the agent number is not this call.
+          const byNumber =
+            request.calledNumber === connection.conference.inboundNumber &&
+            (request.callerId === undefined ||
+              sameNumber(request.callerId, connection.conference.callerId.owner));
           if (record.phase !== "dialing-agent" || !(bySid || byNumber)) return notFound;
           // The start row first: without it the call would neither count nor get its end row.
           yield* writeRow(record, {
