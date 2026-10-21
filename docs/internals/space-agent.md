@@ -135,3 +135,9 @@ not replay old events. When an agent creates an Item that `itemNeedsYou` reports
 needing Andrew (a needs-you or decision Item), it sends a web push. The push is gated
 by the subscription's `notifyOnInput` preference and deep-links to the agent's
 thread. Other agent Items do not trigger a push.
+
+That Item is the agent's only way to reach Andrew. The agent thread itself alerts
+only when it waits on him (an approval or input request): a finished, failed or
+usage-limited wake raises no web push, desktop banner, toast or sound. The rule is
+checked by thread id in `notifierDecision.ts` and in both web notifiers
+(`ThreadNotificationCoordinator`, `AgentActivityNotifications`).

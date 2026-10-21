@@ -12,6 +12,7 @@ const state = vi.hoisted(() => ({
   focused: true,
   visible: "visible",
   live: true,
+  threadId: "thread-1",
   completedAt: null as string | null,
   archivedAt: null as string | null,
   input: false,
@@ -38,7 +39,7 @@ const SHELL_NOW = DateTime.makeUnsafe("2026-09-13T09:00:00.000Z");
 
 function mockThreadShell() {
   return {
-    id: "thread-1",
+    id: state.threadId,
     projectId: "project-1",
     title: "Fix the login form",
     providerInstanceId: "codex",
@@ -49,7 +50,7 @@ function mockThreadShell() {
     worktreePath: null,
     activeProviderThreadId: null,
     lineage: {
-      rootThreadId: "thread-1",
+      rootThreadId: state.threadId,
       parentThreadId: state.subagent ? "parent" : null,
       relationshipToParent: state.subagent ? "subagent" : null,
     },
@@ -169,6 +170,7 @@ beforeEach(() => {
     focused: true,
     visible: "visible",
     live: true,
+    threadId: "thread-1",
     completedAt: null,
     archivedAt: null,
     input: false,
@@ -212,6 +214,28 @@ describe("thread notifications", () => {
     expect(state.sound).not.toHaveBeenCalled();
     expect(state.add).not.toHaveBeenCalled();
     expect(state.notification).not.toHaveBeenCalled();
+  });
+
+  it("rings a Space agent only when it waits on the user", async () => {
+    state.threadId = "cc-space-agent-command-center";
+    state.mode = "notifications-and-sound";
+    state.focused = false;
+    await render();
+    await complete();
+    state.completedAt = null;
+    state.sessionError = true;
+    await render();
+    state.sessionError = false;
+    state.limited = true;
+    await render();
+    expect(state.sound).not.toHaveBeenCalled();
+    expect(state.notification).not.toHaveBeenCalled();
+
+    state.limited = false;
+    state.approval = true;
+    await render();
+    expect(state.sound).toHaveBeenCalledTimes(1);
+    expect(state.notification).toHaveBeenCalledWith("Approval needed", expect.any(Object));
   });
 
   it("alerts on the parent when its delegated subagent asks for approval", async () => {
