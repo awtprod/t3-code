@@ -1,9 +1,11 @@
 import {
   COMMAND_CENTER_WS_METHODS,
   COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+  type CommandCenterSpaceAgentQuestion,
   type CommandCenterThreadPlanProgress,
 } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -13,6 +15,9 @@ import {
   createEnvironmentRpcQueryAtomFamily,
   createEnvironmentRpcSubscriptionAtomFamily,
 } from "./runtime.ts";
+
+/** Enough to cover a burst; older questions have already been seen. */
+const SPACE_AGENT_QUESTIONS_KEPT = 20;
 
 export function createCommandCenterEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
@@ -52,6 +57,24 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       label: "environment-data:command-center:space-agent-activity",
       tag: COMMAND_CENTER_WS_METHODS.spaceAgentActivity,
       staleTimeMs: 5_000,
+    }),
+    /**
+     * Space agent questions asked since subscribing, oldest first and capped:
+     * several can land in one chunk, so the value keeps them all for callers
+     * that dedupe by `itemId`. A failed follow retries after a minute.
+     */
+    spaceAgentQuestions: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:command-center:space-agent-questions",
+      tag: COMMAND_CENTER_WS_METHODS.spaceAgentQuestionsSubscribe,
+      idleTtlMs: 0,
+      transform: (stream) =>
+        stream.pipe(
+          Stream.retry(Schedule.spaced("1 minute")),
+          Stream.scan(
+            (): ReadonlyArray<CommandCenterSpaceAgentQuestion> => [],
+            (recent, question) => [...recent, question].slice(-SPACE_AGENT_QUESTIONS_KEPT),
+          ),
+        ),
     }),
     wakeSpaceAgent: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:space-agent-wake",

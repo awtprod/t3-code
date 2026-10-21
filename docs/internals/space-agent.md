@@ -128,15 +128,21 @@ is the agent thread) and records the audit actor as `agent`.
 `status`, `title` and `description` through `Service.updateItem`. An empty patch is
 rejected.
 
-## Push
+## Notifications
 
-`LocalWebPushNotifier` follows the event stream from the audit head, so restarts do
-not replay old events. When an agent creates an Item that `itemNeedsYou` reports as
-needing Andrew (a needs-you or decision Item), it sends a web push. The push is gated
-by the subscription's `notifyOnInput` preference and deep-links to the agent's
-thread. Other agent Items do not trigger a push.
+A question is an Item the agent creates that `itemNeedsYou` reports as needing
+Andrew (a needs-you or decision Item); `SpaceAgentQuestions.ts` decides this from
+the stored Item. Other agent Items stay quiet. Questions reach Andrew two ways, both
+following the event stream from the audit head so restarts and reconnects never
+replay old ones:
 
-That Item is the agent's only way to reach Andrew. The agent thread itself alerts
+- `LocalWebPushNotifier` sends a web push, gated by the subscription's
+  `notifyOnInput` preference and deep-linked to the agent's thread.
+- Electron clients subscribe to `cc.spaceAgent.questions.subscribe` and show a
+  native banner, gated by the desktop "input needed" setting. Clicking it opens the
+  agent's thread.
+
+Questions are the agent's only way to reach Andrew. The agent thread itself alerts
 only when it waits on him (an approval or input request): a finished, failed or
 usage-limited wake raises no web push, desktop banner, toast or sound. The rule is
 checked by thread id in `notifierDecision.ts` and in both web notifiers
