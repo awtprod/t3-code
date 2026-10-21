@@ -2,10 +2,15 @@ import * as NodeAssert from "node:assert/strict";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it } from "@effect/vitest";
-import { CodexSettings, ThreadId } from "@t3tools/contracts";
+import { CodexSettings, ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type * as CodexClient from "effect-codex-app-server/client";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
@@ -19,6 +24,7 @@ import {
   buildCommandCenterWindowsIsolationProbeScript,
   type CommandCenterCodexLaunch,
   commandCenterPermissionProfileMismatch,
+  commandCenterRequestCwd,
   commandCenterThreadStartParams,
   commandCenterTurnPermissionProfile,
   commandCenterTurnStartParams,
@@ -27,12 +33,15 @@ import {
   prepareCommandCenterCodexLaunch,
   verifyCommandCenterCodexIsolation,
 } from "./CodexCommandCenterIsolation.ts";
+import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
+import { makeReplayServerConfig } from "./CodexAdapterV2.testkit.ts";
 
 const DEFAULT_SETTINGS = Schema.decodeSync(CodexSettings)({});
 
 const writeLaunch = (permissionProfile: string): CommandCenterCodexLaunch => ({
   permissionProfile,
   platform: "linux",
+  cwd: "/workspace",
   appServerArgs: [],
   settings: DEFAULT_SETTINGS,
   environment: {},
@@ -284,6 +293,22 @@ describe("Command Center permission profile on thread and turn start", () => {
     NodeAssert.ok("issue" in commandCenterTurnPermissionProfile(launch, "full-access"));
     NodeAssert.ok("issue" in commandCenterTurnPermissionProfile(launch, "approval-required"));
   });
+
+  it("keeps every cc: request in the workspace the app-server was spawned in", () => {
+    const launch = writeLaunch(COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE);
+    NodeAssert.deepStrictEqual(commandCenterRequestCwd(launch, "/workspace"), {
+      cwd: "/workspace",
+    });
+    // No cwd on the request: pinned to the spawn workspace, never Codex's default.
+    NodeAssert.deepStrictEqual(commandCenterRequestCwd(launch, null), { cwd: "/workspace" });
+    NodeAssert.deepStrictEqual(commandCenterRequestCwd(launch, undefined), { cwd: "/workspace" });
+    // Another workspace (a worktree handoff) needs a new session.
+    for (const cwd of ["/workspace/other", "/workspace/", "/", "workspace"]) {
+      const decision = commandCenterRequestCwd(launch, cwd);
+      NodeAssert.ok("issue" in decision, cwd);
+      NodeAssert.match(decision.issue, /different workspace/u);
+    }
+  });
 });
 
 it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
@@ -385,6 +410,8 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
         NodeAssert.ok(launch !== undefined);
         const fileSystem = yield* FileSystem.FileSystem;
         NodeAssert.equal(launch.permissionProfile, COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE);
+        // The app-server spawn cwd and probe cwd: the thread's own workspace.
+        NodeAssert.equal(launch.cwd, paths.workspace);
         NodeAssert.ok(launch.settings.binaryPath.endsWith("/bin/codex"));
         NodeAssert.notEqual(launch.settings.homePath, paths.sourceHome);
         NodeAssert.ok(
@@ -449,6 +476,168 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
           }),
           /absolute workspace/u,
         );
+        NodeAssert.match(
+          yield* refusal({
+            threadId: "cc:interactive:acme",
+            runtimeMode: "approval-required",
+            cwd: "workspace",
+          }),
+          /absolute workspace/u,
+        );
       }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "spawns, probes and runs a cc: session only in its workspace and refuses another cwd",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const paths = yield* fixture;
+        const otherWorkspace = path.join(paths.root, "other-workspace");
+        yield* fileSystem.makeDirectory(otherWorkspace, { recursive: true });
+
+        const opened: Array<
+          Parameters<CodexAdapterV2.CodexAppServerClientFactoryShape["open"]>[0]
+        > = [];
+        const requests: Array<{ readonly method: string; readonly cwd: unknown }> = [];
+        const nativeThreadId = "acme-native-thread";
+        const respond = (method: string, params: unknown) =>
+          Effect.sync(() => {
+            requests.push({
+              method,
+              cwd: (params as { readonly cwd?: unknown } | undefined)?.cwd,
+            });
+            if (method === "command/exec") {
+              return { exitCode: 0, stdout: "command-center-isolation-ok\n", stderr: "" };
+            }
+            if (method === "thread/start") {
+              return {
+                thread: {
+                  id: nativeThreadId,
+                  sessionId: nativeThreadId,
+                  forkedFromId: null,
+                  preview: "",
+                  projectId: null,
+                  ephemeral: false,
+                  modelProvider: "openai",
+                  createdAt: 1782622440,
+                  updatedAt: 1782622440,
+                  status: { type: "idle" },
+                  path: `/tmp/${nativeThreadId}.jsonl`,
+                  cwd: paths.workspace,
+                  cliVersion: "0.159.1",
+                  source: "vscode",
+                  threadSource: null,
+                  agentNickname: null,
+                  agentRole: null,
+                  gitInfo: null,
+                  name: null,
+                  turns: [],
+                },
+                model: "gpt-5.4",
+                modelProvider: "openai",
+                serviceTier: null,
+                cwd: paths.workspace,
+                instructionSources: [],
+                approvalPolicy: "never",
+                approvalsReviewer: "user",
+                sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false },
+                reasoningEffort: "medium",
+              };
+            }
+            return {};
+          });
+        const client = {
+          raw: { request: respond },
+          request: respond,
+          notify: () => Effect.void,
+          handleServerRequest: () => Effect.void,
+          handleServerNotification: () => Effect.void,
+          handleUnknownServerRequest: () => Effect.void,
+          handleUnknownServerNotification: () => Effect.void,
+        } as unknown as CodexClient.CodexAppServerClient["Service"];
+
+        const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
+          instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+          settings: { ...DEFAULT_SETTINGS, homePath: paths.sourceHome },
+          environment: { PATH: "/usr/bin:/bin", HOME: paths.root },
+          clientFactory: {
+            open: (openInput) =>
+              Effect.sync(() => {
+                opened.push(openInput);
+                return client;
+              }),
+          },
+          crypto: yield* Crypto.Crypto,
+          fileSystem,
+          idAllocator: yield* IdAllocator.IdAllocatorV2,
+          serverConfig: yield* makeReplayServerConfig("cc-codex-spawn-cwd").pipe(Effect.orDie),
+          commandCenterPlatform: "linux",
+          commandCenterArchitecture: "x64",
+          commandCenterRuntimeCommandPath: paths.commandPath,
+        });
+        const threadId = ThreadId.make("cc:interactive:acme");
+        const modelSelection = {
+          instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+          model: "gpt-5.4",
+        };
+        const policy = (cwd: string) =>
+          ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: "auto-accept-edits",
+            interactionMode: "default",
+            cwd,
+          });
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-cc-acme"),
+          modelSelection,
+          runtimePolicy: policy(paths.workspace),
+        });
+
+        // The app-server is spawned in the workspace, and probed there.
+        NodeAssert.equal(opened.length, 1);
+        NodeAssert.equal(opened[0]?.commandCenterIsolation?.cwd, paths.workspace);
+        NodeAssert.deepStrictEqual(
+          requests.filter((request) => request.method === "command/exec"),
+          [{ method: "command/exec", cwd: paths.workspace }],
+        );
+
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy: policy(paths.workspace),
+        });
+        NodeAssert.deepStrictEqual(
+          requests.filter((request) => request.method === "thread/start"),
+          [{ method: "thread/start", cwd: paths.workspace }],
+        );
+
+        // Reusing the session from another workspace never reaches Codex.
+        const sent = requests.length;
+        const startError = yield* runtime
+          .ensureThread({ threadId, modelSelection, runtimePolicy: policy(otherWorkspace) })
+          .pipe(Effect.flip);
+        NodeAssert.equal(
+          (startError.cause as { readonly _tag?: unknown } | undefined)?._tag,
+          "CodexCommandCenterSessionRefusedError",
+        );
+        const resumeError = yield* runtime
+          .resumeThread({
+            threadId,
+            providerThread,
+            modelSelection,
+            runtimePolicy: policy(otherWorkspace),
+          })
+          .pipe(Effect.flip);
+        NodeAssert.equal(
+          (resumeError.cause as { readonly _tag?: unknown } | undefined)?._tag,
+          "CodexCommandCenterSessionRefusedError",
+        );
+        NodeAssert.equal(requests.length, sent);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer)),
+      ),
   );
 });

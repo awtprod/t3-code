@@ -803,6 +803,82 @@ describe("CodexAdapterV2 process spawning", () => {
     }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 
+  it.effect("spawns a cc: app-server in its workspace and fails closed without one", () =>
+    Effect.gen(function* () {
+      const spawned: Array<{
+        readonly args: ReadonlyArray<string>;
+        readonly cwd: string | undefined;
+        readonly extendEnv: boolean | undefined;
+      }> = [];
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (ChildProcess.isStandardCommand(command)) {
+          spawned.push({
+            args: command.args,
+            cwd: command.options.cwd,
+            extendEnv: command.options.extendEnv,
+          });
+        }
+        return Effect.fail(
+          PlatformError.systemError({ _tag: "NotFound", module: "ChildProcess", method: "spawn" }),
+        );
+      });
+      const factory = yield* CodexAdapterV2.CodexAppServerClientFactory.pipe(
+        Effect.provide(CodexAdapterV2.layerAppServerClientFactory),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      );
+      const open = (
+        threadId: string,
+        commandCenterIsolation?: { readonly appServerArgs: ReadonlyArray<string>; cwd: string },
+      ) =>
+        factory
+          .open({
+            instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+            threadId: ThreadId.make(threadId),
+            providerSessionId: ProviderSessionId.make(`provider-session-${threadId}`),
+            runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              cwd: "/workspace/acme",
+            }),
+            settings: DEFAULT_CODEX_SETTINGS,
+            environment: {},
+            ...(commandCenterIsolation === undefined ? {} : { commandCenterIsolation }),
+          })
+          .pipe(Effect.scoped);
+
+      // An ordinary session keeps the server's cwd, exactly as before.
+      yield* open("thread-acme").pipe(Effect.exit);
+      yield* open("cc:interactive:acme", {
+        appServerArgs: ["--strict-config"],
+        cwd: "/workspace/acme",
+      }).pipe(Effect.exit);
+      assert.deepEqual(
+        spawned.map(({ cwd, extendEnv }) => ({ cwd, extendEnv })),
+        [
+          { cwd: undefined, extendEnv: undefined },
+          { cwd: "/workspace/acme", extendEnv: false },
+        ],
+      );
+      assert.equal(spawned[1]?.args.at(-1), "--strict-config");
+
+      // No workspace: refused before anything spawns, never the server's cwd.
+      const refused = yield* open("cc:interactive:acme-missing", {
+        appServerArgs: ["--strict-config"],
+        cwd: "",
+      }).pipe(Effect.flip);
+      assert.equal(spawned.length, 2);
+      assert.equal(refused._tag, "ProviderAdapterOpenSessionError");
+      assert.equal(
+        (refused.cause as { readonly _tag?: unknown } | undefined)?._tag,
+        "CodexCommandCenterSessionRefusedError",
+      );
+    }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+  );
+
   it.effect("expands ~ in the configured binary path before spawning", () =>
     Effect.gen(function* () {
       const spawnedCommands: Array<string> = [];
