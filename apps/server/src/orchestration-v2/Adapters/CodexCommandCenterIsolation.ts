@@ -474,6 +474,13 @@ export const ensureCommandCenterWindowsSandbox = Effect.fn(
 export interface CommandCenterCodexLaunch {
   readonly permissionProfile: string;
   readonly platform: NodeJS.Platform;
+  /**
+   * The thread's absolute workspace directory. Codex builds the sandbox's
+   * workspace roots from the app-server's own working directory, not from a
+   * request's `cwd`, so the app-server is spawned here, probed here, and every
+   * thread and turn of the session must run here.
+   */
+  readonly cwd: string;
   readonly windowsSandboxMode?: "elevated";
   /** Locked isolation arguments appended after the user's launch arguments. */
   readonly appServerArgs: ReadonlyArray<string>;
@@ -628,6 +635,7 @@ export const prepareCommandCenterCodexLaunch = Effect.fn(
   return {
     permissionProfile: isolation.permissionProfile,
     platform: input.platform,
+    cwd,
     ...(isolation.windowsSandboxMode === undefined
       ? {}
       : { windowsSandboxMode: isolation.windowsSandboxMode }),
@@ -655,6 +663,24 @@ export function commandCenterTurnPermissionProfile(
     : {
         issue:
           "This Command Center session was isolated for a different runtime mode; start a new session to change it.",
+      };
+}
+
+/**
+ * The cwd a `cc:` thread or turn request must carry, or why it cannot run.
+ * The sandbox's workspace roots were fixed when the app-server was spawned, so
+ * another workspace (after a worktree handoff, say) needs a new session. A
+ * request without a cwd is pinned to the spawn workspace.
+ */
+export function commandCenterRequestCwd(
+  launch: CommandCenterCodexLaunch,
+  cwd: string | null | undefined,
+): { readonly cwd: string } | { readonly issue: string } {
+  return cwd === null || cwd === undefined || cwd === launch.cwd
+    ? { cwd: launch.cwd }
+    : {
+        issue:
+          "This Command Center session was isolated for a different workspace; start a new session to change it.",
       };
 }
 

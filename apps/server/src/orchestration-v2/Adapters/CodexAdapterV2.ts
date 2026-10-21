@@ -120,6 +120,7 @@ import {
   type CommandCenterCodexLaunch,
   CodexCommandCenterSessionRefusedError,
   commandCenterPermissionProfileMismatch,
+  commandCenterRequestCwd,
   commandCenterThreadStartParams,
   commandCenterTurnPermissionProfile,
   commandCenterTurnStartParams,
@@ -1321,9 +1322,14 @@ export interface CodexAppServerClientFactoryShape {
      * Set for Command Center threads. `environment` is then the complete
      * allowlisted environment (never extended with the server's own), the
      * user's launch arguments are not applied, and these locked isolation
-     * arguments are appended.
+     * arguments are appended. The app-server is spawned in `cwd`, the thread's
+     * absolute workspace: Codex builds the sandbox's workspace roots from its
+     * own working directory, not from a request's `cwd`.
      */
-    readonly commandCenterIsolation?: { readonly appServerArgs: ReadonlyArray<string> };
+    readonly commandCenterIsolation?: {
+      readonly appServerArgs: ReadonlyArray<string>;
+      readonly cwd: string;
+    };
   }) => Effect.Effect<
     CodexClient.CodexAppServerClient["Service"],
     ProviderAdapter.ProviderAdapterOpenSessionError,
@@ -1587,6 +1593,21 @@ export const layerAppServerClientFactory: Layer.Layer<
             ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
           };
           const isolation = input.commandCenterIsolation;
+          // Fail closed: without its workspace the app-server would inherit the
+          // server's cwd and its sandbox would not contain the workspace.
+          // prepareCommandCenterCodexLaunch has already required it absolute.
+          if (
+            isolation !== undefined &&
+            (typeof isolation.cwd !== "string" || isolation.cwd.trim().length === 0)
+          ) {
+            return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
+              driver: CODEX_PROVIDER,
+              providerSessionId: input.providerSessionId,
+              cause: new CodexCommandCenterSessionRefusedError({
+                issue: "Command Center Codex sessions need an absolute workspace directory.",
+              }),
+            });
+          }
           const command = yield* makeCodexAppServerSpawnCommand({
             command: input.settings.binaryPath || "codex",
             args:
@@ -1596,7 +1617,7 @@ export const layerAppServerClientFactory: Layer.Layer<
                   )
                 : [...codexAppServerArgs(), ...isolation.appServerArgs],
             env: environment,
-            ...(isolation === undefined ? {} : { extendEnv: false }),
+            ...(isolation === undefined ? {} : { cwd: isolation.cwd, extendEnv: false }),
             threadId: input.threadId,
           }).pipe(Effect.provideService(AgentScope, agentScope));
           const handle = yield* spawner.spawn(command).pipe(
@@ -1835,7 +1856,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 },
           ...(commandCenterLaunch === undefined
             ? {}
-            : { commandCenterIsolation: { appServerArgs: commandCenterLaunch.appServerArgs } }),
+            : {
+                commandCenterIsolation: {
+                  appServerArgs: commandCenterLaunch.appServerArgs,
+                  cwd: commandCenterLaunch.cwd,
+                },
+              }),
         });
         const windowsSandboxSetupCompleted =
           yield* Deferred.make<CodexSchema.V2WindowsSandboxSetupCompletedNotification>();
@@ -1850,7 +1876,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
          */
         const verifyCommandCenterIsolation = (launch: CommandCenterCodexLaunch) =>
           Effect.gen(function* () {
-            const cwd = input.runtimePolicy.cwd ?? "";
+            const cwd = launch.cwd;
             if (launch.platform === "win32") {
               if (launch.windowsSandboxMode === undefined) {
                 return yield* new CodexCommandCenterSessionRefusedError({
@@ -1881,6 +1907,20 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             : Effect.succeed(decision.permissionProfile);
         };
         /**
+         * Every `cc:` thread and turn request runs in the workspace the
+         * app-server was spawned and probed in; any other cwd is refused.
+         * Other sessions' params pass through unchanged.
+         */
+        const withCommandCenterCwd = <P extends { readonly cwd?: string | null | undefined }>(
+          params: P,
+        ): Effect.Effect<P, CodexCommandCenterSessionRefusedError> => {
+          if (commandCenterLaunch === undefined) return Effect.succeed(params);
+          const decision = commandCenterRequestCwd(commandCenterLaunch, params.cwd);
+          return "issue" in decision
+            ? Effect.fail(new CodexCommandCenterSessionRefusedError({ issue: decision.issue }))
+            : Effect.succeed({ ...params, cwd: decision.cwd });
+        };
+        /**
          * `cc:` turns run under the admitted permission profile with approvals
          * off; caller sandbox and approval overrides are dropped. Sent raw
          * because the generated request schema has no `permissions` field.
@@ -1894,7 +1934,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const permissionProfile = yield* commandCenterProfileFor(launch, runtimeMode);
             const raw = yield* client.raw.request(
               "turn/start",
-              commandCenterTurnStartParams(params, permissionProfile),
+              commandCenterTurnStartParams(yield* withCommandCenterCwd(params), permissionProfile),
             );
             return yield* decodeCodexTurnStartResponse(raw);
           });
@@ -1907,7 +1947,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const permissionProfile = yield* commandCenterProfileFor(launch, runtimeMode);
             const raw = yield* client.raw.request(
               "thread/start",
-              commandCenterThreadStartParams(params, permissionProfile),
+              commandCenterThreadStartParams(
+                yield* withCommandCenterCwd(params),
+                permissionProfile,
+              ),
             );
             const mismatch = commandCenterPermissionProfileMismatch(permissionProfile, raw);
             if (mismatch !== undefined) return yield* mismatch;
@@ -6794,11 +6837,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           resumeThread: (threadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
-              // excludeTurns is not in the generated request schema yet.
-              const resume = client.raw.request("thread/resume", {
-                threadId: nativeThreadId,
-                excludeTurns: true,
-                ...codexThreadRuntimeParams({
+              const runtimeParams = yield* withCommandCenterCwd(
+                codexThreadRuntimeParams({
                   mcpSession: yield* readMcpSession(
                     threadInput.threadId ?? threadInput.providerThread.appThreadId,
                   ),
@@ -6809,6 +6849,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     ? {}
                     : { runtimePolicy: threadInput.runtimePolicy }),
                 }),
+              );
+              // excludeTurns is not in the generated request schema yet.
+              const resume = client.raw.request("thread/resume", {
+                threadId: nativeThreadId,
+                excludeTurns: true,
+                ...runtimeParams,
               });
               const response = yield* ensureInitialized.pipe(
                 Effect.andThen(
@@ -7542,11 +7588,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 yield* client.raw.request("thread/resume", {
                   threadId,
                   excludeTurns: true,
-                  ...codexThreadRuntimeParams({
-                    mcpSession: yield* readMcpSession(threadInput.providerThread.appThreadId),
-                    modelSelection: input.modelSelection,
-                    runtimePolicy: input.runtimePolicy,
-                  }),
+                  ...(yield* withCommandCenterCwd(
+                    codexThreadRuntimeParams({
+                      mcpSession: yield* readMcpSession(threadInput.providerThread.appThreadId),
+                      modelSelection: input.modelSelection,
+                      runtimePolicy: input.runtimePolicy,
+                    }),
+                  )),
                 });
               }
               const response = yield* ensureInitialized.pipe(
@@ -7584,6 +7632,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             Effect.gen(function* () {
               const threadId = yield* getNativeThreadId(threadInput.sourceProviderThread);
               const boundary = yield* resolveCodexForkBoundary(threadInput);
+              const runtimeParams = yield* withCommandCenterCwd(
+                codexThreadRuntimeParams({
+                  mcpSession: yield* mcpSessions.read(threadInput.targetThreadId),
+                  ...(threadInput.modelSelection === undefined
+                    ? {}
+                    : { modelSelection: threadInput.modelSelection }),
+                  ...(threadInput.runtimePolicy === undefined
+                    ? {}
+                    : { runtimePolicy: threadInput.runtimePolicy }),
+                }),
+              );
               const response = yield* ensureInitialized.pipe(
                 Effect.andThen(
                   client.request("thread/fork", {
@@ -7591,15 +7650,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     ...(boundary.lastTurnId === undefined
                       ? {}
                       : { lastTurnId: boundary.lastTurnId }),
-                    ...codexThreadRuntimeParams({
-                      mcpSession: yield* mcpSessions.read(threadInput.targetThreadId),
-                      ...(threadInput.modelSelection === undefined
-                        ? {}
-                        : { modelSelection: threadInput.modelSelection }),
-                      ...(threadInput.runtimePolicy === undefined
-                        ? {}
-                        : { runtimePolicy: threadInput.runtimePolicy }),
-                    }),
+                    ...runtimeParams,
                   }),
                 ),
                 Effect.mapError(
