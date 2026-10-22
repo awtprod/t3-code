@@ -40,6 +40,7 @@ import { PullRequestGuideRunCoordinator } from "../components/pullRequest/guide/
 import { SlowRpcRequestToastCoordinator } from "../components/SlowRpcRequestToastCoordinator";
 import { WorktreeCleanupToastCoordinator } from "../components/WorktreeCleanupToastCoordinator";
 import { AgentActivityNotifications } from "../notifications/AgentActivityNotifications";
+import { SpaceAgentQuestionNotifications } from "../command-center/space-agent/SpaceAgentQuestionNotifications";
 import { ChatGptWelcomeCoordinator } from "../components/settings/ChatGptWelcomeCoordinator";
 import { ProviderAuthCallbackCoordinator } from "../components/settings/ProviderAuthCallbackCoordinator";
 import { ThemeEditorHost } from "../components/settings/ThemeEditorHost";
@@ -265,6 +266,9 @@ function RootRouteView() {
           <PullRequestGuideRunCoordinator />
           <WorktreeCleanupToastCoordinator />
           <AgentActivityNotifications />
+          {isElectron && primaryEnvironmentAuthenticated ? (
+            <SpaceAgentQuestionNotifications />
+          ) : null}
           <HostedStaticEnvironmentBootstrap />
           {primaryEnvironmentAuthenticated ? (
             <EventRouter skipInitialBootstrapNavigation={returningFromWelcomeRef.current} />

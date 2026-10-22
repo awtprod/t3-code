@@ -2,7 +2,7 @@ import {
   type CommandCenterEventEnvelope,
   type OrchestrationProjectShell,
   type OrchestrationV2ThreadShell,
-  ThreadId,
+  type ThreadId,
   type WebPushPreferences,
 } from "@t3tools/contracts";
 import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
@@ -17,13 +17,16 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
-import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { CommandCenterEventStream } from "../command-center/EventStream.ts";
-import { spaceAgentThreadId } from "../command-center/SpaceAgentIds.ts";
+import {
+  readAuditHeadSequence,
+  readSpaceAgentQuestion,
+  SPACE_AGENT_QUESTION_POLL_MS,
+} from "../command-center/SpaceAgentQuestions.ts";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as OrchestrationBridge from "../command-center/OrchestrationBridge.ts";
@@ -41,7 +44,6 @@ import {
 import {
   decidePublishAction,
   isNotificationFreshEnough,
-  isSpaceAgentQuestion,
   notificationAllowedForPreferences,
   spaceAgentQuestionAllowedForPreferences,
 } from "./notifierDecision.ts";
@@ -52,12 +54,7 @@ import { WebPushSubscriptions } from "./WebPushSubscriptions.ts";
 // Bounded fan-out per notification: enough to clear a handful of a user's
 // devices promptly without hammering push services in lockstep.
 const DELIVERY_CONCURRENCY = 4;
-const SPACE_AGENT_QUESTION_POLL_MS = 5_000;
 const SPACE_AGENT_QUESTION_STREAM_RETRY = Schedule.spaced("1 minute");
-
-const decodeMetadataJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
-
-type ItemChangedEvent = Extract<CommandCenterEventEnvelope, { readonly _tag: "ItemChanged" }>;
 
 export class LocalWebPushNotifier extends Context.Service<
   LocalWebPushNotifier,
@@ -161,34 +158,19 @@ export const make = Effect.gen(function* () {
   });
 
   const processItemEventUnsafe = Effect.fn("web_push.processItemEvent")(function* (
-    event: ItemChangedEvent,
+    event: CommandCenterEventEnvelope,
   ) {
-    if (event.payload.change !== "created" || event.actorKind !== "agent" || event.spaceId === null)
-      return;
-    const rows = yield* sql<{
-      readonly kind: string;
-      readonly status: string;
-      readonly priority: string;
-      readonly title: string;
-      readonly metadataJson: string;
-    }>`
-      SELECT kind, status, priority, title, metadata_json AS "metadataJson"
-      FROM command_center_items
-      WHERE id = ${event.payload.itemId} AND space_id = ${event.spaceId}
-      LIMIT 1
-    `;
-    const row = rows[0];
-    if (row === undefined) return;
-    const metadata = decodeMetadataJson(row.metadataJson);
-    if (Option.isNone(metadata) || !isSpaceAgentQuestion({ ...row, metadata: metadata.value }))
-      return;
+    const question = yield* readSpaceAgentQuestion(event).pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+    );
+    if (Option.isNone(question)) return;
     const environmentId = yield* serverEnvironment.getEnvironmentId;
     yield* sendToAllowed(
       spaceAgentQuestionAllowedForPreferences,
       buildSpaceAgentQuestionPayload({
         environmentId,
-        threadId: ThreadId.make(spaceAgentThreadId(event.spaceId)),
-        itemTitle: row.title,
+        threadId: question.value.threadId,
+        itemTitle: question.value.title,
       }),
     );
   });
@@ -208,10 +190,9 @@ export const make = Effect.gen(function* () {
   // Follows Command Center events from the current head: Items created before
   // this boot never ring (same no-restart-flood rule as threads).
   const followSpaceAgentQuestions = Effect.gen(function* () {
-    const head = yield* sql<{ readonly sequence: number }>`
-      SELECT COALESCE(MAX(sequence), 0) AS sequence FROM command_center_audit_events
-    `;
-    let afterSequence = head[0]?.sequence ?? 0;
+    let afterSequence = yield* readAuditHeadSequence().pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+    );
     yield* Effect.suspend(() =>
       Stream.runForEach(
         commandCenterEvents.changes({

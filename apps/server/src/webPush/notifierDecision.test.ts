@@ -1,4 +1,4 @@
-import type { WebPushPreferences } from "@t3tools/contracts";
+import { ThreadId, type WebPushPreferences } from "@t3tools/contracts";
 import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -77,6 +77,25 @@ describe("decidePublishAction", () => {
       existingDeadlineMs: undefined,
     });
     expect(action).toEqual({ kind: "proceed", notify: false });
+  });
+
+  it("rings a Space agent thread only when it waits on the user", () => {
+    const threadId = ThreadId.make("cc-space-agent-command-center");
+    const notifies = (phase: RelayAgentActivityState["phase"]) => {
+      const state = makeState({ phase, threadId });
+      return decidePublishAction({
+        state,
+        publishIdentity: agentAwarenessPublishIdentity(state),
+        previousIdentity: agentAwarenessPublishIdentity(makeState({ phase: "running", threadId })),
+        hasPrevious: true,
+        nowMs: 1000,
+        existingDeadlineMs: undefined,
+      });
+    };
+    expect(notifies("completed")).toEqual({ kind: "proceed", notify: false });
+    expect(notifies("failed")).toEqual({ kind: "proceed", notify: false });
+    expect(notifies("waiting_for_approval")).toEqual({ kind: "proceed", notify: true });
+    expect(notifies("waiting_for_input")).toEqual({ kind: "proceed", notify: true });
   });
 
   it("defers completed-as-first-state, then proceeds once the deadline passes", () => {

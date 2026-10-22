@@ -4,6 +4,7 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { projectThreadAwarenessV2, type AgentAwarenessPhase } from "@t3tools/shared/agentAwareness";
 
+import { isSpaceAgentThreadId } from "~/command-center/space-agent/SpaceAgent.logic";
 import { isElectron } from "~/env";
 import { getClientSettings } from "~/hooks/useSettings";
 import { useActiveThreadRefFromRoute } from "~/hooks/useActiveThreadRef";
@@ -107,6 +108,10 @@ export function AgentActivityNotifications() {
 
         const kind = agentNotificationKind(previous, awareness.phase);
         if (kind === null) continue;
+        // A Space agent works unattended: only its approval and input requests alert.
+        if (isSpaceAgentThreadId(thread.id) && (kind === "completed" || kind === "failed")) {
+          continue;
+        }
 
         const threadRef: ScopedThreadRef = {
           environmentId: thread.environmentId,

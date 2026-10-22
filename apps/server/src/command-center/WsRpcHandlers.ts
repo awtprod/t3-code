@@ -72,6 +72,7 @@ import * as ReadinessGate from "./ReadinessGate.ts";
 import { commandCenterProviderAvailability } from "./ProviderAvailability.ts";
 import { commandCenterRpcRequiresReadiness } from "./RpcAuthorization.ts";
 import * as OrchestrationBridge from "./OrchestrationBridge.ts";
+import { SPACE_AGENT_QUESTION_POLL_MS, streamSpaceAgentQuestions } from "./SpaceAgentQuestions.ts";
 import { streamThreadPlanProgress } from "./ThreadPlanProgress.ts";
 
 export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.AuthenticatedSession) =>
@@ -344,6 +345,7 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
       const commandCenterUnavailable = (method: string) =>
         method === COMMAND_CENTER_WS_METHODS.eventsReplay ||
         method === COMMAND_CENTER_WS_METHODS.eventsSubscribe ||
+        method === COMMAND_CENTER_WS_METHODS.spaceAgentQuestionsSubscribe ||
         method === COMMAND_CENTER_WS_METHODS.timelineQuery
           ? new CommandCenterEventStreamError({
               reason: "query",
@@ -492,6 +494,15 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
                 includeExternal: true,
               }),
             ).pipe(Effect.map((entries) => ({ spaceId: input.spaceId, entries }))),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.spaceAgentQuestionsSubscribe]: (_input) =>
+          observeRpcStream(
+            COMMAND_CENTER_WS_METHODS.spaceAgentQuestionsSubscribe,
+            streamSpaceAgentQuestions({
+              events: commandCenterEvents,
+              pollIntervalMs: SPACE_AGENT_QUESTION_POLL_MS,
+            }).pipe(Stream.provideService(SqlClient.SqlClient, sql)),
             { "rpc.aggregate": "command-center" },
           ),
         [COMMAND_CENTER_WS_METHODS.threadPlanProgressSubscribe]: (input) =>

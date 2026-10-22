@@ -120,6 +120,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   spaceAgentWake: "cc.spaceAgent.wake",
   spaceAgentSetPaused: "cc.spaceAgent.setPaused",
   spaceAgentActivity: "cc.spaceAgent.activity",
+  spaceAgentQuestionsSubscribe: "cc.spaceAgent.questions.subscribe",
   threadPlanProgressSubscribe: "cc.threads.planProgress.subscribe",
 } as const;
 
@@ -298,6 +299,23 @@ export const CommandCenterSpaceAgentActivityResult = Schema.Struct({
 });
 export type CommandCenterSpaceAgentActivityResult =
   typeof CommandCenterSpaceAgentActivityResult.Type;
+
+export const CommandCenterSpaceAgentQuestionsInput = Schema.Struct({});
+
+/**
+ * A Space agent question as it is asked: an Item the agent created that needs
+ * the user. The subscription starts at the current audit head, so earlier
+ * questions never replay.
+ */
+export const CommandCenterSpaceAgentQuestion = Schema.Struct({
+  spaceId: SpaceId,
+  itemId: ItemId,
+  /** The agent's thread, where the question and its reply loop live. */
+  threadId: AssetThreadId,
+  title: TrimmedNonEmptyString,
+  occurredAt: Timestamp,
+});
+export type CommandCenterSpaceAgentQuestion = typeof CommandCenterSpaceAgentQuestion.Type;
 
 /** Most threads one plan-progress subscription follows (the sidebar's working rows). */
 const COMMAND_CENTER_THREAD_PLAN_PROGRESS_MAX_THREADS = 50;
