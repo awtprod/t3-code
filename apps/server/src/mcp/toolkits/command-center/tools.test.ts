@@ -23,3 +23,23 @@ it("exposes scoped automation create/save tools without any publication tool", (
     expect(tool.description).toContain("never pushes");
   }
 });
+
+it("advertises cc_memory_propose confidence as a plain bounded number", () => {
+  const tool = Object.values(CommandCenterToolkit.tools).find(
+    (candidate) => candidate.name === "cc_memory_propose",
+  )!;
+  const schema = Tool.getJsonSchema(tool) as {
+    readonly properties?: Readonly<Record<string, unknown>>;
+    readonly required?: ReadonlyArray<string>;
+  };
+  expect(schema.properties?.confidence).toEqual({ type: "number", minimum: 0, maximum: 1 });
+  expect(schema.required).toContain("confidence");
+});
+
+// `Schema.Number` advertises these string literals beside `number`, and models
+// then send numbers as strings, which the tool rejects.
+it("advertises no NaN or Infinity string literals in any tool input", () => {
+  for (const tool of Object.values(CommandCenterToolkit.tools)) {
+    expect(JSON.stringify(Tool.getJsonSchema(tool)), tool.name).not.toMatch(/"(?:-?Infinity|NaN)"/);
+  }
+});

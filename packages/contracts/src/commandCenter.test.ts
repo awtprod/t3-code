@@ -12,6 +12,7 @@ import {
   CommandCenterGoogleConnectionSetupCompleteInput,
   CommandCenterGoogleConnectionRemoveInput,
   CommandCenterItemUpdateInput,
+  CommandCenterMemoryProposeInput,
   CommandCenterRunStartInput,
   CommandCenterRunStartResult,
 } from "./commandCenter.ts";
@@ -238,5 +239,48 @@ describe("Command Center scoped mutation contracts", () => {
         connectionId: "google-example",
       }),
     ).toEqual({ spaceId: "space-example", connectionId: "google-example" });
+  });
+});
+
+describe("Command Center Memory proposal contract", () => {
+  const decodeProposal = Schema.decodeUnknownSync(CommandCenterMemoryProposeInput);
+  const proposal = (confidence: unknown) => ({
+    requestId: "request-1",
+    spaceId: "space-a",
+    kind: "fact",
+    content: "Releases ship on Fridays.",
+    confidence,
+  });
+
+  it("decodes confidence from a number or the number written as a string", () => {
+    for (const [input, expected] of [
+      [0.9, 0.9],
+      ["0.9", 0.9],
+      [1, 1],
+      ["1", 1],
+      [0, 0],
+    ] as const) {
+      expect(decodeProposal(proposal(input)).confidence).toBe(expected);
+    }
+  });
+
+  it("rejects non-numeric, non-finite, out-of-range, and missing confidence", () => {
+    for (const input of [
+      "abc",
+      "",
+      " 1",
+      1.5,
+      "1.5",
+      -0.1,
+      Number.NaN,
+      "NaN",
+      Number.POSITIVE_INFINITY,
+      "Infinity",
+      null,
+    ]) {
+      expect(() => decodeProposal(proposal(input)), String(input)).toThrow(/\["confidence"\]/);
+    }
+    const { confidence: _confidence, ...missing } = proposal(0.5);
+    expect(() => decodeProposal(missing)).toThrow(/\["confidence"\]/);
   });
 });

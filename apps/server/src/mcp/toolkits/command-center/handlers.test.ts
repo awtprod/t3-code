@@ -465,9 +465,9 @@ const itemScope = (
 
 const ITEM_UPDATED_AT = "2026-10-09T12:00:00.000Z";
 
-const invokeItemTool = (
+const invokeWriteTool = (
   scope: McpInvocationContext.McpInvocationScope,
-  name: "cc_items_create" | "cc_items_update",
+  name: "cc_items_create" | "cc_items_update" | "cc_memory_propose",
   input: unknown,
 ) =>
   Effect.gen(function* () {
@@ -486,6 +486,17 @@ const invokeItemTool = (
       artifactIds: [],
       provenance: { kind: "agent", capturedAt: ITEM_UPDATED_AT },
       metadata: { spaceAgent: true },
+      createdAt: ITEM_UPDATED_AT,
+      updatedAt: ITEM_UPDATED_AT,
+    };
+    const memory = {
+      id: "memory-1",
+      spaceId: "acme",
+      kind: "fact",
+      status: "approved",
+      content: "Releases ship on Fridays.",
+      confidence: 1,
+      provenance: { kind: "agent", capturedAt: ITEM_UPDATED_AT },
       createdAt: ITEM_UPDATED_AT,
       updatedAt: ITEM_UPDATED_AT,
     };
@@ -513,8 +524,18 @@ const invokeItemTool = (
                 getConfiguredSpace: () =>
                   Effect.succeed({
                     agent: { enabled: true },
-                    policy: { allowedCapabilities: ["cc.items.write"] },
+                    policy: { allowedCapabilities: ["cc.items.write", "cc.memory.propose"] },
                   } as never),
+                proposeMemory: (request) =>
+                  Effect.sync(() => {
+                    calls.push({ method: "proposeMemory", input: request, actor: undefined });
+                    return memory as never;
+                  }),
+                rememberFromSpaceAgent: (request, source) =>
+                  Effect.sync(() => {
+                    calls.push({ method: "rememberFromSpaceAgent", input: request, actor: source });
+                    return memory as never;
+                  }),
                 createItem: (request, actor) =>
                   Effect.sync(() => {
                     calls.push({ method: "createItem", input: request, actor });
@@ -577,7 +598,7 @@ describe("Command Center MCP Item writes", () => {
 
   it.effect("updates a Space agent's Item as the agent", () =>
     Effect.gen(function* () {
-      const { outputs, calls } = yield* invokeItemTool(
+      const { outputs, calls } = yield* invokeWriteTool(
         itemScope(),
         "cc_items_update",
         updateInput(),
@@ -600,7 +621,7 @@ describe("Command Center MCP Item writes", () => {
         [itemScope({ capabilities: new Set(["cc.items.read"]) }), updateInput()],
         [itemScope(), updateInput({ patch: {} })],
       ] as const) {
-        const { outputs, calls } = yield* invokeItemTool(scope, "cc_items_update", input);
+        const { outputs, calls } = yield* invokeWriteTool(scope, "cc_items_update", input);
         expect(outputs).toEqual([true]);
         expect(calls).toEqual([]);
       }
@@ -616,7 +637,7 @@ describe("Command Center MCP Item writes", () => {
         priority: "normal",
         title: "Pick a vendor",
       };
-      const agent = yield* invokeItemTool(itemScope(), "cc_items_create", createInput);
+      const agent = yield* invokeWriteTool(itemScope(), "cc_items_create", createInput);
       expect(agent.outputs).toEqual([false]);
       expect(agent.calls[0]?.actor).toEqual({
         kind: "space-agent",
@@ -624,9 +645,60 @@ describe("Command Center MCP Item writes", () => {
       });
 
       const { role: _role, ...userScope } = itemScope();
-      const user = yield* invokeItemTool(userScope, "cc_items_create", createInput);
+      const user = yield* invokeWriteTool(userScope, "cc_items_create", createInput);
       expect(user.outputs).toEqual([false]);
       expect(user.calls[0]?.actor).toBeUndefined();
+    }),
+  );
+});
+
+describe("cc_memory_propose confidence", () => {
+  const proposal = (confidence: unknown) => ({
+    requestId: "request-1",
+    spaceId: "acme",
+    kind: "fact",
+    content: "Releases ship on Fridays.",
+    confidence,
+  });
+  const { confidence: _confidence, ...remembered } = proposal(undefined);
+
+  it.effect("hands the handler a number when the model sends confidence as a string", () =>
+    Effect.gen(function* () {
+      const propose = yield* invokeWriteTool(
+        itemScope({ capabilities: new Set(["cc.memory.propose"]) }),
+        "cc_memory_propose",
+        proposal("0.9"),
+      );
+      expect(propose.outputs).toEqual([false]);
+      expect(propose.calls).toEqual([
+        { method: "proposeMemory", input: proposal(0.9), actor: undefined },
+      ]);
+
+      const remember = yield* invokeWriteTool(
+        itemScope({ capabilities: new Set(["cc.memory.propose"]), memoryWriteMode: "remember" }),
+        "cc_memory_propose",
+        proposal("1"),
+      );
+      expect(remember.outputs).toEqual([false]);
+      expect(remember.calls).toEqual([
+        {
+          method: "rememberFromSpaceAgent",
+          input: remembered,
+          actor: { threadId: "cc-space-agent-acme" },
+        },
+      ]);
+    }),
+  );
+
+  it.effect("rejects a non-numeric confidence before the handler runs", () =>
+    Effect.gen(function* () {
+      const { outputs, calls } = yield* invokeWriteTool(
+        itemScope({ capabilities: new Set(["cc.memory.propose"]), memoryWriteMode: "remember" }),
+        "cc_memory_propose",
+        proposal("abc"),
+      );
+      expect(outputs).toEqual([true]);
+      expect(calls).toEqual([]);
     }),
   );
 });
