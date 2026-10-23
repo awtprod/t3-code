@@ -141,7 +141,7 @@ function SidebarControl() {
     // The sheet owns its trigger until its closing transition unmounts it.
     <div
       className={cn(
-        "pointer-events-none fixed left-[var(--workspace-controls-left)] top-[calc(var(--desktop-titlebar-clearance)+var(--workspace-controls-top))] z-50 ml-px flex h-[var(--workspace-topbar-height)] items-center",
+        "pointer-events-none fixed left-[var(--workspace-controls-left)] top-[calc(env(safe-area-inset-top)+var(--desktop-titlebar-clearance)+var(--workspace-controls-top))] z-50 ml-px flex h-[var(--workspace-topbar-height)] items-center",
         isMobile && mobileSheetMounted && "hidden",
       )}
       data-sidebar-control=""
