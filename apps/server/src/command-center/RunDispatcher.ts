@@ -432,7 +432,7 @@ const safeWorktreeBranch = (runId: RunId): string => {
 };
 
 export const COMMAND_CENTER_CONTEXT_LIMITS = {
-  spaceInstructionsChars: 4_000,
+  spaceInstructionsChars: 8_000,
   priorContextChars: 8_000,
 } as const;
 
@@ -440,6 +440,24 @@ const truncateContext = (value: string, maxChars: number): string => {
   if (value.length <= maxChars) return value;
   const marker = "\n[truncated: context budget exhausted]";
   return `${value.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
+};
+
+/**
+ * Logs when a Space's instructions are over the cap, so the turn carries a
+ * clipped copy. The render functions are pure; the Effect that renders a turn
+ * runs this beside them. Without it the routines at the end of long
+ * instructions vanish with only a marker the agent sees.
+ */
+export const warnIfSpaceInstructionsClipped = (space: Pick<StoredSpace, "id" | "instructions">) => {
+  const length = space.instructions.trim().length;
+  const cap = COMMAND_CENTER_CONTEXT_LIMITS.spaceInstructionsChars;
+  return length <= cap
+    ? Effect.void
+    : Effect.logWarning("space instructions exceed the context cap and were truncated", {
+        spaceId: space.id,
+        length,
+        cap,
+      });
 };
 
 export const selectPriorContext = (
@@ -1138,6 +1156,7 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
             );
           }
 
+          yield* warnIfSpaceInstructionsClipped(space);
           const command: OrchestrationBridge.CommandCenterTurnStartCommand = {
             type: "thread.turn.start",
             commandId: CommandId.make(`cc:run:${run.id}:turn`),

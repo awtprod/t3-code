@@ -703,13 +703,18 @@ const handlers = {
         });
       }
       const activity = yield* SpaceActivity.SpaceActivity;
-      // `recent` leaves out mail and calendar rows: this tool needs only
-      // `cc.items.read`, not a Google read capability.
+      // `recent` leaves out mail and calendar rows unless asked: this tool needs
+      // only `cc.items.read`, not a Google read capability, so an ordinary
+      // credential must not see them. The Space agent already receives those
+      // rows in its wake delta, and its wake text sends it here for the ones
+      // that did not fit, so it (and only it) opts in. The rows are untrusted
+      // external text.
       return {
         activity: yield* activity.recent({
           spaceId: scope.spaceId,
           ...(since === undefined ? {} : { since }),
           ...(limit === undefined ? {} : { limit }),
+          ...(scope.role === "space-agent" ? { includeExternal: true } : {}),
         }),
       };
     }),

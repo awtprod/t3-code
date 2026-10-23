@@ -10,6 +10,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -19,6 +20,7 @@ import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts
 import * as ConnectionHealth from "./ConnectionHealth.ts";
 import * as OrchestrationBridge from "./OrchestrationBridge.ts";
 import { GoogleActivityBrief, type GoogleActivityBriefShape } from "./GoogleActivity.ts";
+import { COMMAND_CENTER_CONTEXT_LIMITS } from "./RunDispatcher.ts";
 import * as CommandCenterService from "./Service.ts";
 import { layer as commandCenterServiceLayer } from "./Service.ts";
 import * as SpaceAgent from "./SpaceAgent.ts";
@@ -207,6 +209,37 @@ describe("Space agent", () => {
       }).pipe(Effect.provide(harness.layer));
     },
   );
+
+  it.effect("logs the Space id, length and cap when a turn clips the Space instructions", () => {
+    const cap = COMMAND_CENTER_CONTEXT_LIMITS.spaceInstructionsChars;
+    const space = makeSpace("agent-space", { enabled: true });
+    const warnings: Array<unknown> = [];
+    const logger = Logger.make(({ message, logLevel }) => {
+      if (logLevel === "Warn") warnings.push(message);
+    });
+    const sendWith = (length: number) => {
+      const harness = makeHarness(configWith([{ ...space, instructions: "i".repeat(length) }]));
+      return Effect.gen(function* () {
+        const spaceAgent = yield* SpaceAgent.SpaceAgent;
+        yield* spaceAgent.sendTurn("agent-space", { text: "Wake.", reason: "wake" });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(harness.layer, Logger.layer([logger], { mergeWithExisting: false })),
+        ),
+      );
+    };
+    return Effect.gen(function* () {
+      yield* sendWith(cap);
+      expect(warnings).toEqual([]);
+      yield* sendWith(cap + 1);
+      expect(warnings).toEqual([
+        [
+          "space instructions exceed the context cap and were truncated",
+          { spaceId: "agent-space", length: cap + 1, cap },
+        ],
+      ]);
+    });
+  });
 
   it.effect("puts the Space's mail and calendar into the injected brief", () => {
     const harness = makeHarness(undefined, {
