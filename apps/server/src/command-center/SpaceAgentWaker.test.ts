@@ -565,6 +565,31 @@ describe("SpaceAgentWaker", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.effect("a check-in that delivers overnight mail asks for the mail routine", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      // 08:30 New York (EDT) is 12:30Z.
+      yield* insertSpace(SPACE, agentJson({ checkIns: ["30 8 * * *"] }));
+      yield* tickAt("2026-10-09T05:59:00.000Z");
+      yield* recordActivity({
+        occurredAt: "2026-10-09T06:00:00.000Z",
+        sourceId: "gmail:thread-a:1",
+        title: "Mail: Contract draft",
+        status: "new",
+        summary: "from Pat <pat@example.com>",
+        url: "https://mail.example.com/thread-a",
+      });
+      expect(yield* tickAt("2026-10-09T12:30:00.000Z")).toBe("check-in");
+
+      const text = harness.turns[0]?.text ?? "";
+      expect(text).toContain("Morning check-in (08:30 America/New_York), with 1 new event");
+      expect(
+        text.endsWith(`${SPACE_AGENT_CHECK_IN_CLOSING}\n\n${SPACE_AGENT_MAIL_ROUTINE_CLOSING}`),
+      ).toBe(true);
+      expect((yield* readState)?.activityCursor).toBeGreaterThan(0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("delivers pending replies with any other wake", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -725,15 +750,36 @@ describe("renderSpaceAgentWakeText routine closings", () => {
     expect(render([])).not.toContain("routine in your Space instructions");
   });
 
-  it("leaves check-in, reply, and manual wakes alone even with mail rows pending", () => {
-    const checkIn = render([mailRow, calendarRow], "check-in");
-    expect(checkIn.endsWith(`\n\n${SPACE_AGENT_CHECK_IN_CLOSING}`)).toBe(true);
-    expect(checkIn).not.toContain(SPACE_AGENT_MAIL_ROUTINE_CLOSING);
-    expect(checkIn).not.toContain(SPACE_AGENT_MEETING_ROUTINE_CLOSING);
+  it("adds the routines after the check-in closing when a check-in delivers mail rows", () => {
+    const mailOnly = render([mailRow, runRow], "check-in");
+    expect(
+      mailOnly.endsWith(
+        `\n\n${SPACE_AGENT_CHECK_IN_CLOSING}\n\n${SPACE_AGENT_MAIL_ROUTINE_CLOSING}`,
+      ),
+    ).toBe(true);
+    expect(mailOnly).not.toContain(SPACE_AGENT_MEETING_ROUTINE_CLOSING);
+    expect(mailOnly).not.toContain("Avoid noise.");
+
+    const both = render([calendarRow, mailRow], "check-in");
+    expect(
+      both.endsWith(
+        `\n\n${SPACE_AGENT_CHECK_IN_CLOSING}\n\n${SPACE_AGENT_MAIL_ROUTINE_CLOSING}\n\n${SPACE_AGENT_MEETING_ROUTINE_CLOSING}`,
+      ),
+    ).toBe(true);
+
+    // Without mail or calendar rows a check-in ends with its own closing, as before.
+    expect(render([runRow], "check-in").endsWith(`\n\n${SPACE_AGENT_CHECK_IN_CLOSING}`)).toBe(true);
+  });
+
+  it("adds the routines after the usual closing for reply and manual wakes too", () => {
     for (const kind of ["reply", "manual"] as const) {
-      const text = render([mailRow, calendarRow], kind);
-      expect(text.endsWith(`\n\n${EVENT_WAKE_CLOSING}`)).toBe(true);
-      expect(text).not.toContain("routine in your Space instructions");
+      const text = render([calendarRow, mailRow], kind);
+      expect(
+        text.endsWith(
+          `\n\n${EVENT_WAKE_CLOSING}\n\n${SPACE_AGENT_MAIL_ROUTINE_CLOSING}\n\n${SPACE_AGENT_MEETING_ROUTINE_CLOSING}`,
+        ),
+      ).toBe(true);
+      expect(render([runRow], kind).endsWith(`\n\n${EVENT_WAKE_CLOSING}`)).toBe(true);
     }
   });
 
