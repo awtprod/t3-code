@@ -17,6 +17,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
+import * as GmailDrafts from "../../../command-center/GmailDrafts.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
@@ -1077,18 +1078,28 @@ const draftToolLayer = (
             ],
           } as never),
         }),
-        Layer.mock(GoogleReadConnector.GoogleReadConnector)({
-          createDraft: (request, attachmentPaths) =>
-            Effect.sync(() => {
-              drafts.push({ request, attachmentPaths });
-              return {
-                operation: "gmail.draft.create" as const,
-                draftId: `draft-${drafts.length}`,
-                messageId: `msg-${drafts.length}`,
-                threadId: request.threadId ?? `thread-${drafts.length}`,
-              };
+        GmailDrafts.layer.pipe(
+          Layer.provideMerge(
+            Layer.mock(GoogleReadConnector.GoogleReadConnector)({
+              createDraft: (request, attachmentPaths) =>
+                Effect.sync(() => {
+                  drafts.push({ request, attachmentPaths });
+                  return {
+                    operation: "gmail.draft.create" as const,
+                    draftId: `draft-${drafts.length}`,
+                    messageId: `msg-${drafts.length}`,
+                    threadId: request.threadId ?? `thread-${drafts.length}`,
+                  };
+                }),
             }),
-        }),
+          ),
+          Layer.provideMerge(
+            SpaceActivity.layer.pipe(
+              Layer.provideMerge(SqlitePersistenceMemory),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ),
+        ),
         Layer.mock(AutomationRuns.AutomationRuns)({}),
         Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
         Layer.mock(ProviderRegistry.ProviderRegistry)({}),
@@ -1100,10 +1111,6 @@ const draftToolLayer = (
             markReady: Effect.void,
             markFailed: Effect.void,
           }),
-        ),
-        SpaceActivity.layer.pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
-          Layer.provideMerge(NodeServices.layer),
         ),
       ),
     ),

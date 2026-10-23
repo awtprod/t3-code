@@ -33,14 +33,13 @@ import {
   GoogleReadRequest,
   GoogleReadResult,
 } from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/sql/SqlClient";
 import { Tool, Toolkit } from "effect/ai";
 
 import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as AutomationDefinitionConfig from "../../../command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
+import * as GmailDrafts from "../../../command-center/GmailDrafts.ts";
 import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
@@ -362,12 +361,7 @@ const CommandCenterGoogleDraftCreateTool = commandCenterCapability(
       summary: Schema.String,
     }),
     failure,
-    dependencies: [
-      ...dependencies,
-      SpaceActivity.SpaceActivity,
-      SqlClient.SqlClient,
-      Crypto.Crypto,
-    ],
+    dependencies: [...dependencies, GmailDrafts.GmailDrafts],
   })
     .annotate(Tool.Title, "Save a Gmail draft (never sends)")
     .annotate(Tool.Readonly, false)

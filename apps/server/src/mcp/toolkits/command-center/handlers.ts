@@ -3,20 +3,15 @@ import {
   type CommandCenterItemUpdateInput,
   GoogleDraftCreateRequest,
 } from "@t3tools/contracts";
-import { RepositoryId, SpaceId } from "@command-center/core";
-import { truncate } from "@t3tools/shared/String";
-import * as Clock from "effect/Clock";
-import * as DateTime from "effect/DateTime";
+import { type CapabilityName, RepositoryId, SpaceId } from "@command-center/core";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import * as Semaphore from "effect/Semaphore";
-import * as SqlClient from "effect/sql/SqlClient";
 
 import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as AutomationDefinitionConfig from "../../../command-center/AutomationDefinitionConfig.ts";
 import { automationConfigIsSafeForGit } from "../../../command-center/automation/Definition.ts";
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
-import { makeCommandCenterAuditLog } from "../../../command-center/AuditLog.ts";
+import * as GmailDrafts from "../../../command-center/GmailDrafts.ts";
 import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import {
@@ -322,45 +317,34 @@ const spaceAgentItemActor = (scope: {
   scope.role === "space-agent" ? { kind: "space-agent", threadId: scope.threadId } : undefined;
 
 /**
- * `cc_google_draft_create` allows this many drafts per Space in any rolling 24
- * hours, counted from the Space's `gmail-draft:` activity rows.
+ * The Space's Google connections that grant `capability`, narrowed to
+ * `connectionId` when one is given. The connection check of `cc_google_read`
+ * and `cc_google_draft_create`.
  */
-const GMAIL_DRAFT_LIMIT = 10;
-const GMAIL_DRAFT_WINDOW_MS = 24 * 60 * 60 * 1000;
-const GMAIL_DRAFT_SOURCE_PREFIX = "gmail-draft:";
-/**
- * Count, create, and record run one draft at a time, so parallel calls cannot
- * pass the limit together. Drafts are rare; a gog call holds it for seconds.
- */
-const gmailDraftLock = Semaphore.makeUnsafe(1);
-const decodeGoogleDraftCreateRequest = Schema.decodeUnknownEffect(GoogleDraftCreateRequest);
-
-/** Opens the draft in Gmail's default signed-in account (the server knows no account index). */
-const gmailDraftUrl = (messageId: string) =>
-  `https://mail.google.com/mail/#drafts?compose=${encodeURIComponent(messageId)}`;
-
-const countRecentGmailDrafts = (spaceId: string, since: string) =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    const rows = yield* sql<{ readonly drafts: number }>`
-      SELECT COUNT(*) AS drafts
-      FROM command_center_space_activity
-      WHERE space_id = ${spaceId}
-        AND source_kind = 'run'
-        AND source_id LIKE ${`${GMAIL_DRAFT_SOURCE_PREFIX}%`}
-        AND occurred_at >= ${since}
-    `;
-    return rows[0]?.drafts ?? 0;
-  }).pipe(
-    Effect.mapError(
-      (cause) =>
-        new CommandCenterError({
-          reason: "persistence",
-          message: "Could not count this Space's recent Gmail drafts.",
-          cause,
-        }),
-    ),
+const googleConnectionsGranting = <
+  Connection extends {
+    readonly id: string;
+    readonly spaceId: string;
+    readonly kind: string;
+    readonly capabilities: ReadonlyArray<CapabilityName>;
+  },
+>(
+  connections: ReadonlyArray<Connection>,
+  input: {
+    readonly spaceId: string;
+    readonly capability: CapabilityName;
+    readonly connectionId?: string | undefined;
+  },
+): ReadonlyArray<Connection> =>
+  connections.filter(
+    (connection) =>
+      connection.spaceId === input.spaceId &&
+      (input.connectionId === undefined || connection.id === input.connectionId) &&
+      connection.kind === "google" &&
+      connection.capabilities.includes(input.capability),
   );
+
+const decodeGoogleDraftCreateRequest = Schema.decodeUnknownEffect(GoogleDraftCreateRequest);
 
 const handlers = {
   cc_spaces_list: (_input) =>
@@ -710,13 +694,12 @@ const handlers = {
       const connector = yield* GoogleReadConnector.GoogleReadConnector;
       const service = yield* CommandCenterService.CommandCenterService;
       const snapshot = yield* service.bootstrap;
-      const accountIsScoped = snapshot.connections.some(
-        (connection) =>
-          connection.spaceId === scope.spaceId &&
-          connection.id === input.connectionId &&
-          connection.kind === "google" &&
-          connection.capabilities.includes(requiredCapability),
-      );
+      const accountIsScoped =
+        googleConnectionsGranting(snapshot.connections, {
+          spaceId: scope.spaceId,
+          capability: requiredCapability,
+          connectionId: input.connectionId,
+        }).length > 0;
       if (!accountIsScoped) {
         return yield* new CommandCenterError({
           reason: "validation",
@@ -795,22 +778,19 @@ const handlers = {
         plan: { ...plan, spaceId: SpaceId.make(scope.spaceId) },
       });
     }),
-  // No approval step: a draft is a reversible write to the owner's own mailbox,
-  // gog runs with `--gmail-no-send`, and the owner sends it from Gmail.
+  // Creation, the 24-hour limit, and the activity row and audit event are
+  // GmailDrafts' (see there for why a draft needs no approval).
   cc_google_draft_create: ({ spaceId, connectionId, ...draft }) =>
     Effect.gen(function* () {
       const requiredCapability = googleCapabilityForDraft("gmail.draft.create");
       const scope = yield* requireScopedSpace(requiredCapability, spaceId);
       const service = yield* CommandCenterService.CommandCenterService;
-      // The read handler's connection check; `connectionId` may be left out
-      // when exactly one connection of the Space can create drafts.
-      const eligible = (yield* service.bootstrap).connections.filter(
-        (connection) =>
-          connection.spaceId === scope.spaceId &&
-          connection.kind === "google" &&
-          connection.capabilities.includes(requiredCapability) &&
-          (connectionId === undefined || connection.id === connectionId),
-      );
+      // Without `connectionId`, the Space's one connection that can create drafts.
+      const eligible = googleConnectionsGranting((yield* service.bootstrap).connections, {
+        spaceId: scope.spaceId,
+        capability: requiredCapability,
+        connectionId,
+      });
       const connection = eligible.length === 1 ? eligible[0] : undefined;
       if (connection === undefined) {
         return yield* new CommandCenterError({
@@ -819,13 +799,6 @@ const handlers = {
             eligible.length > 1
               ? "More than one Google connection in this Space can create drafts; pass connectionId."
               : "The requested Google connection is not available in this Space.",
-        });
-      }
-      const { createDraft } = yield* GoogleReadConnector.GoogleReadConnector;
-      if (createDraft === undefined) {
-        return yield* new CommandCenterError({
-          reason: "config",
-          message: "Gmail draft creation is not configured on this server.",
         });
       }
       const request = yield* decodeGoogleDraftCreateRequest({
@@ -843,79 +816,9 @@ const handlers = {
             }),
         ),
       );
-      return yield* gmailDraftLock.withPermits(1)(
-        Effect.gen(function* () {
-          const nowMs = yield* Clock.currentTimeMillis;
-          const since = DateTime.formatIso(DateTime.makeUnsafe(nowMs - GMAIL_DRAFT_WINDOW_MS));
-          if ((yield* countRecentGmailDrafts(scope.spaceId, since)) >= GMAIL_DRAFT_LIMIT) {
-            return yield* new CommandCenterError({
-              reason: "validation",
-              message: `This Space reached its limit of ${GMAIL_DRAFT_LIMIT} Gmail drafts in 24 hours; no draft was created.`,
-            });
-          }
-          const created = yield* createDraft(request, []).pipe(
-            Effect.mapError(
-              (cause) =>
-                new CommandCenterError({ reason: "connector", message: cause.message, cause }),
-            ),
-          );
-          const recipients = request.to.length + (request.cc?.length ?? 0);
-          const occurredAt = DateTime.formatIso(DateTime.makeUnsafe(nowMs));
-          const sql = yield* SqlClient.SqlClient;
-          const activity = yield* SpaceActivity.SpaceActivity;
-          const audit = yield* makeCommandCenterAuditLog;
-          // The row is the owner's notice and the limit's counter; neither it
-          // nor the audit event carries addresses or the body.
-          yield* sql
-            .withTransaction(
-              Effect.gen(function* () {
-                yield* activity.record({
-                  spaceId: scope.spaceId,
-                  occurredAt,
-                  sourceKind: "run",
-                  sourceId: `${GMAIL_DRAFT_SOURCE_PREFIX}${created.draftId}`,
-                  projectId: null,
-                  title: `Draft saved: ${truncate(request.subject, 117)}`,
-                  status: "draft",
-                  text: `to ${recipients} recipient${recipients === 1 ? "" : "s"}`,
-                  eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
-                  ...(created.messageId === undefined
-                    ? {}
-                    : { url: gmailDraftUrl(created.messageId) }),
-                });
-                yield* audit.append({
-                  actorKind: "agent",
-                  action: "cc.connections.google.gmail.draft.created",
-                  spaceId: scope.spaceId,
-                  payload: {
-                    draftId: created.draftId,
-                    connectionId: connection.id,
-                    recipients,
-                    reply: request.threadId !== undefined || request.replyToMessageId !== undefined,
-                    agentThreadId: scope.threadId,
-                  },
-                  occurredAt,
-                });
-              }),
-            )
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new CommandCenterError({
-                    reason: "persistence",
-                    message: `The draft was saved in Gmail (draft ${created.draftId}) but could not be recorded; do not create it again.`,
-                    cause,
-                  }),
-              ),
-            );
-          return {
-            draftId: created.draftId,
-            ...(created.messageId === undefined ? {} : { messageId: created.messageId }),
-            ...(created.threadId === undefined ? {} : { threadId: created.threadId }),
-            summary: `Draft saved in Gmail (not sent): ${request.subject}`,
-          };
-        }),
-      );
+      const drafts = yield* GmailDrafts.GmailDrafts;
+      const created = yield* drafts.createForSpace({ request, agentThreadId: scope.threadId });
+      return { ...created, summary: `Draft saved in Gmail (not sent): ${request.subject}` };
     }),
 } satisfies Parameters<typeof CommandCenterToolkit.toLayer>[0];
 
