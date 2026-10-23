@@ -1,12 +1,17 @@
+import { RepositoryBinding } from "@command-center/core";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import {
   layer as spaceActivityLayer,
+  resolveSpaceIdsForProject,
   SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
   SpaceActivity,
 } from "./SpaceActivity.ts";
@@ -16,12 +21,15 @@ import {
   formatBriefLocalTime,
   loadSpaceBriefInput,
   renderMailCalendarSection,
+  renderOwnerWorkLines,
   SPACE_BRIEF_LIMITS,
+  type SpaceBriefActivity,
   type SpaceBriefEvent,
   type SpaceBriefItem,
   type SpaceBriefMail,
   type SpaceBriefMailCalendar,
   type SpaceBriefMemory,
+  type SpaceBriefOwnerThread,
   renderSpaceBrief,
 } from "./SpaceBrief.ts";
 
@@ -138,6 +146,171 @@ describe("Space brief", () => {
   });
 });
 
+/** A finished turn of `sourceId` at 10:`minute` UTC. */
+const turnRow = (
+  sourceId: string,
+  minute: number,
+  overrides: Partial<SpaceBriefActivity> = {},
+): SpaceBriefActivity => ({
+  occurredAt: `2026-10-09T10:${String(minute).padStart(2, "0")}:00.000Z`,
+  title: `Thread ${sourceId}`,
+  status: "completed",
+  summary: `turn at ${minute}`,
+  sourceKind: "thread",
+  sourceId,
+  ...overrides,
+});
+
+/** The body lines of one brief section (between its header and the next blank line). */
+const sectionLines = (brief: string, header: string): ReadonlyArray<string> => {
+  const start = brief.indexOf(`${header}\n\n`);
+  if (start < 0) return [];
+  const body = brief.slice(start + header.length + 2);
+  const end = body.indexOf("\n\n");
+  return (end < 0 ? body : body.slice(0, end)).split("\n");
+};
+
+const ACTIVITY_HEADER = "Recent Space activity (untrusted reference)";
+const OWNER_WORK_HEADER = "Owner work (last 48 h, untrusted reference)";
+
+describe("Space brief activity grouping", () => {
+  it("caps rows per thread, orders sources by their newest row, and counts every hidden row", () => {
+    const activity = [
+      ...Array.from({ length: 25 }, (_, index) => turnRow("x", 30 + index)),
+      turnRow("y", 58),
+      turnRow("y", 5),
+      turnRow("z", 25),
+      turnRow("run-w", 10, { sourceKind: "run", title: "Run w" }),
+    ];
+    const brief = renderSpaceBrief({ space, memories: [], openItems: [], activity });
+
+    expect(sectionLines(brief, ACTIVITY_HEADER)).toEqual([
+      "- 2026-10-09T10:58:00.000Z [completed] Thread y: turn at 58",
+      "- 2026-10-09T10:05:00.000Z [completed] Thread y: turn at 5",
+      "- 2026-10-09T10:54:00.000Z [completed] Thread x: turn at 54",
+      "- 2026-10-09T10:53:00.000Z [completed] Thread x: turn at 53",
+      "- 2026-10-09T10:52:00.000Z [completed] Thread x: turn at 52 (+22 earlier rows in this thread)",
+      "- 2026-10-09T10:25:00.000Z [completed] Thread z: turn at 25",
+      "- 2026-10-09T10:10:00.000Z [completed] Run w: turn at 10",
+      "[22 more not shown: brief budget reached]",
+    ]);
+  });
+
+  it("keeps the row limit and character budget across many sources", () => {
+    const manyThreads = Array.from({ length: 30 }, (_, index) => turnRow(`t${index}`, index));
+    const shortLines = sectionLines(
+      renderSpaceBrief({ space, memories: [], openItems: [], activity: manyThreads }),
+      ACTIVITY_HEADER,
+    );
+    expect(shortLines.filter((line) => line.startsWith("- "))).toHaveLength(
+      SPACE_BRIEF_LIMITS.activityRows,
+    );
+    expect(shortLines.at(-1)).toBe("[10 more not shown: brief budget reached]");
+
+    const long = Array.from({ length: 10 }, (_, thread) =>
+      Array.from({ length: 4 }, (_, turn) =>
+        turnRow(`long-${thread}`, thread * 4 + turn, {
+          title: "t".repeat(400),
+          summary: "s".repeat(1_000),
+        }),
+      ),
+    ).flat();
+    const lines = sectionLines(
+      renderSpaceBrief({ space, memories: [], openItems: [], activity: long }),
+      ACTIVITY_HEADER,
+    );
+    const shown = lines.filter((line) => line.startsWith("- "));
+    expect(shown.length).toBeGreaterThan(0);
+    expect(shown.join("\n").length).toBeLessThanOrEqual(SPACE_BRIEF_LIMITS.activityChars);
+    expect(lines.at(-1)).toBe(
+      `[${long.length - shown.length} more not shown: brief budget reached]`,
+    );
+  });
+});
+
+const ownerThread = (overrides: Partial<SpaceBriefOwnerThread> = {}): SpaceBriefOwnerThread => ({
+  title: "Ship the feed",
+  lastActiveAtMs: Date.parse("2026-10-09T10:00:00.000Z"),
+  pullRequests: [],
+  ...overrides,
+});
+
+describe("Space brief owner work", () => {
+  const nowMs = Date.parse("2026-10-09T12:00:00.000Z");
+
+  it("renders one line per thread and omits the parts a thread lacks", () => {
+    expect(
+      renderOwnerWorkLines({
+        nowMs,
+        totalThreads: 3,
+        threads: [
+          ownerThread({
+            repository: "repo-a",
+            branch: "feature/feed",
+            pullRequests: [{ number: 15 }, { number: 12, state: "merged" }],
+          }),
+          ownerThread({
+            title: "Docs\npass",
+            lastActiveAtMs: nowMs - 20 * 60_000,
+            worktreePath: "/tmp/worktrees/docs-pass",
+          }),
+          ownerThread({
+            title: "Stacked work",
+            repository: "repo-b",
+            pullRequests: [1, 2, 3, 4, 5].map((number) => ({ number, state: "open" })),
+          }),
+        ],
+      }).split("\n"),
+    ).toEqual([
+      "- Ship the feed — repo-a · 2 h ago · branch feature/feed · PR #15, #12 merged",
+      "- Docs pass — 20 min ago · worktree docs-pass",
+      "- Stacked work — repo-b · 2 h ago · PR #1 open, #2 open, #3 open (+2 more)",
+    ]);
+  });
+
+  it("stays within its budget and counts the threads it leaves out", () => {
+    const threads = Array.from({ length: 10 }, (_, index) =>
+      ownerThread({
+        title: `${index} ${"t".repeat(400)}`,
+        repository: "r".repeat(200),
+        branch: "b".repeat(200),
+      }),
+    );
+    const body = renderOwnerWorkLines({ nowMs, totalThreads: 14, threads });
+    const lines = body.split("\n");
+    const shown = lines.filter((line) => line.startsWith("- ")).length;
+    expect(body.length).toBeLessThanOrEqual(SPACE_BRIEF_LIMITS.ownerWorkChars);
+    expect(shown).toBeGreaterThan(0);
+    expect(shown).toBeLessThan(10);
+    expect(lines.at(-1)).toBe(`[${14 - shown} more threads not shown]`);
+    expect(renderOwnerWorkLines({ nowMs, totalThreads: 0, threads: [] })).toBe(
+      "No owner activity in the bound repositories in the last 48 h.",
+    );
+  });
+
+  it("sits between Open Items and Recent Space activity, and alone is nothing to report", () => {
+    const ownerWork = { nowMs, totalThreads: 1, threads: [ownerThread({ repository: "repo-a" })] };
+    const brief = renderSpaceBrief({
+      space,
+      memories: [],
+      openItems: [item({ id: "item-1" })],
+      ownerWork,
+      activity: [turnRow("x", 0)],
+    });
+    const items = brief.indexOf("Open Items");
+    const owner = brief.indexOf(OWNER_WORK_HEADER);
+    expect(items).toBeGreaterThan(-1);
+    expect(owner).toBeGreaterThan(items);
+    expect(brief.indexOf(ACTIVITY_HEADER)).toBeGreaterThan(owner);
+
+    const empty = { nowMs, totalThreads: 0, threads: [] };
+    expect(renderSpaceBrief({ space, memories: [], openItems: [], ownerWork: empty })).toBe("");
+    expect(renderSpaceBrief({ space, memories: [], openItems: [], ownerWork })).toContain(
+      "- Ship the feed — repo-a · 2 h ago",
+    );
+  });
+});
+
 const briefLayer = Layer.mergeAll(SqlitePersistenceMemory, NodeServices.layer);
 const BRIEF_NOW = "2026-10-09T12:00:00.000Z";
 
@@ -221,6 +394,261 @@ it.layer(briefLayer)("Space brief activity with Google rows", (it) => {
       expect(brief).toContain("[completed] Ship the feed");
       expect(brief).not.toContain("Private subject");
       expect(brief).not.toContain("pat@example.com");
+    }),
+  );
+});
+
+const REPO_A_REMOTE = "https://github.com/example-org/repo-a.git";
+/** Space A binds repo-a by remote and repo-b by project; Space B binds project-c. */
+const SPACE_BINDINGS = {
+  "space-a": [
+    { id: "repo-a", displayName: "Repo A", aliases: [], remoteRef: REPO_A_REMOTE },
+    { id: "repo-b", displayName: "Repo B", aliases: [], projectId: "project-b" },
+  ],
+  "space-b": [{ id: "repo-c", displayName: "Repo C", aliases: [], projectId: "project-c" }],
+} as const;
+const PROJECT_REMOTES: Readonly<Record<string, ReadonlyArray<string>>> = {
+  "project-a": [normalizeGitRemoteUrl(REPO_A_REMOTE)],
+  "project-b": [],
+  "project-c": [normalizeGitRemoteUrl("https://github.com/example-org/repo-c.git")],
+};
+const decodeBindings = Schema.decodeUnknownSync(Schema.Array(RepositoryBinding));
+
+const seedOwnerWorkSpaces = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  for (const [id, bindings] of Object.entries(SPACE_BINDINGS)) {
+    yield* sql`
+      INSERT INTO command_center_spaces (
+        id, slug, name, kind, repositories_json, created_at, updated_at
+      ) VALUES (
+        ${id}, ${id}, ${id}, 'business', ${JSON.stringify(bindings)}, ${BRIEF_NOW}, ${BRIEF_NOW}
+      )
+    `;
+  }
+  for (const projectId of Object.keys(PROJECT_REMOTES)) {
+    yield* sql`
+      INSERT INTO projection_projects (
+        project_id, title, workspace_root, scripts_json, created_at, updated_at
+      ) VALUES (
+        ${projectId}, ${`Project ${projectId}`}, ${`/tmp/${projectId}`}, '[]', ${BRIEF_NOW}, ${BRIEF_NOW}
+      )
+    `;
+  }
+});
+
+const insertThread = (input: {
+  readonly threadId: string;
+  readonly projectId: string;
+  readonly title: string;
+  readonly branch?: string;
+  readonly worktreePath?: string;
+  readonly pullRequests?: ReadonlyArray<Record<string, unknown>>;
+  readonly deletedAt?: string;
+}) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const payload = {
+      id: input.threadId,
+      projectId: input.projectId,
+      title: input.title,
+      branch: input.branch ?? null,
+      worktreePath: input.worktreePath ?? null,
+      ...(input.pullRequests === undefined ? {} : { pullRequests: input.pullRequests }),
+    };
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_threads (
+        thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+        created_at, updated_at, deleted_at, payload_json
+      ) VALUES (
+        ${input.threadId}, ${input.projectId}, ${input.title}, 'codex', 'full-access', 'default',
+        ${BRIEF_NOW}, ${BRIEF_NOW}, ${input.deletedAt ?? null}, ${JSON.stringify(payload)}
+      )
+    `;
+  });
+
+let ownerWorkSequence = 0;
+/**
+ * Record a finished turn the way `SpaceActivityReactor` does: one row per
+ * active Space whose binding matches the thread's project.
+ */
+const recordTurn = (threadId: string, projectId: string, occurredAt: string) =>
+  Effect.gen(function* () {
+    const activity = yield* Effect.provide(SpaceActivity, spaceActivityLayer);
+    const spaceIds = resolveSpaceIdsForProject(
+      { id: projectId, remoteKeys: PROJECT_REMOTES[projectId] ?? [] },
+      Object.entries(SPACE_BINDINGS).map(([id, bindings]) => ({
+        id,
+        lifecycle: "active",
+        repositories: decodeBindings(bindings),
+      })),
+    );
+    ownerWorkSequence += 1;
+    for (const spaceId of spaceIds) {
+      yield* activity.record({
+        spaceId,
+        occurredAt,
+        sourceKind: "thread",
+        sourceId: threadId,
+        projectId,
+        title: `Recorded title of ${threadId}`,
+        status: "completed",
+        text: `Turn ${ownerWorkSequence} done.`,
+        eventSequence: ownerWorkSequence,
+      });
+    }
+  });
+
+/** BRIEF_NOW minus `minutes`. */
+const minutesBeforeNow = (minutes: number) =>
+  DateTime.formatIso(DateTime.subtract(DateTime.makeUnsafe(BRIEF_NOW), { minutes }));
+
+const pullRequestLink = (number: number, linkedAt: string, overrides = {}) => ({
+  host: "github.com",
+  repository: "example-org/repo-a",
+  number,
+  url: `https://github.com/example-org/repo-a/pull/${number}`,
+  source: "agent",
+  linkedAt,
+  snapshot: null,
+  stack: null,
+  ...overrides,
+});
+
+const loadBrief = (spaceId: string) =>
+  loadSpaceBriefInput({
+    space: { id: spaceId, displayName: spaceId },
+    now: BRIEF_NOW,
+  }).pipe(Effect.map(renderSpaceBrief));
+
+it.layer(briefLayer)("Space brief owner work", (it) => {
+  it.effect(
+    "lists bound-repository threads active in the last 48 h with branch and linked PRs",
+    () =>
+      Effect.gen(function* () {
+        yield* seedOwnerWorkSpaces;
+        yield* insertThread({
+          threadId: "thread-feed",
+          projectId: "project-a",
+          title: "Ship the feed",
+          branch: "feature/feed",
+          pullRequests: [
+            pullRequestLink(12, "2026-10-08T09:00:00.000Z", {
+              snapshot: {
+                state: "merged",
+                title: "Feed",
+                headBranch: "feature/feed",
+                baseBranch: "main",
+                isDraft: false,
+                updatedAt: null,
+                syncedAt: "2026-10-08T10:00:00.000Z",
+              },
+            }),
+            pullRequestLink(15, "2026-10-09T09:00:00.000Z"),
+            pullRequestLink(9, "2026-10-09T09:30:00.000Z", { source: "stack-dismissed" }),
+          ],
+        });
+        yield* insertThread({
+          threadId: "thread-docs",
+          projectId: "project-b",
+          title: "Docs pass",
+          worktreePath: "/tmp/worktrees/docs-pass",
+        });
+        yield* insertThread({ threadId: "thread-old", projectId: "project-a", title: "Old work" });
+        yield* insertThread({
+          threadId: "thread-other-space",
+          projectId: "project-c",
+          title: "Unbound project work",
+        });
+        yield* insertThread({
+          threadId: "thread-deleted",
+          projectId: "project-a",
+          title: "Deleted work",
+          deletedAt: BRIEF_NOW,
+        });
+        yield* recordTurn("thread-feed", "project-a", minutesBeforeNow(5 * 60));
+        yield* recordTurn("thread-feed", "project-a", minutesBeforeNow(2 * 60));
+        // Exactly at the window edge is in; a minute past it is out.
+        yield* recordTurn("thread-docs", "project-b", minutesBeforeNow(48 * 60));
+        yield* recordTurn("thread-old", "project-a", minutesBeforeNow(48 * 60 + 1));
+        yield* recordTurn("thread-other-space", "project-c", minutesBeforeNow(10));
+        yield* recordTurn("thread-deleted", "project-a", minutesBeforeNow(60));
+
+        const brief = yield* loadBrief("space-a");
+        expect(sectionLines(brief, OWNER_WORK_HEADER)).toEqual([
+          "- Ship the feed — repo-a · 2 h ago · branch feature/feed · PR #15, #12 merged",
+          "- Docs pass — repo-b · 2 d ago · worktree docs-pass",
+        ]);
+        // The unbound project's thread belongs to the Space that binds it.
+        expect(sectionLines(yield* loadBrief("space-b"), OWNER_WORK_HEADER)).toEqual([
+          "- Unbound project work — repo-c · 10 min ago",
+        ]);
+        // A repository-scoped brief leaves Owner work out, like activity.
+        const scoped = renderSpaceBrief(
+          yield* loadSpaceBriefInput({
+            space: { id: "space-a", displayName: "space-a" },
+            repositoryId: "repo-a",
+            now: BRIEF_NOW,
+          }),
+        );
+        expect(scoped).not.toContain(OWNER_WORK_HEADER);
+      }),
+  );
+});
+
+it.layer(briefLayer)("Space brief owner work cap", (it) => {
+  it.effect("caps the section at 10 threads and reports how many it left out", () =>
+    Effect.gen(function* () {
+      yield* seedOwnerWorkSpaces;
+      for (let index = 0; index < 12; index += 1) {
+        const threadId = `thread-${String(index).padStart(2, "0")}`;
+        yield* insertThread({ threadId, projectId: "project-a", title: `Task ${index}` });
+        yield* recordTurn(threadId, "project-a", minutesBeforeNow(index * 30));
+      }
+      const lines = sectionLines(yield* loadBrief("space-a"), OWNER_WORK_HEADER);
+
+      expect(lines).toHaveLength(SPACE_BRIEF_LIMITS.ownerWorkThreads + 1);
+      expect(lines[0]).toBe("- Task 0 — repo-a · just now");
+      expect(lines[9]).toBe("- Task 9 — repo-a · 4 h ago");
+      expect(lines.at(-1)).toBe("[2 more threads not shown]");
+    }),
+  );
+});
+
+it.layer(briefLayer)("Space brief owner work empty", (it) => {
+  it.effect("says so in one line when the bound repositories were quiet for 48 h", () =>
+    Effect.gen(function* () {
+      yield* seedOwnerWorkSpaces;
+      // Nothing to report at all: the brief stays empty.
+      expect(yield* loadBrief("space-a")).toBe("");
+
+      yield* insertThread({ threadId: "thread-old", projectId: "project-a", title: "Old work" });
+      yield* recordTurn("thread-old", "project-a", minutesBeforeNow(72 * 60));
+      expect(sectionLines(yield* loadBrief("space-a"), OWNER_WORK_HEADER)).toEqual([
+        "No owner activity in the bound repositories in the last 48 h.",
+      ]);
+    }),
+  );
+});
+
+it.layer(briefLayer)("Space brief activity grouping from the feed", (it) => {
+  it.effect("reads past one busy thread so the section spans the other threads", () =>
+    Effect.gen(function* () {
+      yield* seedOwnerWorkSpaces;
+      for (const threadId of ["thread-y", "thread-z"]) {
+        yield* insertThread({ threadId, projectId: "project-a", title: threadId });
+        yield* recordTurn(threadId, "project-a", minutesBeforeNow(120));
+      }
+      yield* insertThread({ threadId: "thread-x", projectId: "project-a", title: "thread-x" });
+      for (let index = 0; index < 25; index += 1) {
+        yield* recordTurn("thread-x", "project-a", minutesBeforeNow(60 - index));
+      }
+      const lines = sectionLines(yield* loadBrief("space-a"), ACTIVITY_HEADER);
+
+      expect(lines.filter((line) => line.includes("thread-x"))).toHaveLength(3);
+      expect(lines[2]).toContain("(+22 earlier rows in this thread)");
+      expect(lines.filter((line) => line.includes("thread-y"))).toHaveLength(1);
+      expect(lines.filter((line) => line.includes("thread-z"))).toHaveLength(1);
+      expect(lines.at(-1)).toBe("[22 more not shown: brief budget reached]");
     }),
   );
 });

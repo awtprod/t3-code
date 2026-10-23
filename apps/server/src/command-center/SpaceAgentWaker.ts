@@ -8,6 +8,7 @@
  *   by downtime still fires if it is under two hours old, once. The slot is
  *   persisted before the turn is sent, so a restart never fires it twice.
  *   Check-ins do not use the event budget, and they deliver pending events.
+ *   Their closing asks for the Space's check-in routine, not a quiet reply.
  * - event: new Space activity rows, debounced (`debounceMinutes` after the
  *   first undelivered row, and at least that long since the last wake),
  *   outside quiet hours, and under `dailyWakeLimit` event wakes per local day.
@@ -222,13 +223,24 @@ const REPLY_KIND_LABELS: Record<SpaceAgentReplyRow["kind"], string> = {
   status: "status change",
 };
 
+/** Closing of every wake but a scheduled check-in: act only on what needs it. */
+const WAKE_CLOSING =
+  "Decide what this needs: nothing, a memory update, creating or updating an Item, a decision Item that asks Andrew, or a Run your policy allows. Avoid noise. If nothing needs doing, reply with one short line.";
+
+/**
+ * Closing of a scheduled check-in. The check-in is when the agent does the
+ * routine its Space instructions describe, so it is not told to stay quiet.
+ */
+export const SPACE_AGENT_CHECK_IN_CLOSING =
+  "Scheduled check-in. Work through the check-in routine in your Space instructions, if there is one, using the Owner work, Open Items and Recent activity sections above; then reply with a short summary of what you did and filed. If nothing needs doing, reply with one short line.";
+
 /** Strips anything that could close or reopen the `<replies>` wrapper. */
 const fenceSafe = (text: string) => text.replace(/<\/?\s*replies\s*>/giu, "");
 
 /**
  * The wake message: why the agent woke, the activity delta (newest first,
  * bounded by row count and characters, marked as untrusted reference data),
- * and what it may do about it.
+ * and what it may do about it (a scheduled check-in asks for its routine).
  */
 export const renderSpaceAgentWakeText = (input: {
   readonly kind: SpaceAgentWakeKind;
@@ -318,7 +330,7 @@ export const renderSpaceAgentWakeText = (input: {
     why,
     ...replyBlock,
     delta,
-    "Decide what this needs: nothing, a memory update, creating or updating an Item, a decision Item that asks Andrew, or a Run your policy allows. Avoid noise. If nothing needs doing, reply with one short line.",
+    input.kind === "check-in" ? SPACE_AGENT_CHECK_IN_CLOSING : WAKE_CLOSING,
   ].join("\n\n");
 };
 
