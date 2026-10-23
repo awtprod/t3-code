@@ -3333,3 +3333,28 @@ it.effect("collapses an automation's older per-Run alerts into its one alert, on
     ).toMatchObject({ occurrences: 2 });
   }).pipe(Effect.provide(makeTestLayer(runsBlockedConfig))),
 );
+
+it.effect("keeps another automation's alert open when two are blocked for the same reasons", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const submit = (commandId: string, automationId: string) =>
+      service.submitCommand(
+        decodeCommand({
+          commandId,
+          text: "Start work on the Example Studio app",
+          spaceId: studioSpace.id,
+        }),
+        providers,
+        { automationId },
+      );
+    const first = yield* submit("command-auto-a", "automation-a");
+    yield* submit("command-auto-b", "automation-b");
+
+    const alerts = yield* blockedRouteAlerts;
+    // Each alert is at its first occurrence, so both bodies are exactly the same text.
+    expect(alerts.map((alert) => [alert.id, alert.status, alert.body])).toEqual([
+      ["blocked-route:automation:automation-a", "review", first.route.reasons.join("\n")],
+      ["blocked-route:automation:automation-b", "review", first.route.reasons.join("\n")],
+    ]);
+  }).pipe(Effect.provide(makeTestLayer(runsBlockedConfig))),
+);

@@ -2190,11 +2190,14 @@ export const layer = Layer.effect(
           // The owning automation of an old per-Run alert is the automation
           // Run its Run was linked to (`parent_run_id`). An alert whose Run row
           // is gone cannot be traced, so it is matched by its identical text.
+          // Automation alerts are never per-Run alerts, so no automation's
+          // alert (this one's included) is a candidate.
           yield* sql`
             UPDATE command_center_items
             SET status = 'canceled', updated_at = ${input.now}
             WHERE space_id = ${input.spaceId}
-              AND id LIKE ${`${BLOCKED_ROUTE_ITEM_PREFIX}%`} AND id != ${itemId}
+              AND id LIKE ${`${BLOCKED_ROUTE_ITEM_PREFIX}%`}
+              AND id NOT LIKE ${`${blockedRouteAutomationItemId("")}%`}
               AND status NOT IN ('done', 'canceled')
               AND CASE WHEN json_valid(metadata_json)
                 THEN json_extract(metadata_json, '$.type') END = 'blocked-route'
