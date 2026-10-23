@@ -817,8 +817,17 @@ const handlers = {
         ),
       );
       const drafts = yield* GmailDrafts.GmailDrafts;
-      const created = yield* drafts.createForSpace({ request, agentThreadId: scope.threadId });
-      return { ...created, summary: `Draft saved in Gmail (not sent): ${request.subject}` };
+      const { recorded, ...created } = yield* drafts.createForSpace({
+        request,
+        agentThreadId: scope.threadId,
+      });
+      const saved = `Draft saved in Gmail (not sent): ${request.subject}`;
+      return {
+        ...created,
+        summary: recorded
+          ? saved
+          : `${saved}. Command Center could not record draft ${created.draftId}; do not create it again.`,
+      };
     }),
 } satisfies Parameters<typeof CommandCenterToolkit.toLayer>[0];
 

@@ -132,12 +132,16 @@ Gmail. Bcc, HTML bodies, and attachments are not offered.
   carry the same capability. A connection has it only when its consent requested Gmail drafts
   (`gmail.compose`). `connectionId` may be left out when exactly one connection of the Space
   qualifies.
-- Limit: at most 10 drafts per Space in any rolling 24 hours, counted from the Space's
-  `gmail-draft:<draftId>` activity rows. The 11th is refused before gog runs.
-- Visibility: each draft adds a Space activity row (status `draft`, title `Draft saved: <subject>`,
-  text `to <n> recipients`, and a Drafts link that opens in the browser's default Google account) and
-  an `agent` audit event, `cc.connections.google.gmail.draft.created`. Neither records addresses or
-  the body. Like the poller's rows, the activity row uses event sequence 0, so it reaches the owner's
-  Space activity view and the agent's wake delta but not `cc_space_activity` or `cc_space_brief`.
+- Limit: at most 10 draft attempts per Space in any rolling 24 hours. Before gog runs, each attempt
+  appends an `agent` audit event, `cc.connections.google.gmail.draft.requested`, and the limit counts
+  those. The audit log is append-only and never pruned, so a later failure cannot free the slot, and
+  an attempt gog fails still uses one. The 11th attempt is refused before gog runs.
+- Visibility: each saved draft adds a Space activity row (status `draft`, title
+  `Draft saved: <subject>`, text `to <n> recipients`, and a Drafts link that opens in the browser's
+  default Google account) and a `cc.connections.google.gmail.draft.created` audit event. None of these
+  record addresses or the body. Like the poller's rows, the activity row uses event sequence 0, so it
+  reaches the owner's Space activity view and the agent's wake delta but not `cc_space_activity` or
+  `cc_space_brief`. If that row and event cannot be written, the tool still reports the draft as
+  saved, names its draft id and asks the agent not to create it again, and the server logs a warning.
 - No approval step: a draft is a visible, deletable write to the owner's own mailbox, and sending is
   blocked at the CLI. The daily cap bounds a misbehaving agent.

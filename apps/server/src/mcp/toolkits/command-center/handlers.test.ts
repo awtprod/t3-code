@@ -1037,14 +1037,19 @@ const googleConnection = (
   spaceId = "space-a",
 ) => ({ id, spaceId, kind: "google", label: "Owner mail", capabilities, health: "connected" });
 
+const DRAFT_REQUESTED = "cc.connections.google.gmail.draft.requested";
+
 interface DraftCall {
   readonly request: GoogleDraftCreateRequest;
   readonly attachmentPaths: ReadonlyArray<string>;
+  /** Audit actions already recorded when the connector ran, oldest first. */
+  readonly auditActionsAtCall: ReadonlyArray<string>;
 }
 
 /**
  * The draft tool over the real activity feed and audit log (in-memory SQLite).
- * The connector records each `createDraft` call in `drafts`.
+ * The connector records each `createDraft` call in `drafts`, then fails when
+ * `connectorFails` is set.
  */
 const draftToolLayer = (
   drafts: Array<DraftCall>,
@@ -1052,6 +1057,7 @@ const draftToolLayer = (
     readonly scope?: McpInvocationContext.McpInvocationScope;
     readonly allowedCapabilities?: ReadonlyArray<string>;
     readonly connections?: ReadonlyArray<ReturnType<typeof googleConnection>>;
+    readonly connectorFails?: boolean;
   } = {},
 ) =>
   McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
@@ -1080,18 +1086,36 @@ const draftToolLayer = (
         }),
         GmailDrafts.layer.pipe(
           Layer.provideMerge(
-            Layer.mock(GoogleReadConnector.GoogleReadConnector)({
-              createDraft: (request, attachmentPaths) =>
-                Effect.sync(() => {
-                  drafts.push({ request, attachmentPaths });
-                  return {
-                    operation: "gmail.draft.create" as const,
-                    draftId: `draft-${drafts.length}`,
-                    messageId: `msg-${drafts.length}`,
-                    threadId: request.threadId ?? `thread-${drafts.length}`,
-                  };
-                }),
-            }),
+            Layer.unwrap(
+              Effect.gen(function* () {
+                const sql = yield* SqlClient.SqlClient;
+                return Layer.mock(GoogleReadConnector.GoogleReadConnector)({
+                  createDraft: (request, attachmentPaths) =>
+                    Effect.gen(function* () {
+                      const audit = yield* sql<{ readonly action: string }>`
+                        SELECT action FROM command_center_audit_events ORDER BY sequence
+                      `.pipe(Effect.orDie);
+                      drafts.push({
+                        request,
+                        attachmentPaths,
+                        auditActionsAtCall: audit.map((row) => row.action),
+                      });
+                      if (options.connectorFails === true) {
+                        return yield* new GoogleReadConnector.GoogleReadConnectorError({
+                          reason: "process",
+                          message: "Gmail rejected the draft.",
+                        });
+                      }
+                      return {
+                        operation: "gmail.draft.create" as const,
+                        draftId: `draft-${drafts.length}`,
+                        messageId: `msg-${drafts.length}`,
+                        threadId: request.threadId ?? `thread-${drafts.length}`,
+                      };
+                    }),
+                });
+              }),
+            ),
           ),
           Layer.provideMerge(
             SpaceActivity.layer.pipe(
@@ -1171,6 +1195,8 @@ describe("cc_google_draft_create", () => {
             threadId: "thread-incoming",
           },
           attachmentPaths: [],
+          // The reservation is written before Gmail is called.
+          auditActionsAtCall: [DRAFT_REQUESTED],
         },
       ]);
 
@@ -1195,22 +1221,26 @@ describe("cc_google_draft_create", () => {
       const audits = yield* sql<{ readonly payloadJson: string }>`
         SELECT actor_kind AS "actorKind", action, space_id AS "spaceId", payload_json AS "payloadJson"
         FROM command_center_audit_events
+        ORDER BY sequence
       `;
-      expect(audits).toEqual([
-        {
+      expect(audits).toEqual(
+        [DRAFT_REQUESTED, "cc.connections.google.gmail.draft.created"].map((action) => ({
           actorKind: "agent",
-          action: "cc.connections.google.gmail.draft.created",
+          action,
           spaceId: "space-a",
           payloadJson: expect.any(String),
-        },
-      ]);
-      expect(JSON.parse(audits[0]!.payloadJson)).toEqual({
-        draftId: "draft-1",
+        })),
+      );
+      const [requested, created] = audits.map((audit) => JSON.parse(audit.payloadJson));
+      const common = {
         connectionId: "google-owner",
         recipients: 3,
         reply: true,
         agentThreadId: "cc-space-agent-space-a",
-      });
+        nonce: requested.nonce,
+      };
+      expect(requested).toEqual({ ...common, spaceId: "space-a", nonce: expect.any(String) });
+      expect(created).toEqual({ ...common, draftId: "draft-1" });
       const recorded = JSON.stringify([rows, audits]);
       expect(recorded).not.toContain("@example.com");
       expect(recorded).not.toContain("Thursday");
@@ -1321,20 +1351,11 @@ describe("cc_google_draft_create", () => {
     const drafts: Array<DraftCall> = [];
     return Effect.gen(function* () {
       yield* seedDraftSpace;
-      // A draft from 25 hours ago is outside the rolling window.
-      const activity = yield* SpaceActivity.SpaceActivity;
-      yield* activity.record({
-        spaceId: "space-a",
-        occurredAt: "2026-10-22T11:00:00.000Z",
-        sourceKind: "run",
-        sourceId: "gmail-draft:draft-old",
-        projectId: null,
-        title: "Draft saved: Earlier",
-        status: "draft",
-        text: "to 1 recipient",
-        eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
-      });
       const draft = { spaceId: "space-a", to: ["pat@example.com"], subject: "Hello", body: "Hi." };
+      // A draft from 25 hours ago is outside the rolling window.
+      yield* TestClock.setTime(Date.parse(DRAFT_NOW) - 25 * 60 * 60 * 1000);
+      expect((yield* callDraftTool(draft)).failed).toBe(false);
+      yield* TestClock.setTime(Date.parse(DRAFT_NOW));
       for (let index = 1; index <= 10; index += 1) {
         expect((yield* callDraftTool(draft)).failed, `draft ${index}`).toBe(false);
       }
@@ -1343,11 +1364,70 @@ describe("cc_google_draft_create", () => {
       expect(String((refused.result as { readonly message?: string }).message)).toContain(
         "limit of 10 Gmail drafts in 24 hours",
       );
-      expect(drafts).toHaveLength(10);
+      expect(drafts).toHaveLength(11);
 
       yield* TestClock.adjust(Duration.sum(Duration.hours(24), Duration.seconds(1)));
       expect((yield* callDraftTool(draft)).failed).toBe(false);
-      expect(drafts).toHaveLength(11);
+      expect(drafts).toHaveLength(12);
     }).pipe(Effect.provide(draftToolLayer(drafts)));
+  });
+
+  it.effect("reports a draft saved when its bookkeeping fails, and still counts it", () => {
+    const drafts: Array<DraftCall> = [];
+    return Effect.gen(function* () {
+      yield* seedDraftSpace;
+      const sql = yield* SqlClient.SqlClient;
+      // Every activity insert fails, as on a full disk; the audit log still works.
+      yield* sql`
+        CREATE TRIGGER fail_activity_insert BEFORE INSERT ON command_center_space_activity
+        BEGIN SELECT RAISE(ABORT, 'disk full'); END
+      `;
+      const draft = { spaceId: "space-a", to: ["pat@example.com"], subject: "Hello", body: "Hi." };
+      for (let index = 1; index <= 10; index += 1) {
+        const { failed, result } = yield* callDraftTool(draft);
+        expect(failed, `draft ${index}`).toBe(false);
+        expect(result).toMatchObject({
+          draftId: `draft-${index}`,
+          summary: `Draft saved in Gmail (not sent): Hello. Command Center could not record draft draft-${index}; do not create it again.`,
+        });
+      }
+      const refused = yield* callDraftTool(draft);
+      expect(refused.failed).toBe(true);
+      expect(String((refused.result as { readonly message?: string }).message)).toContain(
+        "limit of 10 Gmail drafts in 24 hours",
+      );
+      expect(drafts).toHaveLength(10);
+      const audits = yield* sql<{ readonly action: string }>`
+        SELECT action FROM command_center_audit_events ORDER BY sequence
+      `;
+      // Only the reservations: each failed transaction took its created event with it.
+      expect(audits.map((audit) => audit.action)).toEqual(Array(10).fill(DRAFT_REQUESTED));
+      expect(yield* sql`SELECT id FROM command_center_space_activity`).toEqual([]);
+    }).pipe(Effect.provide(draftToolLayer(drafts)));
+  });
+
+  it.effect("uses a slot for every attempt the connector fails", () => {
+    const drafts: Array<DraftCall> = [];
+    return Effect.gen(function* () {
+      yield* seedDraftSpace;
+      const draft = { spaceId: "space-a", to: ["pat@example.com"], subject: "Hello", body: "Hi." };
+      for (let index = 1; index <= 10; index += 1) {
+        const { failed, result } = yield* callDraftTool(draft);
+        expect(failed, `attempt ${index}`).toBe(true);
+        expect((result as { readonly message?: string }).message).toBe("Gmail rejected the draft.");
+      }
+      const refused = yield* callDraftTool(draft);
+      expect(refused.failed).toBe(true);
+      expect(String((refused.result as { readonly message?: string }).message)).toContain(
+        "limit of 10 Gmail drafts in 24 hours",
+      );
+      // The 11th never reached Gmail, and each attempt's reservation preceded its call.
+      expect(drafts.map((call) => call.auditActionsAtCall.length)).toEqual([
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+      ]);
+      expect(
+        drafts.every((call) => call.auditActionsAtCall.every((a) => a === DRAFT_REQUESTED)),
+      ).toBe(true);
+    }).pipe(Effect.provide(draftToolLayer(drafts, { connectorFails: true })));
   });
 });
