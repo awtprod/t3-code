@@ -17,6 +17,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as FileSystem from "effect/FileSystem";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
@@ -26,6 +27,7 @@ import {
   type CommandCenterOrchestrationCommand as ClientOrchestrationCommand,
 } from "./OrchestrationBridge.ts";
 import {
+  COMMAND_CENTER_CONTEXT_LIMITS,
   type DispatcherDependencies,
   RunDispatcherError,
   commandCenterModelSelection,
@@ -41,6 +43,7 @@ import {
   selectPriorContext,
   selectRepositoryProject,
   validateCommandCenterSystemWorkspace,
+  warnIfSpaceInstructionsClipped,
 } from "./RunDispatcher.ts";
 
 const decodeRoute = Schema.decodeUnknownSync(RouteDecision);
@@ -114,7 +117,10 @@ it("caps Space instructions and the total prior-context payload deterministicall
   expect(selected.at(-1)).toContain("request-0-");
 
   const rendered = renderThreadMessage({
-    space: { ...space, instructions: "i".repeat(8_000) },
+    space: {
+      ...space,
+      instructions: "i".repeat(COMMAND_CENTER_CONTEXT_LIMITS.spaceInstructionsChars + 1),
+    },
     route: readyRoute,
     commandText: "Do the current task",
     priorContext,
@@ -123,6 +129,84 @@ it("caps Space instructions and the total prior-context payload deterministicall
   expect(instructionSection).toContain("[truncated: context budget exhausted]");
   expect(rendered).toContain("request-0-");
 });
+
+const INSTRUCTIONS_CLIPPED_MARKER = "[truncated: context budget exhausted]";
+
+it("clips Space instructions only past the 8,000-character cap", () => {
+  const cap = COMMAND_CENTER_CONTEXT_LIMITS.spaceInstructionsChars;
+  expect(cap).toBe(8_000);
+  const agentTurn = (length: number) =>
+    renderSpaceAgentTurn({
+      space: { id: spaceId, displayName: "Example", instructions: "i".repeat(length) },
+      brief: "",
+      reason: "wake",
+      text: "Check in.",
+    });
+  const runMessage = (length: number) =>
+    renderThreadMessage({
+      space: { ...space, instructions: "i".repeat(length) },
+      route: readyRoute,
+      commandText: "Do the current task",
+    });
+
+  for (const render of [agentTurn, runMessage]) {
+    expect(render(cap - 1)).not.toContain(INSTRUCTIONS_CLIPPED_MARKER);
+    expect(render(cap - 1)).toContain("i".repeat(cap - 1));
+    expect(render(cap)).not.toContain(INSTRUCTIONS_CLIPPED_MARKER);
+    expect(render(cap + 1)).toContain(INSTRUCTIONS_CLIPPED_MARKER);
+    expect(render(cap + 1)).not.toContain("i".repeat(cap));
+  }
+});
+
+/** Runs `effect` and returns what it logged at warning level: the text, then the fields. */
+const captureWarnings = <A, E>(effect: Effect.Effect<A, E>) => {
+  const warnings: Array<{ readonly text: unknown; readonly fields: unknown }> = [];
+  const logger = Logger.make(({ message, logLevel }) => {
+    if (logLevel === "Warn") {
+      const [text, fields] = Array.isArray(message) ? message : [message];
+      warnings.push({ text, fields });
+    }
+  });
+  return effect.pipe(
+    Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+    Effect.as(warnings),
+  );
+};
+
+it.effect("logs once with the Space id, length and cap when instructions are clipped", () =>
+  Effect.gen(function* () {
+    const cap = COMMAND_CENTER_CONTEXT_LIMITS.spaceInstructionsChars;
+    const warn = (length: number) =>
+      captureWarnings(
+        warnIfSpaceInstructionsClipped({ id: spaceId, instructions: ` ${"i".repeat(length)}  ` }),
+      );
+
+    expect(yield* warn(cap - 1)).toEqual([]);
+    expect(yield* warn(cap)).toEqual([]);
+    const warnings = yield* warn(cap + 1);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.text).toBe("space instructions exceed the context cap and were truncated");
+    expect(warnings[0]?.fields).toMatchObject({ spaceId, length: cap + 1, cap });
+  }),
+);
+
+it.effect("logs the clip when a Run's prompt is dispatched, and not for short instructions", () =>
+  Effect.gen(function* () {
+    const dispatchWith = (instructions: string) => {
+      const fixture = makeFixture(readyRoute, { space: { ...space, instructions } });
+      return fixture.dispatcher.dispatch({
+        runId,
+        dispatchCommand: fixture.dispatch(),
+      });
+    };
+    const cap = COMMAND_CENTER_CONTEXT_LIMITS.spaceInstructionsChars;
+
+    expect(yield* captureWarnings(dispatchWith("i".repeat(cap)))).toEqual([]);
+    const warnings = yield* captureWarnings(dispatchWith("i".repeat(cap + 1)));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.fields).toMatchObject({ spaceId, length: cap + 1, cap });
+  }),
+);
 
 const command = decodeCommand({
   commandId: "command-example",

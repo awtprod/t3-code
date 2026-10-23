@@ -37,6 +37,7 @@ import {
   renderSpaceAgentTurn,
   resolveCommandCenterSystemProject,
   SPACE_AGENT_TURN_TEXT_MAX_CHARS,
+  warnIfSpaceInstructionsClipped,
 } from "./RunDispatcher.ts";
 import * as CommandCenterService from "./Service.ts";
 import { spaceAgentThreadId, spaceIdFromSpaceAgentThreadId } from "./SpaceAgentIds.ts";
@@ -265,6 +266,7 @@ const make = Effect.gen(function* () {
       .pipe(
         Effect.mapError((cause) => agentError("persistence", "Could not mint a turn id.", cause)),
       );
+    yield* warnIfSpaceInstructionsClipped(space);
     const message = {
       messageId: MessageId.make(`space-agent:${space.id}:message:${nonce}`),
       role: "user" as const,
