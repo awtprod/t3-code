@@ -35,6 +35,7 @@ import {
   TrimmedString,
 } from "@command-center/core";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import { ThreadId as AssetThreadId, NonNegativeInt } from "./baseSchemas.ts";
 
 export const COMMAND_CENTER_WS_METHODS = {
@@ -963,9 +964,36 @@ export const CommandCenterMemoryRememberInput = Schema.Struct({
 });
 export type CommandCenterMemoryRememberInput = typeof CommandCenterMemoryRememberInput.Type;
 
+/** The JSON text of one number, e.g. `"0.9"` or `"1"`. */
+const JSON_NUMBER_TEXT = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+
+/**
+ * A number in an MCP tool input. The tool list advertises exactly `schema`'s
+ * JSON Schema, and decoding also accepts the number written as a string
+ * (`"0.9"`), which models send when they replay a cached tool list. Pass a
+ * finite schema (`Schema.Finite`, `Schema.Int`): `Schema.Number` advertises
+ * `"NaN"`/`"Infinity"` string literals, which taught models to send strings.
+ */
+const NumericToolInput = <S extends Schema.Codec<number>>(schema: S) =>
+  Schema.Json.check(
+    Schema.makeFilter(
+      (input) =>
+        typeof input === "number" || (typeof input === "string" && JSON_NUMBER_TEXT.test(input)),
+      { expected: "a number", toJsonSchema: () => Schema.toJsonSchemaDocument(schema).schema },
+    ),
+  ).pipe(
+    Schema.decodeTo(
+      schema,
+      SchemaTransformation.transform({
+        decode: (input) => Number(input),
+        encode: (value) => value,
+      }),
+    ),
+  );
+
 export const CommandCenterMemoryProposeInput = Schema.Struct({
   ...CommandCenterMemoryRememberInput.fields,
-  confidence: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  confidence: NumericToolInput(Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }))),
   evidence: Schema.optional(
     Schema.Struct({
       kind: Schema.Literal("observation-correction"),
