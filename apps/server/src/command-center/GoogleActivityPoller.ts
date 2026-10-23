@@ -60,6 +60,13 @@ const GOOGLE_ACTIVITY_POLL_INTERVAL = Duration.minutes(10);
 const GOOGLE_ACTIVITY_POLL_START_DELAY = Duration.minutes(1);
 export const GOOGLE_ACTIVITY_MAX_ROWS_PER_POLL = 20;
 export const POLL_MAIL_QUERY = "is:unread is:important newer_than:1d";
+/**
+ * Source-id prefixes of the rows this poller writes (`gmail:<threadId>:<count>`,
+ * `calendar:<eventId>:<startISO>`). `SpaceAgentWaker` reads them back to tell
+ * mail and meeting wakes from the rest, so the two files share these constants.
+ */
+export const GOOGLE_MAIL_SOURCE_PREFIX = "gmail:";
+export const GOOGLE_CALENDAR_SOURCE_PREFIX = "calendar:";
 const POLL_MAIL_LIMIT = 20;
 const POLL_CALENDAR_LIMIT = 10;
 const POLL_CALENDAR_LEAD_MINUTES = 60;
@@ -203,7 +210,7 @@ const make = Effect.gen(function* () {
       const inserted = yield* record({
         spaceId: space.id,
         occurredAt,
-        sourceId: `calendar:${event.id}:${DateTime.formatIso(DateTime.makeUnsafe(event.startMs))}`,
+        sourceId: `${GOOGLE_CALENDAR_SOURCE_PREFIX}${event.id}:${DateTime.formatIso(DateTime.makeUnsafe(event.startMs))}`,
         title: `Calendar: ${event.title || "(no title)"} at ${local.slice(-5)}`,
         status: "upcoming",
         text: `starts in ${minutes} min (${local} ${timezone})${attendees}`,
@@ -256,7 +263,7 @@ const make = Effect.gen(function* () {
       const inserted = yield* record({
         spaceId: space.id,
         occurredAt,
-        sourceId: `gmail:${thread.threadId}:${thread.messageCount}`,
+        sourceId: `${GOOGLE_MAIL_SOURCE_PREFIX}${thread.threadId}:${thread.messageCount}`,
         title: `Mail: ${thread.subject || "(no subject)"}`,
         status: "new",
         text: `from ${(thread.from || "unknown sender").slice(0, MAIL_SENDER_CHARS)}${messages}`,
