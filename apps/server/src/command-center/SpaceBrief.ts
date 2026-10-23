@@ -622,7 +622,7 @@ const repositoryLabel = (
  * thread) come from the thread projection in the same query. Undefined when
  * `now` is not a timestamp.
  */
-export const loadSpaceOwnerWork = Effect.fn("SpaceBrief.loadOwnerWork")(function* (input: {
+const loadSpaceOwnerWork = Effect.fn("SpaceBrief.loadOwnerWork")(function* (input: {
   readonly spaceId: string;
   readonly now: string;
 }) {
