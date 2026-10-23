@@ -207,6 +207,7 @@ import * as VerifiedScopedShell from "./command-center/automation/VerifiedScoped
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as SpaceActivity from "./command-center/SpaceActivity.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as GmailDrafts from "./command-center/GmailDrafts.ts";
 import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
 import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
 import * as PublishConnections from "./command-center/publish/PublishConnections.ts";
@@ -902,6 +903,12 @@ const layerPhone = PhoneCallProposals.layer.pipe(
   Layer.provide(layerPersistence),
 );
 
+/** Space agent Gmail drafts (`cc_google_draft_create`): the 24-hour limit, gog, activity, audit. */
+const layerGmailDrafts = GmailDrafts.layer.pipe(
+  Layer.provide(layerCommandCenterBase),
+  Layer.provide(layerPersistence),
+);
+
 const layerInstagramPublish = InstagramPublishLive.layer.pipe(
   Layer.provide(InstagramTokenStore.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provide(layerCommandCenterOrchestrationBridge),
@@ -927,6 +934,7 @@ const layerCommandCenter = Layer.mergeAll(
   layerSpaceAgentWaker,
   layerSpaceActivityReactor,
   layerPhone,
+  layerGmailDrafts,
   layerGoogleActivityPoller,
   layerCommandCenterOrchestrationBridge,
   SprintPlan.layer.pipe(Layer.provide(layerPersistence)),
