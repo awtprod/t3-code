@@ -666,7 +666,12 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard,
             withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
-              inbox.discardCandidate(input, { subject: currentSession.subject }),
+              Option.match(phoneCallProposals, {
+                // Discarding a `phone.call` candidate declines the call and cancels its Item.
+                onNone: () => inbox.discardCandidate(input, { subject: currentSession.subject }),
+                onSome: (proposals) =>
+                  proposals.discardCandidate(input, { subject: currentSession.subject }),
+              }),
             ),
             { "rpc.aggregate": "command-center" },
           ),

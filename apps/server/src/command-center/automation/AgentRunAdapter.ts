@@ -89,6 +89,7 @@ export interface AutomationAgentRunAdapterDependencies {
   readonly submitCommand: (
     command: CommandCenterCommandSubmitInput,
     providers: ReadonlyArray<ProviderAvailability>,
+    options: CommandCenterService.CommandCenterSubmitOptions,
   ) => Effect.Effect<CommandCenterCommandSubmitResult, AutomationAgentRunFailure>;
   readonly linkParent: (input: {
     readonly parentExecutionId: string;
@@ -181,7 +182,10 @@ export function makeAutomationAgentRunAdapter(
       ...(request.modelId === undefined ? {} : { modelId: ModelId.make(request.modelId) }),
     };
     const providers = yield* dependencies.providerAvailability;
-    const result = yield* dependencies.submitCommand(command, providers);
+    // The automation id lets the Service file one blocked-route alert per automation.
+    const result = yield* dependencies.submitCommand(command, providers, {
+      automationId: request.automationId,
+    });
     const invalidScope = validateSubmittedScope(request, result);
     if (invalidScope !== undefined) return yield* Effect.fail(invalidScope);
 
@@ -324,8 +328,10 @@ export const makeLiveAutomationAgentRunAdapter = Effect.gen(function* () {
     providerAvailability: providerRegistry.getProviders.pipe(
       Effect.map(commandCenterProviderAvailability),
     ),
-    submitCommand: (command, providers) =>
-      commandCenter.submitCommand(command, providers).pipe(Effect.mapError(commandCenterFailure)),
+    submitCommand: (command, providers, options) =>
+      commandCenter
+        .submitCommand(command, providers, options)
+        .pipe(Effect.mapError(commandCenterFailure)),
     linkParent: makeAutomationAgentRunParentLinker(sql),
     authorizeRun: (runId) =>
       commandCenter

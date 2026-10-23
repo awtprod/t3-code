@@ -28,6 +28,12 @@
  * the accept reports "outcome unknown — do not retry". Either way the revision
  * stays accepted, so the same candidate never dials twice.
  *
+ * The decision Item follows the call so it does not sit in Needs You after the
+ * owner has acted: a placed call closes it (`done`), a declined plan cancels it
+ * (`canceled`), and a call that was not placed (or may be live) leaves it open
+ * with the reason appended to its description. These Item writes are best effort
+ * and never replace the accept's own result.
+ *
  * @module PhoneCallProposals
  */
 import { ItemId, SpaceId } from "@command-center/core";
@@ -90,6 +96,11 @@ export interface PhoneCallProposalsShape {
   readonly acceptCandidate: (
     input: CommandCenterInboxCandidateMutationInput,
     context: PhoneCallAcceptContext,
+  ) => Effect.Effect<CommandCenterInboxMutationResult, CommandCenterError>;
+  /** Inbox candidate discard; discarding a `phone.call` candidate declines it and cancels its Item. */
+  readonly discardCandidate: (
+    input: CommandCenterInboxCandidateMutationInput,
+    context: { readonly subject: string },
   ) => Effect.Effect<CommandCenterInboxMutationResult, CommandCenterError>;
 }
 
@@ -267,9 +278,11 @@ const make = Effect.gen(function* () {
       readonly metadataJson: string;
       readonly itemStatus: string;
       readonly lifecycle: string;
+      readonly revisionStatus: string;
     }>`
       SELECT revision.payload_json AS "payloadJson", revision.actor_subject AS "actorSubject",
-        item.metadata_json AS "metadataJson", item.status AS "itemStatus", inbox.lifecycle
+        item.metadata_json AS "metadataJson", item.status AS "itemStatus", inbox.lifecycle,
+        revision.status AS "revisionStatus"
       FROM command_center_inbox_revisions revision
       JOIN command_center_items item ON item.id = revision.item_id
       JOIN command_center_inbox_state inbox ON inbox.item_id = item.id
@@ -283,18 +296,64 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * Tell the Space agent an approved call was not placed. The caller's own
-   * failure is what the accept reports, so a failure to write this row is
-   * logged rather than allowed to replace it.
+   * Append what became of the call to the decision Item's description and,
+   * when `status` is given, close it. Goes through `updateItem`, so the change
+   * is audited and the Space agent hears about the status change like any other
+   * owner decision. Best effort: the call is already decided, so a failure here
+   * is logged rather than allowed to replace the accept's result.
+   */
+  const settleItem = (input: {
+    readonly spaceId: string;
+    readonly itemId: string;
+    readonly note: string;
+    readonly status?: "done" | "canceled";
+  }) =>
+    Effect.gen(function* () {
+      const rows = yield* sql<{ readonly body: string | null; readonly updatedAt: string }>`
+        SELECT body, updated_at AS "updatedAt" FROM command_center_items
+        WHERE id = ${input.itemId} AND space_id = ${input.spaceId}
+        LIMIT 1
+      `;
+      const item = rows[0];
+      if (item === undefined) return;
+      const stamp = DateTime.formatIso(yield* DateTime.now);
+      yield* commandCenter.updateItem({
+        spaceId: SpaceId.make(input.spaceId),
+        itemId: ItemId.make(input.itemId),
+        expectedUpdatedAt: item.updatedAt,
+        patch: {
+          ...(input.status === undefined ? {} : { status: input.status }),
+          description: `${item.body ?? ""}\n\n${stamp}: ${input.note}`,
+        },
+      });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("phone call Item could not be updated", {
+          itemId: input.itemId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
+
+  /**
+   * Tell the Space agent an approved call was not placed, and keep the Item
+   * open with the reason. The caller's own failure is what the accept reports,
+   * so a failure to write these is logged rather than allowed to replace it.
    */
   const recordNotPlaced = (input: {
     readonly spaceId: string;
+    readonly itemId: string;
     readonly revisionId: string;
     readonly targetLabel: string;
     readonly purpose: string;
     readonly reason: string;
   }) =>
     Effect.gen(function* () {
+      yield* settleItem({
+        spaceId: input.spaceId,
+        itemId: input.itemId,
+        note: `Not placed: ${clip(input.reason, 500)}`,
+      });
       yield* activity.record({
         spaceId: input.spaceId,
         occurredAt: DateTime.formatIso(yield* DateTime.now),
@@ -386,6 +445,7 @@ const make = Effect.gen(function* () {
       const reason = `policy: the Space agent is disabled or no longer allowed ${PHONE_CALL_CAPABILITY}.`;
       yield* recordNotPlaced({
         spaceId: input.spaceId,
+        itemId: input.itemId,
         revisionId: input.candidateRevisionId,
         targetLabel: target.id,
         purpose: plan.purpose,
@@ -399,9 +459,14 @@ const make = Effect.gen(function* () {
         Effect.tapError((error) =>
           // A call that may be ringing already has its own row; never call it "not placed".
           phoneCallMayBeLive(error)
-            ? Effect.void
+            ? settleItem({
+                spaceId: input.spaceId,
+                itemId: input.itemId,
+                note: `Outcome unknown, do not retry: ${clip(error.message, 500)}`,
+              })
             : recordNotPlaced({
                 spaceId: input.spaceId,
+                itemId: input.itemId,
                 revisionId: input.candidateRevisionId,
                 targetLabel: target.id,
                 purpose: plan.purpose,
@@ -413,6 +478,7 @@ const make = Effect.gen(function* () {
       const reason = outcome.reason ?? "the call was refused.";
       yield* recordNotPlaced({
         spaceId: input.spaceId,
+        itemId: input.itemId,
         revisionId: input.candidateRevisionId,
         targetLabel: target.id,
         purpose: plan.purpose,
@@ -420,6 +486,16 @@ const make = Effect.gen(function* () {
       });
       return yield* conflict(`Accepted, but the call was not placed: ${reason}`);
     }
+    // Closing the Item also stops a second approval from dialing again.
+    yield* settleItem({
+      spaceId: input.spaceId,
+      itemId: input.itemId,
+      status: "done",
+      note:
+        outcome.conversationId === undefined
+          ? "Call placed."
+          : `Call placed (conversation ${outcome.conversationId}).`,
+    });
     return outcome;
   });
 
@@ -439,7 +515,10 @@ const make = Effect.gen(function* () {
           "Only a call plan filed by this Item's Space agent can be approved; nothing was accepted.",
         );
       }
-      if (!openForCalling(phoneCall.value)) {
+      // A revision that is no longer a candidate was already decided (an accepted
+      // call closes its Item), so a replay falls through to the Inbox, which
+      // answers it as a duplicate instead of dialing or erroring.
+      if (!openForCalling(phoneCall.value) && phoneCall.value.revisionStatus === "candidate") {
         return yield* conflict("Reopen this Item before approving its call.");
       }
       // Once accepted, the call is attempted and recorded even if the caller goes away.
@@ -453,7 +532,27 @@ const make = Effect.gen(function* () {
       );
     });
 
-  return PhoneCallProposals.of({ file, acceptCandidate });
+  const discardCandidate: PhoneCallProposalsShape["discardCandidate"] = (input, context) =>
+    Effect.gen(function* () {
+      const phoneCall = yield* peekCandidate(input);
+      // Declining ends the proposal, so its Item leaves Needs You with it.
+      return yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          const result = yield* inbox.discardCandidate(input, { subject: context.subject });
+          if (Option.isSome(phoneCall) && !result.duplicate) {
+            yield* settleItem({
+              spaceId: input.spaceId,
+              itemId: input.itemId,
+              status: "canceled",
+              note: "Call declined.",
+            });
+          }
+          return result;
+        }),
+      );
+    });
+
+  return PhoneCallProposals.of({ file, acceptCandidate, discardCandidate });
 });
 
 export const layer = Layer.effect(PhoneCallProposals, make);

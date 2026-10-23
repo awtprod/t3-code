@@ -92,6 +92,7 @@ function submissionResult(
 
 it.effect("submits an exact-Space command and atomically links its parent execution", () => {
   const commands: CommandCenterCommandSubmitInput[] = [];
+  const submitOptions: Array<{ readonly automationId?: string }> = [];
   const links: Array<{
     readonly parentExecutionId: string;
     readonly childRunId: string;
@@ -101,8 +102,9 @@ it.effect("submits an exact-Space command and atomically links its parent execut
   const authorized: string[] = [];
   const adapter = makeAutomationAgentRunAdapter({
     providerAvailability: Effect.succeed(providers),
-    submitCommand: (command) => {
+    submitCommand: (command, _providers, options) => {
       commands.push(command);
+      submitOptions.push(options);
       return Effect.succeed(submissionResult(command));
     },
     linkParent: (input) => {
@@ -128,6 +130,8 @@ it.effect("submits an exact-Space command and atomically links its parent execut
         modelId: "model-a",
       }),
     ]);
+    // The service files one blocked-route alert per automation from this id.
+    expect(submitOptions).toEqual([{ automationId: "automation-1" }]);
     expect(links).toEqual([
       {
         parentExecutionId: "execution-1",
