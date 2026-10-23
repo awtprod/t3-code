@@ -62,7 +62,9 @@ it("records the committed static-context baseline", () => {
     // 2026-10: upstream v0.1.0 adds five preview tools (14 -> 19); the Space agent
     // phone tools `cc_phone_call_me` and `cc_phone_call` (approval-gated; only Spaces
     // that opt in see them) take Command Center from 16 to 18. Supabase (9) unchanged.
-    mcp: { toolCount: 46, schemaBytes: 35_769, toolkitCounts: [19, 18, 9] },
+    // 2026-10: -44 bytes: cc_memory_propose confidence advertised as a plain
+    // bounded number (no NaN/Infinity union).
+    mcp: { toolCount: 46, schemaBytes: 35_725, toolkitCounts: [19, 18, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,
