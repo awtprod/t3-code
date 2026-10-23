@@ -44,6 +44,7 @@ import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
 import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
 import * as SupabaseMcpConnector from "../../../database/SupabaseMcpConnector.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../../../persistence/Sqlite.ts";
 
 const layerStubServices = Layer.mergeAll(
   Layer.mock(Orchestrator.OrchestratorV2)({}),
@@ -74,6 +75,8 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
   Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
   Layer.mock(SpaceActivity.SpaceActivity)({}),
+  // cc_google_draft_create counts and audits its drafts in SQL.
+  SqlitePersistenceMemory,
   Layer.mock(PhoneCalls)({}),
   Layer.mock(PhoneCallProposals)({}),
   Layer.mock(SupabaseMcpConnector.SupabaseMcpConnector)({}),

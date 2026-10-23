@@ -43,3 +43,31 @@ it("advertises no NaN or Infinity string literals in any tool input", () => {
     expect(JSON.stringify(Tool.getJsonSchema(tool)), tool.name).not.toMatch(/"(?:-?Infinity|NaN)"/);
   }
 });
+
+it("advertises cc_google_draft_create as plain strings with no send path", () => {
+  const tool = Object.values(CommandCenterToolkit.tools).find(
+    (candidate) => candidate.name === "cc_google_draft_create",
+  )!;
+  const schema = Tool.getJsonSchema(tool) as {
+    readonly type?: string;
+    readonly properties?: Readonly<Record<string, unknown>>;
+    readonly required?: ReadonlyArray<string>;
+  };
+  expect(schema.type).toBe("object");
+  expect(Object.keys(schema.properties ?? {}).toSorted()).toEqual([
+    "body",
+    "cc",
+    "connectionId",
+    "replyToMessageId",
+    "spaceId",
+    "subject",
+    "threadId",
+    "to",
+  ]);
+  expect([...(schema.required ?? [])].toSorted()).toEqual(["body", "spaceId", "subject", "to"]);
+  const json = JSON.stringify(schema);
+  expect(json).not.toMatch(/"type":"(?:number|integer)"/);
+  expect(json).not.toMatch(/"(?:-?Infinity|NaN)"/);
+  expect(tool.description).toContain("never sends");
+  expect(tool.description).toContain("sends it from Gmail");
+});

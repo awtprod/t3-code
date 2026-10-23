@@ -1,13 +1,20 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { RepositoryId, SpaceId } from "@command-center/core";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  type GoogleDraftCreateRequest,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import { McpSchema, Tool } from "effect/ai";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
@@ -1000,4 +1007,340 @@ describe("Command Center MCP phone tools", () => {
       }
     }),
   );
+});
+
+const DRAFT_CAPABILITY = "cc.connections.google.gmail.drafts.create";
+const DRAFT_NOW = "2026-10-23T12:00:00.000Z";
+
+const draftScope = (
+  overrides: Partial<McpInvocationContext.McpInvocationScope> = {},
+): McpInvocationContext.McpInvocationScope => ({
+  environmentId: EnvironmentId.make("environment-1"),
+  requestNamespace: "session-1",
+  thread: {
+    threadId: ThreadId.make("cc-space-agent-space-a"),
+    providerSessionId: "session-1",
+    providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  },
+  client: undefined,
+  capabilities: new Set([DRAFT_CAPABILITY]),
+  spaceId: SpaceId.make("space-a"),
+  role: "space-agent",
+  issuedAt: 0,
+  ...overrides,
+});
+
+const googleConnection = (
+  id: string,
+  capabilities: ReadonlyArray<string>,
+  spaceId = "space-a",
+) => ({ id, spaceId, kind: "google", label: "Owner mail", capabilities, health: "connected" });
+
+interface DraftCall {
+  readonly request: GoogleDraftCreateRequest;
+  readonly attachmentPaths: ReadonlyArray<string>;
+}
+
+/**
+ * The draft tool over the real activity feed and audit log (in-memory SQLite).
+ * The connector records each `createDraft` call in `drafts`.
+ */
+const draftToolLayer = (
+  drafts: Array<DraftCall>,
+  options: {
+    readonly scope?: McpInvocationContext.McpInvocationScope;
+    readonly allowedCapabilities?: ReadonlyArray<string>;
+    readonly connections?: ReadonlyArray<ReturnType<typeof googleConnection>>;
+  } = {},
+) =>
+  McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        Layer.succeed(McpInvocationContext.McpInvocationContext, options.scope ?? draftScope()),
+        // Write tools check that the calling thread's run is live.
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: (id) =>
+            Effect.succeed({
+              ...liveThreadShell(id),
+              providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            }),
+        }),
+        Layer.mock(CommandCenterService.CommandCenterService)({
+          getConfiguredSpace: () =>
+            Effect.succeed({
+              agent: { enabled: true },
+              policy: { allowedCapabilities: options.allowedCapabilities ?? [DRAFT_CAPABILITY] },
+            } as never),
+          bootstrap: Effect.succeed({
+            connections: options.connections ?? [
+              googleConnection("google-owner", [DRAFT_CAPABILITY]),
+            ],
+          } as never),
+        }),
+        Layer.mock(GoogleReadConnector.GoogleReadConnector)({
+          createDraft: (request, attachmentPaths) =>
+            Effect.sync(() => {
+              drafts.push({ request, attachmentPaths });
+              return {
+                operation: "gmail.draft.create" as const,
+                draftId: `draft-${drafts.length}`,
+                messageId: `msg-${drafts.length}`,
+                threadId: request.threadId ?? `thread-${drafts.length}`,
+              };
+            }),
+        }),
+        Layer.mock(AutomationRuns.AutomationRuns)({}),
+        Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+        Layer.succeed(
+          ReadinessGate.CommandCenterReadinessGate,
+          ReadinessGate.CommandCenterReadinessGate.of({
+            state: Effect.succeed("ready"),
+            requireReady: Effect.void,
+            markReady: Effect.void,
+            markFailed: Effect.void,
+          }),
+        ),
+        SpaceActivity.layer.pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+const seedDraftSpace = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    INSERT INTO command_center_spaces (id, slug, name, kind, created_at, updated_at)
+    VALUES ('space-a', 'space-a', 'Space A', 'business', ${DRAFT_NOW}, ${DRAFT_NOW})
+  `;
+  yield* TestClock.setTime(Date.parse(DRAFT_NOW));
+});
+
+/** Typed tool failures surface as a failed effect; `result` is then the error. */
+const callDraftTool = (input: unknown) =>
+  Effect.gen(function* () {
+    const toolkit = yield* CommandCenterToolkit;
+    const stream = yield* toolkit.handle("cc_google_draft_create", input as never);
+    const [output] = Array.from(yield* Stream.runCollect(stream));
+    return { failed: output?.isFailure ?? true, result: output?.result as unknown };
+  }).pipe(Effect.catch((error) => Effect.succeed({ failed: true, result: error as unknown })));
+
+const replyDraft = {
+  spaceId: "space-a",
+  to: ["pat@example.com", "sam@example.com"],
+  cc: ["owner@example.com"],
+  subject: "Re: Quarterly plan",
+  body: "Thanks, Thursday at 10 works for me.",
+  replyToMessageId: "msg-incoming",
+  threadId: "thread-incoming",
+};
+
+describe("cc_google_draft_create", () => {
+  it.effect("saves the decoded draft and records it without addresses or the body", () => {
+    const drafts: Array<DraftCall> = [];
+    return Effect.gen(function* () {
+      yield* seedDraftSpace;
+      const { failed, result } = yield* callDraftTool(replyDraft);
+      expect(failed).toBe(false);
+      expect(result).toEqual({
+        draftId: "draft-1",
+        messageId: "msg-1",
+        threadId: "thread-incoming",
+        summary: "Draft saved in Gmail (not sent): Re: Quarterly plan",
+      });
+      expect(drafts).toEqual([
+        {
+          request: {
+            operation: "gmail.draft.create",
+            spaceId: "space-a",
+            connectionId: "google-owner",
+            to: ["pat@example.com", "sam@example.com"],
+            cc: ["owner@example.com"],
+            subject: "Re: Quarterly plan",
+            body: "Thanks, Thursday at 10 works for me.",
+            replyToMessageId: "msg-incoming",
+            threadId: "thread-incoming",
+          },
+          attachmentPaths: [],
+        },
+      ]);
+
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql`
+        SELECT source_kind AS "sourceKind", source_id AS "sourceId", title, status, summary, url,
+          event_sequence AS "eventSequence", occurred_at AS "occurredAt"
+        FROM command_center_space_activity
+      `;
+      expect(rows).toEqual([
+        {
+          sourceKind: "run",
+          sourceId: "gmail-draft:draft-1",
+          title: "Draft saved: Re: Quarterly plan",
+          status: "draft",
+          summary: "to 3 recipients",
+          url: "https://mail.google.com/mail/#drafts?compose=msg-1",
+          eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
+          occurredAt: DRAFT_NOW,
+        },
+      ]);
+      const audits = yield* sql<{ readonly payloadJson: string }>`
+        SELECT actor_kind AS "actorKind", action, space_id AS "spaceId", payload_json AS "payloadJson"
+        FROM command_center_audit_events
+      `;
+      expect(audits).toEqual([
+        {
+          actorKind: "agent",
+          action: "cc.connections.google.gmail.draft.created",
+          spaceId: "space-a",
+          payloadJson: expect.any(String),
+        },
+      ]);
+      expect(JSON.parse(audits[0]!.payloadJson)).toEqual({
+        draftId: "draft-1",
+        connectionId: "google-owner",
+        recipients: 3,
+        reply: true,
+        agentThreadId: "cc-space-agent-space-a",
+      });
+      const recorded = JSON.stringify([rows, audits]);
+      expect(recorded).not.toContain("@example.com");
+      expect(recorded).not.toContain("Thursday");
+    }).pipe(Effect.provide(draftToolLayer(drafts)));
+  });
+
+  it.effect("denies a Space or credential without the drafts capability", () =>
+    Effect.gen(function* () {
+      for (const [options, refusal] of [
+        // The live Space policy no longer lists the capability.
+        [
+          { allowedCapabilities: ["cc.connections.google.gmail.read"] },
+          { message: "This Space agent is disabled or no longer allowed to use this tool." },
+        ],
+        // The credential was never issued it.
+        [
+          { scope: draftScope({ capabilities: new Set(["cc.connections.google.gmail.read"]) }) },
+          { capability: DRAFT_CAPABILITY },
+        ],
+      ] as const) {
+        const drafts: Array<DraftCall> = [];
+        const { failed, result } = yield* Effect.gen(function* () {
+          yield* seedDraftSpace;
+          return yield* callDraftTool(replyDraft);
+        }).pipe(Effect.provide(draftToolLayer(drafts, options)));
+        expect(failed).toBe(true);
+        expect(result).toMatchObject(refusal);
+        expect(drafts).toEqual([]);
+      }
+    }),
+  );
+
+  it.effect("denies a connection without the gmail.drafts.create grant", () =>
+    Effect.gen(function* () {
+      for (const connections of [
+        // Read-only consent: the connection was set up without drafts.
+        [googleConnection("google-owner", ["cc.connections.google.gmail.read"])],
+        // Granted, but bound to another Space.
+        [googleConnection("google-owner", [DRAFT_CAPABILITY], "space-b")],
+      ]) {
+        const drafts: Array<DraftCall> = [];
+        const { failed, result } = yield* Effect.gen(function* () {
+          yield* seedDraftSpace;
+          return yield* callDraftTool({ ...replyDraft, connectionId: "google-owner" });
+        }).pipe(Effect.provide(draftToolLayer(drafts, { connections })));
+        expect(failed).toBe(true);
+        expect(String((result as { readonly message?: string }).message)).toContain(
+          "not available in this Space",
+        );
+        expect(drafts).toEqual([]);
+      }
+    }),
+  );
+
+  it.effect("rejects out-of-bounds input before any draft is made", () => {
+    const drafts: Array<DraftCall> = [];
+    return Effect.gen(function* () {
+      yield* seedDraftSpace;
+      const recipients = (count: number) =>
+        Array.from({ length: count }, (_, index) => `person-${index}@example.com`);
+      for (const input of [
+        { ...replyDraft, to: [] },
+        { ...replyDraft, to: recipients(11) },
+        { ...replyDraft, cc: recipients(11) },
+        { ...replyDraft, subject: "s".repeat(201) },
+        { ...replyDraft, body: "" },
+        { ...replyDraft, body: "b".repeat(20_001) },
+      ]) {
+        expect((yield* callDraftTool(input)).failed).toBe(true);
+      }
+      expect(drafts).toEqual([]);
+      // The bounds themselves are allowed.
+      const widest = {
+        ...replyDraft,
+        to: recipients(10),
+        cc: recipients(10),
+        subject: "s".repeat(200),
+        body: "b".repeat(20_000),
+      };
+      expect((yield* callDraftTool(widest)).failed).toBe(false);
+      expect(drafts).toHaveLength(1);
+    }).pipe(Effect.provide(draftToolLayer(drafts)));
+  });
+
+  it.effect("needs connectionId only when several connections can create drafts", () => {
+    const drafts: Array<DraftCall> = [];
+    return Effect.gen(function* () {
+      yield* seedDraftSpace;
+      const ambiguous = yield* callDraftTool(replyDraft);
+      expect(ambiguous.failed).toBe(true);
+      expect(drafts).toEqual([]);
+      const chosen = yield* callDraftTool({ ...replyDraft, connectionId: "google-work" });
+      expect(chosen.failed).toBe(false);
+      expect(drafts.map((draft) => draft.request.connectionId)).toEqual(["google-work"]);
+    }).pipe(
+      Effect.provide(
+        draftToolLayer(drafts, {
+          connections: [
+            googleConnection("google-owner", [DRAFT_CAPABILITY]),
+            googleConnection("google-work", [DRAFT_CAPABILITY]),
+          ],
+        }),
+      ),
+    );
+  });
+
+  it.effect("allows the 10th draft in 24 hours, refuses the 11th, and frees the window", () => {
+    const drafts: Array<DraftCall> = [];
+    return Effect.gen(function* () {
+      yield* seedDraftSpace;
+      // A draft from 25 hours ago is outside the rolling window.
+      const activity = yield* SpaceActivity.SpaceActivity;
+      yield* activity.record({
+        spaceId: "space-a",
+        occurredAt: "2026-10-22T11:00:00.000Z",
+        sourceKind: "run",
+        sourceId: "gmail-draft:draft-old",
+        projectId: null,
+        title: "Draft saved: Earlier",
+        status: "draft",
+        text: "to 1 recipient",
+        eventSequence: SpaceActivity.SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE,
+      });
+      const draft = { spaceId: "space-a", to: ["pat@example.com"], subject: "Hello", body: "Hi." };
+      for (let index = 1; index <= 10; index += 1) {
+        expect((yield* callDraftTool(draft)).failed, `draft ${index}`).toBe(false);
+      }
+      const refused = yield* callDraftTool(draft);
+      expect(refused.failed).toBe(true);
+      expect(String((refused.result as { readonly message?: string }).message)).toContain(
+        "limit of 10 Gmail drafts in 24 hours",
+      );
+      expect(drafts).toHaveLength(10);
+
+      yield* TestClock.adjust(Duration.sum(Duration.hours(24), Duration.seconds(1)));
+      expect((yield* callDraftTool(draft)).failed).toBe(false);
+      expect(drafts).toHaveLength(11);
+    }).pipe(Effect.provide(draftToolLayer(drafts)));
+  });
 });

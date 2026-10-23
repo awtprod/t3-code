@@ -28,10 +28,14 @@ import {
   CommandCenterMemorySearchResults,
   CommandCenterSpaceAgentProposalResult,
   CommandCenterSpaceBrief,
+  GoogleDraftCreateRequest,
+  GoogleDraftCreateResult,
   GoogleReadRequest,
   GoogleReadResult,
 } from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import { Tool, Toolkit } from "effect/ai";
 
 import * as CommandCenterService from "../../../command-center/Service.ts";
@@ -332,6 +336,46 @@ const CommandCenterGoogleReadTool = readonlyTool(
   "cc.connections.google.read",
 );
 
+// Plain-text drafts only: no Bcc, HTML body, or attachments (the contract's
+// other fields), so the agent's input stays small and reviewable.
+const draftFields = GoogleDraftCreateRequest.fields;
+const draftRecipients = draftFields.to.check(Schema.isMaxLength(10));
+
+const CommandCenterGoogleDraftCreateTool = commandCenterCapability(
+  Tool.make("cc_google_draft_create", {
+    description:
+      "Create a Gmail draft in this Space's connected mailbox. It never sends: the owner reviews and sends it from Gmail. Plain text only; at most 10 drafts per Space in 24 hours. For a reply, pass the thread's threadId and the replyToMessageId.",
+    parameters: Schema.Struct({
+      spaceId: draftFields.spaceId,
+      connectionId: Schema.optional(draftFields.connectionId),
+      to: draftRecipients.check(Schema.isMinLength(1)),
+      cc: Schema.optional(draftRecipients),
+      subject: draftFields.subject.check(Schema.isMaxLength(200)),
+      body: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(20_000)),
+      replyToMessageId: draftFields.replyToMessageId,
+      threadId: draftFields.threadId,
+    }),
+    success: Schema.Struct({
+      draftId: GoogleDraftCreateResult.fields.draftId,
+      messageId: GoogleDraftCreateResult.fields.messageId,
+      threadId: GoogleDraftCreateResult.fields.threadId,
+      summary: Schema.String,
+    }),
+    failure,
+    dependencies: [
+      ...dependencies,
+      SpaceActivity.SpaceActivity,
+      SqlClient.SqlClient,
+      Crypto.Crypto,
+    ],
+  })
+    .annotate(Tool.Title, "Save a Gmail draft (never sends)")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, false),
+  "cc.connections.google.gmail.drafts.create",
+);
+
 const SpaceActivityEntry = Schema.Struct({
   occurredAt: Schema.String,
   title: Schema.String,
@@ -449,6 +493,7 @@ export const CommandCenterToolkit = Toolkit.make(
   CommandCenterRunStartTool,
   CommandCenterAutomationRunTool,
   CommandCenterGoogleReadTool,
+  CommandCenterGoogleDraftCreateTool,
   CommandCenterSpaceActivityTool,
   CommandCenterPhoneCallMeTool,
   CommandCenterPhoneCallTool,
