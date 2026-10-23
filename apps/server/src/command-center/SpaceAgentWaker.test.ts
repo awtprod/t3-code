@@ -13,6 +13,7 @@ import {
   dueSpaceAgentCheckInSlot,
   make as makeWaker,
   renderSpaceAgentWakeText,
+  SPACE_AGENT_CHECK_IN_CLOSING,
   SPACE_AGENT_WAKE_DELTA_MAX_CHARS,
   SpaceAgentWaker,
   layer as spaceAgentWakerLayer,
@@ -194,6 +195,10 @@ describe("SpaceAgentWaker", () => {
       const [turn] = harness.turns;
       expect(turn?.reason).toBe("wake");
       expect(turn?.text).toContain("Why you woke: 3 new events since your last wake.");
+      expect(turn?.text).toMatch(
+        /Avoid noise\. If nothing needs doing, reply with one short line\.$/u,
+      );
+      expect(turn?.text).not.toContain(SPACE_AGENT_CHECK_IN_CLOSING);
       // Newest first.
       const text = turn?.text ?? "";
       expect(text.indexOf("Release notes")).toBeLessThan(text.indexOf("Migration check"));
@@ -301,6 +306,8 @@ describe("SpaceAgentWaker", () => {
         expect(yield* tickAt("2026-10-09T12:30:00.000Z")).toBe("check-in");
         expect(harness.turns[0]?.text).toContain("Morning check-in (08:30 America/New_York)");
         expect(harness.turns[0]?.text).toContain("Activity since your last wake: none.");
+        expect(harness.turns[0]?.text.endsWith(SPACE_AGENT_CHECK_IN_CLOSING)).toBe(true);
+        expect(harness.turns[0]?.text).not.toContain("Avoid noise.");
         expect(yield* tickAt("2026-10-09T12:30:30.000Z")).toBe("idle");
 
         // A fresh waker over the same database (a restart) does not re-fire it.
@@ -564,6 +571,31 @@ describe("renderSpaceAgentWakeText", () => {
     expect(text).toContain(`${140 - shown} older events not shown; use cc_space_activity.`);
     expect(text).toMatch(/reply with one short line\.$/u);
     expect(text.length).toBeLessThan(4_000);
+  });
+});
+
+describe("renderSpaceAgentWakeText closing", () => {
+  it("asks only scheduled check-ins to work through the routine", () => {
+    const render = (kind: "check-in" | "event" | "reply" | "manual") =>
+      renderSpaceAgentWakeText({
+        kind,
+        timezone: NEW_YORK,
+        ...(kind === "check-in" ? { checkInSlot: "2026-10-09T12:30:00.000Z" } : {}),
+        rows: [],
+        totalEvents: 0,
+      });
+
+    expect(SPACE_AGENT_CHECK_IN_CLOSING).toBe(
+      "Scheduled check-in. Work through the check-in routine in your Space instructions, if there is one, using the Owner work, Open Items and Recent activity sections above; then reply with a short summary of what you did and filed. If nothing needs doing, reply with one short line.",
+    );
+    expect(render("check-in").endsWith(`\n\n${SPACE_AGENT_CHECK_IN_CLOSING}`)).toBe(true);
+    expect(render("check-in")).not.toContain("Avoid noise.");
+    for (const kind of ["event", "reply", "manual"] as const) {
+      expect(render(kind)).not.toContain("Scheduled check-in.");
+      expect(render(kind)).toMatch(
+        /Avoid noise\. If nothing needs doing, reply with one short line\.$/u,
+      );
+    }
   });
 });
 

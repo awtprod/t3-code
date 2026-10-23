@@ -58,9 +58,30 @@ Model resolution is `agent.model`, then the Space's `routing` default, then Opus
 
 `renderSpaceBrief` (`SpaceBrief.ts`) renders approved Memory (procedure, decision,
 fact, preference; newest first, about 6,000 characters), open Items (Needs You
-first, about 2,000 characters), and optional recent activity (newest first, about
-2,500 characters). It is empty when there is nothing to show. Every Command Center
-Run prompt in the Space includes it.
+first, about 2,000 characters), Mail + calendar when the caller supplies it, Owner
+work, and recent activity. A repository-scoped brief leaves Owner work and activity
+out, since both span every repository in the Space. The brief is empty when there is
+nothing to show; an Owner work section without threads does not count. Every
+Command Center Run prompt in the Space includes it. The caps are constants
+(`SPACE_BRIEF_LIMITS`), not Space config.
+
+- **Recent activity** reads the newest 100 feed rows and shows at most 20 (about
+  2,500 characters), grouped by source. Sources are ordered by their newest row
+  and show at most 3 rows each, so one busy thread cannot fill the section. The
+  last row a source shows ends with `(+k earlier rows in this thread)`. The closing
+  `[n more not shown: …]` counts every row read but not shown, whatever the reason.
+- **Owner work (last 48 h)** lists up to 10 threads with a feed row in the last 48
+  hours, newest first, in about 1,500 characters. Each line gives the title, the
+  repository binding id (the project title when no single binding names the
+  project), the time since the last row, the branch or worktree, and the linked PRs
+  with their last synced state. The list is read from the activity feed, not from
+  projects. Thread rows exist only for threads the reactor matched to a bound
+  repository (`resolveSpaceIdsForProject`), and never for Run threads or the agent's
+  own thread, so that matching is not repeated here. PR links come from the thread
+  projection's `pullRequests` (what `link_pull_request` writes), read in the same
+  query. A thread appears once one of its turns finishes. Work in a project the
+  Space does not bind never appears; bind the repository in the Space config. Owner
+  messages are not recorded, so they are not activity.
 
 ## Wakes
 
@@ -89,9 +110,14 @@ activity row, so older history counts as brief context, not as a wake.
   `cc.spaceAgent.wake` RPC. On success it moves the cursor to the newest row it
   delivered, clears `pending_since`, and records `last_wake_at/reason`.
 - **Wake text.** It states why the agent woke, then lists up to 20 activity rows
-  (newest first, about 3,000 characters, marked as untrusted data), then gives
-  the allowed responses: do nothing, update memory, create or update an Item, ask
-  via a decision Item, or start an in-policy Run.
+  (newest first, about 3,000 characters, marked as untrusted data), then closes.
+  Event, reply and manual wakes close with the allowed responses (do nothing,
+  update memory, create or update an Item, ask via a decision Item, or start an
+  in-policy Run) and ask for one short line when nothing needs doing. A scheduled
+  check-in instead asks the agent to work through the check-in routine in its Space
+  instructions, using the Owner work, Open Items and Recent activity sections, and
+  to reply with a short summary of what it did and filed. Told to stay quiet on
+  every wake, the agent never ran that routine.
 - **RPCs.** `cc.spaceAgent.list` adds `paused`, `lastWakeAt`, `lastWakeReason`,
   `wakesToday`, and `pendingEvents`. `cc.spaceAgent.setPaused` (operate scope)
   stops automatic wakes only. Manual wakes still work while paused.

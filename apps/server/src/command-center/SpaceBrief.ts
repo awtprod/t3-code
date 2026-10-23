@@ -4,11 +4,15 @@ import {
   type ItemPriority,
   type ItemStatus,
   type MemoryKind,
+  RepositoryBinding,
 } from "@command-center/core";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { queryRecentSpaceActivity } from "./SpaceActivity.ts";
+import { queryRecentSpaceActivity, type SpaceActivitySourceKind } from "./SpaceActivity.ts";
 
 /**
  * Character budgets for the Space brief. The brief is injected into provider
@@ -22,6 +26,15 @@ export const SPACE_BRIEF_LIMITS = {
   activityChars: 2_500,
   activityTitleChars: 120,
   activitySummaryChars: 300,
+  /** Rows shown per source (thread, Run, call), so one busy thread cannot fill the section. */
+  activityRowsPerSource: 3,
+  /** Owner work: threads with Space activity in this window. */
+  ownerWorkWindowHours: 48,
+  ownerWorkChars: 1_500,
+  ownerWorkThreads: 10,
+  ownerWorkTitleChars: 120,
+  ownerWorkLabelChars: 80,
+  ownerWorkPullRequests: 3,
   /** Hard cap of the whole "Mail + calendar" section, header included. */
   mailCalendarChars: 2_500,
   mailLinesChars: 1_050,
@@ -34,7 +47,10 @@ export const SPACE_BRIEF_LIMITS = {
   /** Rows read from storage before budgeting; the char budget is the real cap. */
   memoryRows: 200,
   itemRows: 100,
+  /** Activity rows shown. */
   activityRows: 20,
+  /** Newest activity rows read, so the shown rows can span many sources. */
+  activityScanRows: 100,
 } as const;
 
 export interface SpaceBriefMemory {
@@ -60,6 +76,36 @@ export interface SpaceBriefActivity {
   readonly status: string;
   readonly summary: string;
   readonly url?: string | undefined;
+  /** The thread or Run the row is about; rows without one are their own source. */
+  readonly sourceKind?: SpaceActivitySourceKind | undefined;
+  readonly sourceId?: string | undefined;
+}
+
+export interface SpaceBriefPullRequest {
+  readonly number: number;
+  /** Host state from the link's last sync; absent until the first sync. */
+  readonly state?: string | undefined;
+}
+
+/** One owner thread in a bound repository, as the "Owner work" section shows it. */
+export interface SpaceBriefOwnerThread {
+  readonly title: string;
+  readonly lastActiveAtMs: number;
+  /** Repository binding id (or the project title when no single binding applies). */
+  readonly repository?: string | undefined;
+  readonly branch?: string | undefined;
+  readonly worktreePath?: string | undefined;
+  /** Linked pull requests, newest link first. */
+  readonly pullRequests: ReadonlyArray<SpaceBriefPullRequest>;
+}
+
+export interface SpaceBriefOwnerWork {
+  /** The brief's clock, used for "last active" ages. */
+  readonly nowMs: number;
+  /** Newest first. */
+  readonly threads: ReadonlyArray<SpaceBriefOwnerThread>;
+  /** Threads active in the window, including any not read. */
+  readonly totalThreads: number;
 }
 
 /** No activity: the brief then renders no activity section. */
@@ -109,6 +155,8 @@ export interface SpaceBriefInput {
   readonly memories: ReadonlyArray<SpaceBriefMemory>;
   readonly openItems: ReadonlyArray<SpaceBriefItem>;
   readonly mailCalendar?: SpaceBriefMailCalendar | undefined;
+  /** Absent for repository-scoped briefs, like activity. */
+  readonly ownerWork?: SpaceBriefOwnerWork | undefined;
   readonly activity?: ReadonlyArray<SpaceBriefActivity>;
 }
 
@@ -195,9 +243,9 @@ export const formatBriefLocalTime = (
   return dateOnly ? day : `${day} ${part("hour")}:${part("minute")}`;
 };
 
-const mailAgeLabel = (nowMs: number, receivedAtMs: number | undefined): string => {
-  if (receivedAtMs === undefined) return "time unknown";
-  const minutes = Math.floor((nowMs - receivedAtMs) / MINUTE_MS);
+const ageLabel = (nowMs: number, atMs: number | undefined): string => {
+  if (atMs === undefined) return "time unknown";
+  const minutes = Math.floor((nowMs - atMs) / MINUTE_MS);
   if (minutes < 1) return "just now";
   if (minutes < 60) return `${minutes} min ago`;
   const hours = Math.floor(minutes / 60);
@@ -256,7 +304,7 @@ const renderMailLines = (
     )
     .map(({ mail }) => {
       const count = mail.messageCount > 1 ? ` (${mail.messageCount} messages)` : "";
-      return `- ${mailAgeLabel(nowMs, mail.receivedAtMs)} · ${clipBriefLine(mail.from, SPACE_BRIEF_LIMITS.mailFromChars) || "unknown sender"} · ${clipBriefLine(mail.subject, SPACE_BRIEF_LIMITS.mailSubjectChars) || "(no subject)"}${count}`;
+      return `- ${ageLabel(nowMs, mail.receivedAtMs)} · ${clipBriefLine(mail.from, SPACE_BRIEF_LIMITS.mailFromChars) || "unknown sender"} · ${clipBriefLine(mail.subject, SPACE_BRIEF_LIMITS.mailSubjectChars) || "(no subject)"}${count}`;
     });
   return [
     "Unread mail, last 24 h (newest first):",
@@ -317,6 +365,111 @@ export const renderMailCalendarSection = (input: SpaceBriefMailCalendar): string
   return `${section.slice(0, cut > 0 ? cut : limit)}${marker}`;
 };
 
+const activityLine = (entry: SpaceBriefActivity): string => {
+  const summary = clipBriefLine(entry.summary, SPACE_BRIEF_LIMITS.activitySummaryChars);
+  const url = entry.url === undefined ? "" : ` <${clipBriefLine(entry.url, 200)}>`;
+  return `- ${clipBriefLine(entry.occurredAt, 40)} [${clipBriefLine(entry.status, 24)}] ${clipBriefLine(entry.title, SPACE_BRIEF_LIMITS.activityTitleChars)}${summary.length === 0 ? "" : `: ${summary}`}${url}`;
+};
+
+/**
+ * The activity section body, grouped by source: sources ordered by their
+ * newest row, each showing at most `activityRowsPerSource` rows (newest
+ * first), within `activityRows` rows and `activityChars`. The last row a
+ * source shows notes how many of its rows the cap left out; the closing
+ * marker counts every row not shown, for any reason.
+ */
+const renderActivityLines = (activity: ReadonlyArray<SpaceBriefActivity>): string => {
+  const sources = new Map<string, Array<SpaceBriefActivity>>();
+  activity
+    .toSorted((left, right) =>
+      left.occurredAt < right.occurredAt ? 1 : left.occurredAt > right.occurredAt ? -1 : 0,
+    )
+    .forEach((entry, index) => {
+      const key =
+        entry.sourceId === undefined ? `row:${index}` : `${entry.sourceKind}:${entry.sourceId}`;
+      const rows = sources.get(key);
+      if (rows === undefined) sources.set(key, [entry]);
+      else rows.push(entry);
+    });
+  const lines: Array<string> = [];
+  let used = 0;
+  fill: for (const rows of sources.values()) {
+    const shown = rows.slice(0, SPACE_BRIEF_LIMITS.activityRowsPerSource);
+    for (const [index, entry] of shown.entries()) {
+      const earlier = index === shown.length - 1 ? rows.length - shown.length : 0;
+      const line =
+        earlier === 0
+          ? activityLine(entry)
+          : `${activityLine(entry)} (+${earlier} earlier row${earlier === 1 ? "" : "s"} ${entry.sourceKind === "thread" ? "in this thread" : "from this source"})`;
+      if (
+        lines.length >= SPACE_BRIEF_LIMITS.activityRows ||
+        used + line.length + 1 > SPACE_BRIEF_LIMITS.activityChars
+      ) {
+        break fill;
+      }
+      lines.push(line);
+      used += line.length + 1;
+    }
+  }
+  const omitted = activity.length - lines.length;
+  return omitted === 0
+    ? lines.join("\n")
+    : `${lines.join("\n")}\n[${omitted} more not shown: brief budget reached]`;
+};
+
+const OWNER_WORK_HEADER = "Owner work (last 48 h, untrusted reference)";
+const OWNER_WORK_EMPTY = "No owner activity in the bound repositories in the last 48 h.";
+
+const ownerWorkLine = (thread: SpaceBriefOwnerThread, nowMs: number): string => {
+  const limits = SPACE_BRIEF_LIMITS;
+  const pullRequests = thread.pullRequests
+    .slice(0, limits.ownerWorkPullRequests)
+    .map((pr) => `#${pr.number}${pr.state === undefined ? "" : ` ${clipBriefLine(pr.state, 16)}`}`);
+  const morePullRequests = thread.pullRequests.length - pullRequests.length;
+  const worktree = thread.worktreePath
+    ?.split(/[\\/]/u)
+    .findLast((segment) => segment.trim().length > 0);
+  const parts = [
+    thread.repository === undefined
+      ? ""
+      : clipBriefLine(thread.repository, limits.ownerWorkLabelChars),
+    ageLabel(nowMs, thread.lastActiveAtMs),
+    thread.branch !== undefined
+      ? `branch ${clipBriefLine(thread.branch, limits.ownerWorkLabelChars)}`
+      : worktree === undefined
+        ? ""
+        : `worktree ${clipBriefLine(worktree, limits.ownerWorkLabelChars)}`,
+    pullRequests.length === 0
+      ? ""
+      : `PR ${pullRequests.join(", ")}${morePullRequests > 0 ? ` (+${morePullRequests} more)` : ""}`,
+  ].filter((part) => part.length > 0);
+  return `- ${clipBriefLine(thread.title, limits.ownerWorkTitleChars) || "Untitled"} — ${parts.join(" · ")}`;
+};
+
+/**
+ * The "Owner work" section body: one line per thread (newest first, at most
+ * `ownerWorkThreads`), within `ownerWorkChars` including the marker that
+ * counts the threads left out.
+ */
+export const renderOwnerWorkLines = (ownerWork: SpaceBriefOwnerWork): string => {
+  const lines = ownerWork.threads
+    .slice(0, SPACE_BRIEF_LIMITS.ownerWorkThreads)
+    .map((thread) => ownerWorkLine(thread, ownerWork.nowMs));
+  if (lines.length === 0) return OWNER_WORK_EMPTY;
+  const total = Math.max(ownerWork.totalThreads, ownerWork.threads.length);
+  const render = (shown: ReadonlyArray<string>) => {
+    const omitted = total - shown.length;
+    return omitted === 0
+      ? shown.join("\n")
+      : [...shown, `[${omitted} more thread${omitted === 1 ? "" : "s"} not shown]`].join("\n");
+  };
+  let shown = lines.length;
+  while (shown > 0 && render(lines.slice(0, shown)).length > SPACE_BRIEF_LIMITS.ownerWorkChars) {
+    shown -= 1;
+  }
+  return render(lines.slice(0, shown));
+};
+
 const orderBriefMemories = (
   memories: ReadonlyArray<SpaceBriefMemory>,
 ): ReadonlyArray<SpaceBriefMemory> =>
@@ -340,9 +493,9 @@ const orderBriefItems = (items: ReadonlyArray<SpaceBriefItem>): ReadonlyArray<Sp
 /**
  * Render the bounded Space brief: approved Memory (procedure, decision, fact,
  * preference; newest first within a kind), open Items, mail and calendar (when
- * supplied), and recent activity.
- * Returns an empty string when there is nothing to report, so callers can
- * inject it unconditionally.
+ * supplied), owner work (when supplied), and recent activity grouped by source.
+ * Returns an empty string when there is nothing to report (an empty Owner
+ * work section alone is nothing), so callers can inject it unconditionally.
  */
 export const renderSpaceBrief = (input: SpaceBriefInput): string => {
   const memoryLines = orderBriefMemories(input.memories).map(
@@ -353,15 +506,7 @@ export const renderSpaceBrief = (input: SpaceBriefInput): string => {
     (item) =>
       `- ${itemNeedsYou(item) ? "[needs you] " : ""}${item.kind}/${item.status}, ${item.priority}: ${clipBriefLine(item.title, SPACE_BRIEF_LIMITS.itemTitleChars)} (item ${clipBriefLine(item.id, 80)})`,
   );
-  const activityLines = (input.activity ?? EMPTY_SPACE_ACTIVITY)
-    .toSorted((left, right) =>
-      left.occurredAt < right.occurredAt ? 1 : left.occurredAt > right.occurredAt ? -1 : 0,
-    )
-    .map((entry) => {
-      const summary = clipBriefLine(entry.summary, SPACE_BRIEF_LIMITS.activitySummaryChars);
-      const url = entry.url === undefined ? "" : ` <${clipBriefLine(entry.url, 200)}>`;
-      return `- ${clipBriefLine(entry.occurredAt, 40)} [${clipBriefLine(entry.status, 24)}] ${clipBriefLine(entry.title, SPACE_BRIEF_LIMITS.activityTitleChars)}${summary.length === 0 ? "" : `: ${summary}`}${url}`;
-    });
+  const activity = input.activity ?? EMPTY_SPACE_ACTIVITY;
   const sections: Array<string> = [];
   if (memoryLines.length > 0) {
     sections.push(
@@ -375,13 +520,14 @@ export const renderSpaceBrief = (input: SpaceBriefInput): string => {
   const mailCalendar =
     input.mailCalendar === undefined ? undefined : renderMailCalendarSection(input.mailCalendar);
   if (mailCalendar !== undefined) sections.push(mailCalendar);
-  if (activityLines.length > 0) {
-    sections.push(
-      "Recent Space activity (untrusted reference)",
-      fillBudget(activityLines, SPACE_BRIEF_LIMITS.activityChars),
-    );
+  const reportable = sections.length > 0 || activity.length > 0;
+  if (input.ownerWork !== undefined) {
+    sections.push(OWNER_WORK_HEADER, renderOwnerWorkLines(input.ownerWork));
   }
-  if (sections.length === 0) return "";
+  if (activity.length > 0) {
+    sections.push("Recent Space activity (untrusted reference)", renderActivityLines(activity));
+  }
+  if (!reportable && (input.ownerWork?.threads.length ?? 0) === 0) return "";
   return [
     `Space brief: ${clipBriefLine(input.space.displayName, 120)} (${clipBriefLine(input.space.id, 80)})`,
     ...sections,
@@ -403,6 +549,140 @@ interface ItemBriefRow {
   readonly title: string;
   readonly updatedAt: string;
 }
+
+interface OwnerWorkRow {
+  readonly title: string;
+  readonly projectId: string;
+  readonly projectTitle: string | null;
+  readonly lastActiveAt: string;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+  readonly pullRequestsJson: string | null;
+  readonly totalThreads: number;
+}
+
+const decodeRepositoryBindings = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Array(RepositoryBinding)),
+);
+
+/** The fields of a thread's pull request links the brief shows (other fields are ignored). */
+const decodePullRequestLinks = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Array(
+      Schema.Struct({
+        number: Schema.Number,
+        source: Schema.optional(Schema.String),
+        linkedAt: Schema.optional(Schema.String),
+        snapshot: Schema.optional(Schema.NullOr(Schema.Struct({ state: Schema.String }))),
+      }),
+    ),
+  ),
+);
+
+const pullRequestsOf = (json: string | null): ReadonlyArray<SpaceBriefPullRequest> =>
+  json === null
+    ? []
+    : Option.getOrElse(decodePullRequestLinks(json), () => [])
+        // A `stack-dismissed` link is a tombstone for a PR the user unlinked.
+        .filter((link) => link.source !== "stack-dismissed")
+        .toSorted(
+          (left, right) =>
+            (right.linkedAt ?? "").localeCompare(left.linkedAt ?? "") || right.number - left.number,
+        )
+        .map((link) =>
+          link.snapshot == null
+            ? { number: link.number }
+            : { number: link.number, state: link.snapshot.state },
+        );
+
+/**
+ * The label of a project the activity feed already matched to this Space: the
+ * binding that names the project, else the only binding that matches by
+ * remote alone, else (ambiguous) the project title. Only labels; whether the
+ * project belongs to the Space was decided when the row was recorded.
+ */
+const repositoryLabel = (
+  bindings: ReadonlyArray<RepositoryBinding>,
+  projectId: string,
+  projectTitle: string | null,
+): string | undefined => {
+  const named = bindings.filter((binding) => binding.projectId === projectId);
+  const candidates =
+    named.length > 0 ? named : bindings.filter((binding) => binding.projectId === undefined);
+  return candidates.length === 1 ? candidates[0]?.id : (projectTitle ?? undefined);
+};
+
+/**
+ * The "Owner work" input: distinct threads with a Space activity row in the
+ * last `ownerWorkWindowHours`, newest first. Thread rows are written only for
+ * threads whose project matches one of the Space's repository bindings
+ * (`resolveSpaceIdsForProject` in `SpaceActivityReactor`), never for Run
+ * threads or the agent's own thread, so the feed is the matching. Branch,
+ * worktree and linked pull requests (the links `link_pull_request` keeps on the
+ * thread) come from the thread projection in the same query. Undefined when
+ * `now` is not a timestamp.
+ */
+const loadSpaceOwnerWork = Effect.fn("SpaceBrief.loadOwnerWork")(function* (input: {
+  readonly spaceId: string;
+  readonly now: string;
+}) {
+  const sql = yield* SqlClient.SqlClient;
+  const now = DateTime.make(input.now);
+  if (Option.isNone(now)) return undefined;
+  const since = DateTime.formatIso(
+    DateTime.subtract(now.value, { hours: SPACE_BRIEF_LIMITS.ownerWorkWindowHours }),
+  );
+  const spaceRows = yield* sql<{ readonly repositoriesJson: string }>`
+    SELECT repositories_json AS "repositoriesJson"
+    FROM command_center_spaces
+    WHERE id = ${input.spaceId}
+  `;
+  const bindings = Option.getOrElse(
+    decodeRepositoryBindings(spaceRows[0]?.repositoriesJson ?? "[]"),
+    () => [],
+  );
+  const rows = yield* sql<OwnerWorkRow>`
+    WITH recent AS (
+      SELECT source_id AS thread_id, MAX(occurred_at) AS last_active_at
+      FROM command_center_space_activity
+      WHERE space_id = ${input.spaceId}
+        AND source_kind = 'thread'
+        AND occurred_at >= ${since}
+      GROUP BY source_id
+    )
+    SELECT t.title, t.project_id AS "projectId",
+      p.title AS "projectTitle", recent.last_active_at AS "lastActiveAt",
+      json_extract(t.payload_json, '$.branch') AS branch,
+      json_extract(t.payload_json, '$.worktreePath') AS "worktreePath",
+      json_extract(t.payload_json, '$.pullRequests') AS "pullRequestsJson",
+      COUNT(*) OVER () AS "totalThreads"
+    FROM recent
+    JOIN orchestration_v2_projection_threads t ON t.thread_id = recent.thread_id
+    LEFT JOIN projection_projects p ON p.project_id = t.project_id
+    WHERE t.deleted_at IS NULL
+    ORDER BY recent.last_active_at DESC, recent.thread_id
+    LIMIT ${SPACE_BRIEF_LIMITS.ownerWorkThreads}
+  `;
+  const nowMs = DateTime.toEpochMillis(now.value);
+  return {
+    nowMs,
+    threads: rows.map((row) => {
+      const lastActive = DateTime.make(row.lastActiveAt);
+      const repository = repositoryLabel(bindings, row.projectId, row.projectTitle);
+      return {
+        title: row.title,
+        lastActiveAtMs: Option.isSome(lastActive)
+          ? DateTime.toEpochMillis(lastActive.value)
+          : nowMs,
+        ...(repository === undefined ? {} : { repository }),
+        ...(row.branch === null ? {} : { branch: row.branch }),
+        ...(row.worktreePath === null ? {} : { worktreePath: row.worktreePath }),
+        pullRequests: pullRequestsOf(row.pullRequestsJson),
+      };
+    }),
+    totalThreads: rows[0]?.totalThreads ?? 0,
+  } satisfies SpaceBriefOwnerWork;
+});
 
 /**
  * Read the brief inputs for one Space. Repository-scoped Memory is included
@@ -438,16 +718,27 @@ export const loadSpaceBriefInput = Effect.fn("SpaceBrief.loadInput")(function* (
     LIMIT ${SPACE_BRIEF_LIMITS.itemRows}
   `;
   // The activity feed spans every repository in the Space, so (like the
-  // `cc_space_activity` tool) a repository-scoped brief leaves it out. A feed
-  // that cannot be read drops the section rather than the brief. Mail and
-  // calendar rows stay out (the query's default): this brief also reaches
-  // callers without a Google capability, and the Space agent already gets them
-  // in its wake delta and the "Mail + calendar" section.
+  // `cc_space_activity` tool) a repository-scoped brief leaves it and Owner
+  // work out. A feed that cannot be read drops the section rather than the
+  // brief. Mail and calendar rows stay out (the query's default): this brief
+  // also reaches callers without a Google capability, and the Space agent
+  // already gets them in its wake delta and the "Mail + calendar" section.
+  const ownerWork =
+    input.repositoryId === undefined
+      ? yield* loadSpaceOwnerWork({ spaceId: input.space.id, now: input.now }).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Space brief owner work is unavailable", {
+              message: error.message,
+            }).pipe(Effect.as(undefined)),
+          ),
+        )
+      : undefined;
   const activity =
     input.repositoryId === undefined
       ? yield* queryRecentSpaceActivity({
           spaceId: input.space.id,
-          limit: SPACE_BRIEF_LIMITS.activityRows,
+          limit: SPACE_BRIEF_LIMITS.activityScanRows,
+          maxLimit: SPACE_BRIEF_LIMITS.activityScanRows,
         }).pipe(
           Effect.catch((error) =>
             Effect.logWarning("Space brief activity is unavailable", {
@@ -465,6 +756,7 @@ export const loadSpaceBriefInput = Effect.fn("SpaceBrief.loadInput")(function* (
       ...(row.repositoryRef === null ? {} : { repositoryId: row.repositoryRef }),
     })),
     openItems: itemRows,
+    ownerWork,
     activity,
   } satisfies SpaceBriefInput;
 });
