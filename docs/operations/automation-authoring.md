@@ -37,6 +37,16 @@ Committed definitions are resolved from the checkout's `HEAD` tree by their defi
 not by assuming the JSON filename matches the automation id. Read-only viewing therefore also works
 from a detached checkout; creation and editing still require a checked-out named branch.
 
+## Blocked agent steps
+
+When an automation's agent step is blocked by Space policy, the Run fails and Needs You shows one
+high-priority alert for that automation, not one per Run. Each further blocked Run updates the
+alert's body ("Seen N times since …, last …") and keeps it open. The first Run of an automation
+that routes again closes the alert (`done`); if the automation breaks later, the same alert
+reopens as a new occurrence. Closing or cancelling the alert does not silence the automation: the
+next blocked Run reopens it. Blocked commands that do not come from an automation still file one
+alert per Run.
+
 ## Atomic publication and recovery
 
 Authoring stages exact service-decoded bytes under `.git/command-center-recovery/<transaction>/`. A

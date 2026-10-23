@@ -167,6 +167,16 @@ const nextItemUpdatedAt = (current: string, observed: string): string => {
 
 const APPROVAL_TTL_HOURS = 24;
 
+const BLOCKED_ROUTE_ITEM_PREFIX = "blocked-route:";
+const BLOCKED_ROUTE_ITEM_TITLE = "Command was blocked by policy";
+const blockedRouteAutomationItemId = (automationId: string) =>
+  `${BLOCKED_ROUTE_ITEM_PREFIX}automation:${automationId}`;
+
+/** What an automation's open blocked-route alert remembers between occurrences. */
+const decodeBlockedRouteMetadata = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ occurrences: Schema.Number, firstSeenAt: Schema.String })),
+);
+
 export const canonicalAutomationRunState = (
   state:
     | "queued"
@@ -524,6 +534,15 @@ export interface CommandCenterItemActor {
   readonly threadId: string;
 }
 
+/**
+ * What the in-process caller knows about a command's origin. The automation
+ * runtime sets `automationId` so that every blocked Run of one automation
+ * shares a single Needs You alert instead of filing one per Run.
+ */
+export interface CommandCenterSubmitOptions {
+  readonly automationId?: string;
+}
+
 export interface CommandCenterServiceShape {
   readonly bootstrap: Effect.Effect<CommandCenterBootstrap, CommandCenterError>;
   readonly syncConfiguration: (input?: {
@@ -574,6 +593,7 @@ export interface CommandCenterServiceShape {
   readonly submitCommand: (
     input: CommandCenterCommandSubmitInput,
     providers: ReadonlyArray<ProviderAvailability>,
+    options?: CommandCenterSubmitOptions,
   ) => Effect.Effect<CommandCenterCommandSubmitResultType, CommandCenterError>;
   readonly authorizeRunExecution: (input: {
     readonly runId: RunType["id"];
@@ -2092,10 +2112,142 @@ export const layer = Layer.effect(
       ),
     );
 
+    /**
+     * The single open "blocked by policy" alert of a recurring source. The first
+     * blocked Run files it; later ones update it in place (count, last-seen,
+     * latest Run) so a broken automation never piles up one alert per Run. A
+     * closed alert is reopened as a fresh occurrence. Reopening or filing it also
+     * cancels the open per-Run alerts older code filed for the same automation,
+     * in one bounded statement (idempotent: they are no longer open afterwards).
+     * Runs inside the caller's transaction. Automation ids are globally unique
+     * (`command_center_automations` primary key), so the Space guard only
+     * documents the scope.
+     */
+    const fileAutomationBlockedAlert = Effect.fn("CommandCenter.fileAutomationBlockedAlert")(
+      function* (input: {
+        readonly spaceId: string;
+        readonly automationId: string;
+        readonly runId: string;
+        readonly actionKind: string;
+        readonly reasons: string;
+        readonly now: string;
+      }) {
+        const itemId = blockedRouteAutomationItemId(input.automationId);
+        const rows = yield* sql<{
+          readonly status: string;
+          readonly metadataJson: string;
+          readonly updatedAt: string;
+        }>`
+          SELECT status, metadata_json AS "metadataJson", updated_at AS "updatedAt"
+          FROM command_center_items
+          WHERE id = ${itemId} AND space_id = ${input.spaceId}
+          LIMIT 1
+        `;
+        const existing = rows[0];
+        const open = existing !== undefined && !["done", "canceled"].includes(existing.status);
+        const prior = open ? decodeBlockedRouteMetadata(existing.metadataJson) : Option.none();
+        const occurrences = Option.match(prior, {
+          onNone: () => 1,
+          onSome: (value) => value.occurrences + 1,
+        });
+        const firstSeenAt = Option.match(prior, {
+          onNone: () => input.now,
+          onSome: (value) => value.firstSeenAt,
+        });
+        const body =
+          occurrences === 1
+            ? input.reasons
+            : `${input.reasons}\n\nSeen ${occurrences} times since ${firstSeenAt}, last ${input.now}.`;
+        const metadata = stringify({
+          type: "blocked-route",
+          automationId: input.automationId,
+          runId: input.runId,
+          actionKind: input.actionKind,
+          occurrences,
+          firstSeenAt,
+        });
+        if (existing === undefined) {
+          yield* sql`
+            INSERT INTO command_center_items (
+              id, space_id, kind, status, title, body, priority,
+              source_json, metadata_json, created_at, updated_at
+            ) VALUES (
+              ${itemId}, ${input.spaceId}, 'alert', 'review', ${BLOCKED_ROUTE_ITEM_TITLE},
+              ${body}, 'high',
+              ${stringify({ kind: "agent", sourceRef: input.runId, capturedAt: input.now })},
+              ${metadata}, ${input.now}, ${input.now}
+            )
+          `;
+        } else {
+          yield* sql`
+            UPDATE command_center_items
+            SET status = 'review', body = ${body}, metadata_json = ${metadata},
+              updated_at = ${nextItemUpdatedAt(existing.updatedAt, input.now)}
+            WHERE id = ${itemId} AND space_id = ${input.spaceId}
+          `;
+        }
+        if (!open) {
+          // The owning automation of an old per-Run alert is the automation
+          // Run its Run was linked to (`parent_run_id`). An alert whose Run row
+          // is gone cannot be traced, so it is matched by its identical text.
+          yield* sql`
+            UPDATE command_center_items
+            SET status = 'canceled', updated_at = ${input.now}
+            WHERE space_id = ${input.spaceId}
+              AND id LIKE ${`${BLOCKED_ROUTE_ITEM_PREFIX}%`} AND id != ${itemId}
+              AND status NOT IN ('done', 'canceled')
+              AND CASE WHEN json_valid(metadata_json)
+                THEN json_extract(metadata_json, '$.type') END = 'blocked-route'
+              AND (
+                EXISTS (
+                  SELECT 1
+                  FROM command_center_runs run
+                  JOIN command_center_runs parent
+                    ON parent.id = run.parent_run_id AND parent.kind = 'automation'
+                  WHERE run.id = substr(command_center_items.id, ${BLOCKED_ROUTE_ITEM_PREFIX.length + 1})
+                    AND parent.space_id = ${input.spaceId}
+                    AND json_extract(parent.route_json, '$.automationId') = ${input.automationId}
+                )
+                OR (
+                  NOT EXISTS (
+                    SELECT 1 FROM command_center_runs run
+                    WHERE run.id = substr(command_center_items.id, ${BLOCKED_ROUTE_ITEM_PREFIX.length + 1})
+                  )
+                  AND title = ${BLOCKED_ROUTE_ITEM_TITLE} AND body = ${input.reasons}
+                )
+              )
+          `;
+        }
+        return {
+          itemId,
+          change: existing === undefined ? ("created" as const) : ("updated" as const),
+        };
+      },
+    );
+
+    /** A routable Run of an automation clears that automation's open blocked-route alert. */
+    const closeAutomationBlockedAlert = Effect.fn("CommandCenter.closeAutomationBlockedAlert")(
+      function* (input: {
+        readonly spaceId: string;
+        readonly automationId: string;
+        readonly now: string;
+      }) {
+        const closed = yield* sql<{ readonly id: string }>`
+          UPDATE command_center_items
+          SET status = 'done', updated_at = ${input.now}
+          WHERE id = ${blockedRouteAutomationItemId(input.automationId)}
+            AND space_id = ${input.spaceId} AND status NOT IN ('done', 'canceled')
+          RETURNING id
+        `;
+        return closed[0]?.id;
+      },
+    );
+
     const submitCommand = Effect.fn("CommandCenter.submitCommand")(
       function* (
         input: CommandCenterCommandSubmitInput,
         providers: ReadonlyArray<ProviderAvailability>,
+        options?: CommandCenterSubmitOptions,
       ) {
         const loaded = yield* syncConfig(false);
         if (loaded.health.status !== "loaded") {
@@ -2327,6 +2479,8 @@ export const layer = Layer.effect(
                 }
               | undefined;
             let blockedItemId: string | undefined;
+            let blockedItemChange: "created" | "updated" = "created";
+            let clearedItemId: string | undefined;
             yield* sql`
             INSERT INTO command_center_runs (
               id, command_id, space_id, project_id, kind, state, route_json, input_json,
@@ -2376,15 +2530,34 @@ export const layer = Layer.effect(
               requestedApproval = { approvalId, itemId, payloadDigest };
             }
 
-            if (route.status === "blocked") {
-              blockedItemId = `blocked-route:${run.id}`;
+            if (route.status !== "blocked") {
+              if (options?.automationId !== undefined) {
+                clearedItemId = yield* closeAutomationBlockedAlert({
+                  spaceId: selectedSpace.id,
+                  automationId: options.automationId,
+                  now,
+                });
+              }
+            } else if (options?.automationId !== undefined) {
+              const filed = yield* fileAutomationBlockedAlert({
+                spaceId: selectedSpace.id,
+                automationId: options.automationId,
+                runId: run.id,
+                actionKind: route.actionKind,
+                reasons: route.reasons.join("\n"),
+                now,
+              });
+              blockedItemId = filed.itemId;
+              blockedItemChange = filed.change;
+            } else {
+              blockedItemId = `${BLOCKED_ROUTE_ITEM_PREFIX}${run.id}`;
               yield* sql`
                 INSERT INTO command_center_items (
                   id, space_id, kind, status, title, body, priority,
                   source_json, metadata_json, created_at, updated_at
                 ) VALUES (
                   ${blockedItemId}, ${selectedSpace.id}, 'alert', 'review',
-                  'Command was blocked by policy', ${route.reasons.join("\n")}, 'high',
+                  ${BLOCKED_ROUTE_ITEM_TITLE}, ${route.reasons.join("\n")}, 'high',
                   ${stringify({ kind: "agent", sourceRef: run.id, capturedAt: now })},
                   ${stringify({ type: "blocked-route", runId: run.id, actionKind: route.actionKind })},
                   ${now}, ${now}
@@ -2452,9 +2625,25 @@ export const layer = Layer.effect(
                 runId: run.id,
                 payload: {
                   itemId: blockedItemId,
-                  change: "created",
+                  change: blockedItemChange,
                   kind: "alert",
                   status: "review",
+                },
+                occurredAt: now,
+              });
+            }
+            if (clearedItemId !== undefined) {
+              yield* appendAudit({
+                eventId: `blocked-route:${run.id}:item-cleared`,
+                actorKind: "system",
+                action: "cc.items.changed",
+                spaceId: selectedSpace.id,
+                runId: run.id,
+                payload: {
+                  itemId: clearedItemId,
+                  change: "updated",
+                  kind: "alert",
+                  status: "done",
                 },
                 occurredAt: now,
               });

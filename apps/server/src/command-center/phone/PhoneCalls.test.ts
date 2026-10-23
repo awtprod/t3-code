@@ -152,6 +152,26 @@ const makeLayer = (options: { readonly configured?: boolean } = {}) => {
             }
             return { id: input.requestId, updatedAt: existing[0]?.updatedAt ?? now };
           }).pipe(Effect.orDie),
+        // Applies the patch like the real service: only against the version the caller read.
+        updateItem: (input: {
+          readonly spaceId: string;
+          readonly itemId: string;
+          readonly expectedUpdatedAt: string;
+          readonly patch: { readonly status?: string; readonly description?: string };
+        }) =>
+          Effect.gen(function* () {
+            const now = DateTime.formatIso(yield* DateTime.now);
+            const rows = yield* sql<{ readonly id: string }>`
+              UPDATE command_center_items
+              SET status = COALESCE(${input.patch.status ?? null}, status),
+                body = COALESCE(${input.patch.description ?? null}, body), updated_at = ${now}
+              WHERE id = ${input.itemId} AND space_id = ${input.spaceId}
+                AND updated_at = ${input.expectedUpdatedAt}
+              RETURNING id
+            `;
+            if (rows.length === 0) return yield* Effect.die("updateItem read a stale version");
+            return { duplicate: false };
+          }).pipe(Effect.orDie),
       } as unknown as CommandCenterServiceShape;
     }),
   );
@@ -195,6 +215,15 @@ const phoneRows = Effect.gen(function* () {
     FROM command_center_space_activity WHERE space_id = ${SPACE} ORDER BY id ASC
   `;
 });
+
+const itemState = (itemId: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{ readonly status: string; readonly body: string }>`
+      SELECT status, body FROM command_center_items WHERE id = ${itemId}
+    `.pipe(Effect.orDie);
+    return rows[0]!;
+  });
 
 const plan = {
   spaceId: SpaceId.make(SPACE),
@@ -601,9 +630,16 @@ describe("PhoneCallProposals", () => {
       expect(refused.message).toMatch(/approval authority/u);
       expect((yield* inboxVersion(filed.itemId)).status).toBe("candidate");
       expect(harness.dialed).toEqual([]);
+      expect((yield* itemState(filed.itemId)).status).toBe("captured");
 
+      const versionBeforeAccept = (yield* inboxVersion(filed.itemId)).version;
       const accepted = yield* accept(filed, { canApprove: true });
       expect(accepted.duplicate).toBe(false);
+      // The placed call closes the Item so it leaves Needs You, with the outcome on it.
+      expect(yield* itemState(filed.itemId)).toMatchObject({
+        status: "done",
+        body: expect.stringContaining(`${DAYTIME}: Call placed (conversation conv_1).`),
+      });
       expect(harness.dialed).toEqual([
         {
           apiKey: connection.apiKey,
@@ -622,23 +658,118 @@ describe("PhoneCallProposals", () => {
           },
         },
       ]);
-      // Replaying the same accept is a duplicate and never dials again.
+      // Replaying the same accept (the Item is closed now) is a duplicate and never dials again.
       const proposals = yield* PhoneCallProposals.PhoneCallProposals;
       const replay = yield* proposals.acceptCandidate(
         {
           spaceId: SpaceId.make(SPACE),
           itemId: ItemId.make(filed.itemId),
           mutationId: "web:accept-1",
-          expectedVersion: (yield* inboxVersion(filed.itemId)).version - 1,
+          expectedVersion: versionBeforeAccept,
           candidateRevisionId: filed.candidateRevisionId,
         },
         { subject: "andrew", canApprove: true },
       );
       expect(replay.duplicate).toBe(true);
       expect(harness.dialed).toHaveLength(1);
+      expect((yield* itemState(filed.itemId)).status).toBe("done");
       expect((yield* phoneRows).map((row) => [row.sourceId, row.status])).toEqual([
         ["phone-start:conv_1", "calling-third-party"],
       ]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("does not approve a call on an Item that is already closed", () => {
+    const { harness, layer } = makeLayer();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(epoch(DAYTIME));
+      yield* seedSpace;
+      const filed = yield* fileCall();
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE command_center_items SET status = 'done' WHERE id = ${filed.itemId}`;
+      const error = yield* Effect.flip(accept(filed, { canApprove: true }));
+      expect(error.reason).toBe("conflict");
+      expect(error.message).toMatch(/Reopen this Item/u);
+      expect((yield* inboxVersion(filed.itemId)).status).toBe("candidate");
+      expect(harness.requested).toEqual([]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("cancels the Item when its call plan is declined, without dialing", () => {
+    const { harness, layer } = makeLayer();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(epoch(DAYTIME));
+      yield* seedSpace;
+      const filed = yield* fileCall();
+      const proposals = yield* PhoneCallProposals.PhoneCallProposals;
+      const decline = {
+        spaceId: SpaceId.make(SPACE),
+        itemId: ItemId.make(filed.itemId),
+        mutationId: "web:decline-1",
+        expectedVersion: (yield* inboxVersion(filed.itemId)).version,
+        candidateRevisionId: filed.candidateRevisionId,
+      };
+      const declined = yield* proposals.discardCandidate(decline, { subject: "andrew" });
+      expect(declined.duplicate).toBe(false);
+      expect((yield* inboxVersion(filed.itemId)).status).toBe("discarded");
+      expect(yield* itemState(filed.itemId)).toMatchObject({
+        status: "canceled",
+        body: expect.stringContaining(`${DAYTIME}: Call declined.`),
+      });
+      // A replayed decline is a duplicate: it records nothing new.
+      const replay = yield* proposals.discardCandidate(decline, { subject: "andrew" });
+      expect(replay.duplicate).toBe(true);
+      expect(harness.requested).toEqual([]);
+      expect(yield* phoneRows).toEqual([]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("leaves the Item of a candidate that is not a phone call alone when discarded", () => {
+    const { layer } = makeLayer();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(epoch(DAYTIME));
+      yield* seedSpace;
+      const service = yield* CommandCenterService;
+      const item = yield* service.createItem({
+        requestId: "plain-1",
+        spaceId: SpaceId.make(SPACE),
+        kind: "decision",
+        priority: "normal",
+        title: "File the quarterly report",
+        description: "Ready to file.",
+      });
+      const inbox = yield* CommandCenterInbox.CommandCenterInbox;
+      yield* inbox.createCandidate(
+        {
+          spaceId: SpaceId.make(SPACE),
+          itemId: ItemId.make(item.id),
+          mutationId: "web:plain-candidate",
+          expectedVersion: 0,
+          source: "direct",
+          payload: {
+            kind: "prepared-action",
+            actionKind: "report.file",
+            target: { kind: "report", id: "quarterly" },
+            parameters: {},
+          },
+          preview: { summary: "File the report", after: "Filed." },
+          evidence: { source: "command-center-item", subjectId: item.id, version: item.updatedAt },
+        },
+        { subject: "operator" },
+      );
+      const proposals = yield* PhoneCallProposals.PhoneCallProposals;
+      yield* proposals.discardCandidate(
+        {
+          spaceId: SpaceId.make(SPACE),
+          itemId: ItemId.make(item.id),
+          mutationId: "web:plain-discard",
+          expectedVersion: (yield* inboxVersion(item.id)).version,
+          candidateRevisionId: "revision:web:plain-candidate",
+        },
+        { subject: "andrew" },
+      );
+      expect((yield* inboxVersion(item.id)).status).toBe("discarded");
+      expect((yield* itemState(item.id)).status).toBe("captured");
     }).pipe(Effect.provide(layer));
   });
 
@@ -684,8 +815,36 @@ describe("PhoneCallProposals", () => {
         },
       ]);
       expect(harness.dialed).toEqual([]);
+      // The Item stays in Needs You, now saying why.
+      expect(yield* itemState(filed.itemId)).toMatchObject({
+        status: "captured",
+        body: expect.stringContaining(`${DAYTIME}: Not placed: ElevenLabs refused the call`),
+      });
     }).pipe(Effect.provide(layer));
   });
+
+  it.effect(
+    "keeps the Item open with the reason when the daily cap refuses an approved call",
+    () => {
+      const { harness, layer } = makeLayer();
+      return Effect.gen(function* () {
+        yield* TestClock.setTime(epoch(DAYTIME));
+        yield* seedSpace;
+        const calls = yield* PhoneCalls.PhoneCalls;
+        for (let index = 0; index < 5; index += 1) {
+          expect((yield* calls.callThirdParty(plan)).placed).toBe(true);
+        }
+        const filed = yield* fileCall();
+        const error = yield* Effect.flip(accept(filed, { canApprove: true }));
+        expect(error.message).toMatch(/not placed: 5 third-party calls were already placed/u);
+        expect(harness.requested).toHaveLength(5);
+        expect(yield* itemState(filed.itemId)).toMatchObject({
+          status: "captured",
+          body: expect.stringContaining("Not placed: 5 third-party calls were already placed"),
+        });
+      }).pipe(Effect.provide(layer));
+    },
+  );
 
   it.effect("re-checks the live Space policy before dialing an approved call", () => {
     const { harness, layer } = makeLayer();
@@ -710,6 +869,12 @@ describe("PhoneCallProposals", () => {
         [`phone-not-placed:${narrowed.candidateRevisionId}`, "not-placed"],
       ]);
       expect(harness.requested).toEqual([]);
+      for (const filed of [disabled, narrowed]) {
+        expect(yield* itemState(filed.itemId)).toMatchObject({
+          status: "captured",
+          body: expect.stringContaining("Not placed: policy: "),
+        });
+      }
     }).pipe(Effect.provide(layer));
   });
 
@@ -847,6 +1012,11 @@ describe("PhoneCallProposals", () => {
         },
       ]);
       expect(rows.filter((row) => row.status === "not-placed")).toEqual([]);
+      // The call may be ringing: the Item stays open and says not to retry.
+      expect(yield* itemState(filed.itemId)).toMatchObject({
+        status: "captured",
+        body: expect.stringContaining("Outcome unknown, do not retry: Call outcome unknown"),
+      });
       // The revision stays accepted, like a dialed call: accepting it again never dials.
       expect((yield* inboxVersion(filed.itemId)).status).toBe("current");
       const again = yield* Effect.flip(

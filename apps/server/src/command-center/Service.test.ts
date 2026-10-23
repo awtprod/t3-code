@@ -3074,3 +3074,262 @@ it.effect("marks Space agent Items and queues the user's replies on them for the
     ]);
   }).pipe(Effect.provide(makeTestLayer())),
 );
+
+// The studio Space with its run capability withdrawn: starting work is blocked.
+const runsBlockedConfig = {
+  ...loadedConfig,
+  spaces: [
+    decodeSpace({
+      ...studioSpace,
+      policy: { allowedCapabilities: ["cc.items.read"], autoRunRiskLevels: ["low"] },
+    }),
+    systemSpace,
+    personalSpace,
+  ],
+} satisfies LoadedCommandCenterConfig;
+
+const blockedRouteAlerts = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return yield* sql<{
+    readonly id: string;
+    readonly status: string;
+    readonly title: string;
+    readonly body: string;
+    readonly priority: string;
+    readonly metadataJson: string;
+    readonly updatedAt: string;
+  }>`
+    SELECT id, status, title, body, priority, metadata_json AS "metadataJson",
+      updated_at AS "updatedAt"
+    FROM command_center_items WHERE id LIKE 'blocked-route:%' ORDER BY id
+  `;
+});
+
+const startWork = (service: typeof CommandCenterService.Service, commandId: string) =>
+  service.submitCommand(
+    decodeCommand({
+      commandId,
+      text: "Start work on the Example Studio app",
+      spaceId: studioSpace.id,
+    }),
+    providers,
+  );
+
+it.effect("files one blocked-route alert per automation and updates it in place", () => {
+  let currentConfig: LoadedCommandCenterConfig = runsBlockedConfig;
+  return Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    const submit = (commandId: string, automationId?: string) =>
+      service.submitCommand(
+        decodeCommand({
+          commandId,
+          text: "Start work on the Example Studio app",
+          spaceId: studioSpace.id,
+        }),
+        providers,
+        automationId === undefined ? undefined : { automationId },
+      );
+
+    const first = yield* submit("command-auto-1", "automation-a");
+    const second = yield* submit("command-auto-2", "automation-a");
+    yield* submit("command-auto-3", "automation-b");
+    // A command with no recurring source still gets an alert of its own per Run.
+    const manualOne = yield* submit("command-manual-1");
+    const manualTwo = yield* submit("command-manual-2");
+    expect([first, second, manualOne, manualTwo].map((result) => result.route.status)).toEqual([
+      "blocked",
+      "blocked",
+      "blocked",
+      "blocked",
+    ]);
+
+    const reasons = first.route.reasons.join("\n");
+    const alerts = yield* blockedRouteAlerts;
+    expect(alerts.map((alert) => alert.id)).toEqual(
+      [
+        "blocked-route:automation:automation-a",
+        "blocked-route:automation:automation-b",
+        `blocked-route:${manualOne.run.id}`,
+        `blocked-route:${manualTwo.run.id}`,
+      ].toSorted(),
+    );
+    const alertA = alerts.find((alert) => alert.id.endsWith("automation-a"));
+    const alertB = alerts.find((alert) => alert.id.endsWith("automation-b"));
+    expect(alertA).toMatchObject({ status: "review", priority: "high" });
+    expect(alertA?.title).toBe("Command was blocked by policy");
+    expect(alertA?.body.startsWith(reasons)).toBe(true);
+    expect(alertA?.body).toMatch(/Seen 2 times since .+, last .+\./u);
+    expect(JSON.parse(alertA!.metadataJson)).toMatchObject({
+      type: "blocked-route",
+      automationId: "automation-a",
+      runId: second.run.id,
+      occurrences: 2,
+    });
+    // One occurrence: the body is just the reasons, as for any other alert.
+    expect(alertB?.body).toBe(reasons);
+
+    const changed = yield* sql<{ readonly payload: string }>`
+      SELECT payload_json AS payload FROM command_center_audit_events
+      WHERE run_id = ${second.run.id} AND action = 'cc.items.changed'
+    `;
+    expect(changed.map((event) => JSON.parse(event.payload))).toEqual([
+      {
+        itemId: "blocked-route:automation:automation-a",
+        change: "updated",
+        kind: "alert",
+        status: "review",
+      },
+    ]);
+    const needsYou = (yield* service.bootstrap).needsYou.filter((item) => item.kind === "alert");
+    expect(needsYou.map((item) => item.id).toSorted()).toEqual(alerts.map((alert) => alert.id));
+
+    // A later Run of the automation that routes clears its alert; the other stays.
+    currentConfig = loadedConfig;
+    yield* service.syncConfiguration({ force: true });
+    const healthy = yield* submit("command-auto-ok", "automation-a");
+    expect(healthy.route.status).not.toBe("blocked");
+    const afterHealthy = yield* blockedRouteAlerts;
+    expect(Object.fromEntries(afterHealthy.map((alert) => [alert.id, alert.status]))).toEqual({
+      "blocked-route:automation:automation-a": "done",
+      "blocked-route:automation:automation-b": "review",
+      [`blocked-route:${manualOne.run.id}`]: "review",
+      [`blocked-route:${manualTwo.run.id}`]: "review",
+    });
+    const cleared = yield* sql<{ readonly payload: string }>`
+      SELECT payload_json AS payload FROM command_center_audit_events
+      WHERE run_id = ${healthy.run.id} AND action = 'cc.items.changed'
+    `;
+    expect(cleared.map((event) => JSON.parse(event.payload))).toEqual([
+      {
+        itemId: "blocked-route:automation:automation-a",
+        change: "updated",
+        kind: "alert",
+        status: "done",
+      },
+    ]);
+    // A routable Run of an automation with no open alert changes nothing.
+    yield* submit("command-auto-ok-2", "automation-a");
+    expect(yield* blockedRouteAlerts).toEqual(afterHealthy);
+
+    // If it breaks again the same alert reopens as a fresh occurrence.
+    currentConfig = runsBlockedConfig;
+    yield* service.syncConfiguration({ force: true });
+    const again = yield* submit("command-auto-4", "automation-a");
+    const reopened = (yield* blockedRouteAlerts).find(
+      (alert) => alert.id === "blocked-route:automation:automation-a",
+    );
+    expect(reopened).toMatchObject({ status: "review", body: reasons });
+    expect(JSON.parse(reopened!.metadataJson)).toMatchObject({
+      runId: again.run.id,
+      occurrences: 1,
+    });
+    expect(
+      (yield* blockedRouteAlerts).filter((alert) => alert.id.includes("automation-a")),
+    ).toHaveLength(1);
+  }).pipe(Effect.provide(makeTestLayerFrom(Effect.sync(() => currentConfig))));
+});
+
+it.effect("collapses an automation's older per-Run alerts into its one alert, once", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    // Alerts filed before alerts were deduplicated: one per blocked Run.
+    const legacyRuns = [];
+    for (const index of [1, 2, 3, 4, 5]) {
+      legacyRuns.push(yield* startWork(service, `command-legacy-${index}`));
+    }
+    const sameAutomation = legacyRuns.slice(0, 4).map((result) => result.run.id);
+    const otherAutomation = legacyRuns[4]!.run.id;
+    const unrelated = yield* startWork(service, "command-legacy-manual");
+    const reasons = unrelated.route.reasons.join("\n");
+    const parent = (id: string, automationId: string) => sql`
+      INSERT INTO command_center_runs (
+        id, command_id, space_id, kind, state, route_json, input_json, started_at
+      ) VALUES (
+        ${id}, ${`automation:${id}`}, ${studioSpace.id}, 'automation', 'failed',
+        ${JSON.stringify({ automationId, actionKind: "automation.run" })}, '{}', ${fixtureTimestamp}
+      )
+    `;
+    yield* parent("execution-a", "automation-a");
+    yield* parent("execution-b", "automation-b");
+    for (const id of sameAutomation) {
+      yield* sql`UPDATE command_center_runs SET parent_run_id = 'execution-a' WHERE id = ${id}`;
+    }
+    yield* sql`
+      UPDATE command_center_runs SET parent_run_id = 'execution-b' WHERE id = ${otherAutomation}
+    `;
+    // An alert whose Run is gone cannot be traced to an automation: it is matched by its text.
+    const orphan = (id: string, body: string) => sql`
+      INSERT INTO command_center_items (
+        id, space_id, kind, status, title, body, priority,
+        source_json, metadata_json, created_at, updated_at
+      ) VALUES (
+        ${`blocked-route:${id}`}, ${studioSpace.id}, 'alert', 'review',
+        'Command was blocked by policy', ${body}, 'high', '{}',
+        ${JSON.stringify({ type: "blocked-route", runId: id })}, ${fixtureTimestamp}, ${fixtureTimestamp}
+      )
+    `;
+    yield* orphan("orphan-same-text", reasons);
+    yield* orphan("orphan-other-text", "Some other reason");
+    expect((yield* blockedRouteAlerts).filter((alert) => alert.status === "review")).toHaveLength(
+      8,
+    );
+
+    const first = yield* service.submitCommand(
+      decodeCommand({
+        commandId: "command-auto-first",
+        text: "Start work on the Example Studio app",
+        spaceId: studioSpace.id,
+      }),
+      providers,
+      { automationId: "automation-a" },
+    );
+    expect(first.route.status).toBe("blocked");
+    const open = (alerts: ReadonlyArray<{ readonly id: string; readonly status: string }>) =>
+      alerts.filter((alert) => alert.status === "review").map((alert) => alert.id);
+
+    const afterFirst = yield* blockedRouteAlerts;
+    // 8 open before: the 4 + 1 traced and 1 text-matched ones collapse into the automation's alert.
+    expect(open(afterFirst)).toEqual(
+      [
+        "blocked-route:automation:automation-a",
+        "blocked-route:orphan-other-text",
+        `blocked-route:${otherAutomation}`,
+        `blocked-route:${unrelated.run.id}`,
+      ].toSorted(),
+    );
+    expect(
+      afterFirst
+        .filter((alert) => alert.status === "canceled")
+        .map((alert) => alert.id)
+        .toSorted(),
+    ).toEqual(
+      [
+        ...sameAutomation.map((id) => `blocked-route:${id}`),
+        "blocked-route:orphan-same-text",
+      ].toSorted(),
+    );
+
+    // Later blocked Runs only update the alert: nothing else changes.
+    yield* service.submitCommand(
+      decodeCommand({
+        commandId: "command-auto-second",
+        text: "Start work on the Example Studio app",
+        spaceId: studioSpace.id,
+      }),
+      providers,
+      { automationId: "automation-a" },
+    );
+    const afterSecond = yield* blockedRouteAlerts;
+    expect(
+      afterSecond.filter((alert) => alert.id !== "blocked-route:automation:automation-a"),
+    ).toEqual(afterFirst.filter((alert) => alert.id !== "blocked-route:automation:automation-a"));
+    expect(
+      JSON.parse(
+        afterSecond.find((alert) => alert.id === "blocked-route:automation:automation-a")!
+          .metadataJson,
+      ),
+    ).toMatchObject({ occurrences: 2 });
+  }).pipe(Effect.provide(makeTestLayer(runsBlockedConfig))),
+);

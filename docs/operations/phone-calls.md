@@ -13,6 +13,9 @@ calls and SMS are not supported.
   it. **Approve and call** in the Inbox places the call; that accept needs the
   `command-center:approve` scope and a plan the Space agent filed itself, and it does not dial if
   the agent has since been disabled or lost `cc.phone.call` (a `Phone: not placed …` row says so).
+  A placed call closes the Item (`done`), so it leaves Needs You and cannot be approved twice. A
+  call that was not placed, or whose outcome is unknown, leaves the Item open with the reason
+  appended to its description.
 - During any call the voice agent can bridge the owner in ("patch me in") through ElevenLabs'
   `transfer_to_number` tool in conference mode. The owner hears a short brief before the callee is
   connected, and the voice agent leaves the call. With [conference mode](#5-conference-mode) the
