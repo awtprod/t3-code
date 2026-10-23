@@ -70,6 +70,7 @@ Command Center Run prompt in the Space includes it. The caps are constants
   and show at most 3 rows each, so one busy thread cannot fill the section. The
   last row a source shows ends with `(+k earlier rows in this thread)`. The closing
   `[n more not shown: …]` counts every row read but not shown, whatever the reason.
+- **Business context** (after Mail + calendar, before Owner work) shows the Space's `contextFeeds`, owner commands or files read by `SpaceContextFeeds.ts` before the agent's turn, in about 3,000 characters; see [Space context feeds](../operations/space-context-feeds.md).
 - **Owner work (last 48 h)** lists up to 10 threads with a feed row in the last 48
   hours, newest first, in about 1,500 characters. Each line gives the title, the
   repository binding id (the project title when no single binding names the
