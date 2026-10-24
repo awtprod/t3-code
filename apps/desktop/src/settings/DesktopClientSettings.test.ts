@@ -72,6 +72,7 @@ const clientSettings: ClientSettings = {
   sidebarThreadSortOrder: "created_at",
   sidebarThreadPreviewCount: 6,
   legacySidebarEnabled: false,
+  commandCenterSidebarShortcuts: ["new", "resources"],
   sidebarV2Enabled: false,
   sidebarV2ConfiguredByUser: false,
   sidebarWorkingShelfEnabled: false,
