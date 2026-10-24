@@ -277,6 +277,7 @@ function launchInput(input: {
   readonly thread: string;
   readonly message?: string;
   readonly workspace?: ThreadLaunch.ThreadLaunchWorkspaceStrategy;
+  readonly scheduledTaskId?: ScheduledTaskId;
 }) {
   return {
     commandId: CommandId.make(input.command),
@@ -292,6 +293,9 @@ function launchInput(input: {
       : {
           initialMessage: {
             messageId: MessageId.make(`${input.message}:id`),
+            ...(input.scheduledTaskId === undefined
+              ? {}
+              : { scheduledTaskId: input.scheduledTaskId }),
             text: input.message,
             attachments: [],
           },
@@ -1371,7 +1375,7 @@ it.effect("starts the worktree from the local base branch when origin cannot be 
 });
 
 it.effect(
-  "runs a worktree launch in the project folder when the project is not a repository",
+  "runs a scheduled task's worktree launch in the project folder when the project is not a repository",
   () => {
     const harness = makeHarness({ git: { isRepository: () => Effect.succeed(false) } });
     return Effect.gen(function* () {
@@ -1384,6 +1388,7 @@ it.effect(
           thread: "thread:launch:not-a-repository",
           message: "Run outside Git",
           workspace: { type: "worktree", baseRef: "main", startFromOrigin: true },
+          scheduledTaskId: ScheduledTaskId.make("scheduled-task:not-a-repository"),
         }),
       );
       yield* waitUntil(() =>
@@ -1397,6 +1402,39 @@ it.effect(
       assert.isNull(projection.thread.worktreePath);
       assert.equal(harness.createWorktree.mock.calls.length, 0);
       assert.equal(harness.runSetup.mock.calls[0]?.[0]?.worktreePath, project.workspaceRoot);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect(
+  "keeps an explicit worktree request on the provisioning path when the project is not a repository",
+  () => {
+    const harness = makeHarness({ git: { isRepository: () => Effect.succeed(false) } });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const launched = yield* launches.launch(
+        launchInput({
+          command: "command:launch:explicit-worktree-not-a-repository",
+          thread: "thread:launch:explicit-worktree-not-a-repository",
+          message: "Isolate me",
+          workspace: { type: "worktree", baseRef: "main", startFromOrigin: true },
+        }),
+      );
+      yield* waitUntil(() =>
+        outbox
+          .listByCommandId(
+            CommandId.make("command:launch:explicit-worktree-not-a-repository:release"),
+          )
+          .pipe(Effect.map((effects) => effects.length === 1)),
+      );
+      const projection = yield* threads.getThreadProjection(launched.threadId);
+      // The user asked for isolation, so the launch still provisions (and would
+      // surface a provisioning failure) instead of quietly running in the root.
+      assert.equal(harness.createWorktree.mock.calls.length, 1);
+      assert.notEqual(harness.runSetup.mock.calls[0]?.[0]?.worktreePath, project.workspaceRoot);
+      assert.isNotNull(projection.thread.worktreePath);
     }).pipe(Effect.provide(harness.layer));
   },
 );

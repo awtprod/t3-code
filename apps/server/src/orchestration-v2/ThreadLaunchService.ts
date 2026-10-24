@@ -299,23 +299,26 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * A stored `worktree` strategy (a scheduled task's, for one) can meet a
-   * project that is not a Git repository, such as the system project. There is
-   * nothing to branch from, so the run uses the project folder instead of
-   * failing in provisioning.
+   * A scheduled task's stored `worktree` strategy can meet a project that is
+   * not a Git repository, such as the system project. Nobody is there to pick
+   * another strategy, so its run uses the project folder instead of failing in
+   * provisioning. An explicit worktree request (UI, t3_thread_launch) keeps the
+   * provisioning failure: the caller asked for isolation and should hear that
+   * it is not available.
    */
   const rootOutsideRepository = Effect.fn("ThreadLaunchService.rootOutsideRepository")(function* (
     input: PreparationInput,
     workspaceRoot: string,
   ): Effect.fn.Return<PreparationInput> {
     if (input.workspaceStrategy.type !== "worktree") return input;
+    if (input.initialMessage?.scheduledTaskId === undefined) return input;
     // A check that cannot answer is left for provisioning to report.
     const isRepository = yield* git
       .isRepository(workspaceRoot)
       .pipe(Effect.orElseSucceed(() => true));
     if (isRepository) return input;
     yield* Effect.logWarning(
-      "Project is not a Git repository; running the thread in the project folder instead of a new worktree.",
+      "Project is not a Git repository; running the scheduled task in the project folder instead of a new worktree.",
       { commandId: input.commandId, projectId: input.projectId, workspaceRoot },
     );
     return { ...input, workspaceStrategy: { type: "root" } };
