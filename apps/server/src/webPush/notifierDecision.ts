@@ -4,7 +4,6 @@ import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
-import { isSpaceAgentThreadId } from "../command-center/SpaceAgentIds.ts";
 import { agentAwarenessPublishIdentity } from "../relay/AgentAwarenessRelay.ts";
 
 // A finished thread older than this is not worth ringing: the user has moved on.
@@ -26,11 +25,12 @@ function isNotifiablePhase(phase: RelayAgentActivityState["phase"]): boolean {
 }
 
 /**
- * A Space agent works unattended, so a finished or failed wake is not news: its
- * thread rings only when it waits on the user. Its questions ring as Items.
+ * Nobody is watching an unattended thread (the Space agent, scheduled runs,
+ * delegated work), so a finished or failed run is not news: it rings only when
+ * it waits on the user. Space agent questions ring separately as Items.
  */
-function isNotifiableState(state: RelayAgentActivityState): boolean {
-  return isSpaceAgentThreadId(state.threadId)
+function isNotifiableState(state: RelayAgentActivityState, unattended: boolean): boolean {
+  return unattended
     ? state.phase === "waiting_for_approval" || state.phase === "waiting_for_input"
     : isNotifiablePhase(state.phase);
 }
@@ -56,6 +56,8 @@ export type PublishAction =
  */
 export function decidePublishAction(input: {
   readonly state: RelayAgentActivityState | null;
+  /** The thread is unattended (`isUnattendedThread`): only waiting phases ring. */
+  readonly unattended?: boolean;
   readonly publishIdentity: string;
   readonly previousIdentity: string | undefined;
   readonly hasPrevious: boolean;
@@ -78,7 +80,7 @@ export function decidePublishAction(input: {
   }
   return {
     kind: "proceed",
-    notify: input.state !== null && isNotifiableState(input.state),
+    notify: input.state !== null && isNotifiableState(input.state, input.unattended === true),
   };
 }
 

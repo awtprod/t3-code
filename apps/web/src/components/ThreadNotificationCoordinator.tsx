@@ -3,6 +3,7 @@ import {
   presentThreadShell,
 } from "@t3tools/client-runtime/state/models";
 import { pendingSubagentRequestsByThread } from "@t3tools/client-runtime/state/threads";
+import { isUnattendedThread } from "@command-center/core";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
@@ -15,7 +16,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef } from "react";
 
-import { isSpaceAgentThreadId } from "../command-center/space-agent/SpaceAgent.logic";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import { useEnvironmentIds } from "../state/environments";
 import { environmentShell } from "../state/shell";
@@ -163,8 +163,8 @@ function EnvironmentNotifications({
             ? "completion"
             : null;
       if (!kind) continue;
-      // A Space agent works unattended: only its approval and input requests ring.
-      if (isSpaceAgentThreadId(thread.id) && status !== "input" && status !== "approval") continue;
+      // Nobody watches an unattended thread: only its approval and input requests ring.
+      if (isUnattendedThread(rawThread) && status !== "input" && status !== "approval") continue;
       const title =
         kind === "completion"
           ? "Thread completed"

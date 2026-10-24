@@ -7,6 +7,7 @@ import {
   EventId,
   ProviderInstanceId,
   ProviderSessionId,
+  RunId,
   ThreadId,
   type OrchestrationProjectShell,
   type OrchestrationV2AppThread,
@@ -307,6 +308,38 @@ describe("resolveAutoSettlementAt", () => {
     expect(
       ThreadSettlementService.resolveAutoSettlementAt({ ...input, thread: shell() }),
     ).toBeNull();
+  });
+
+  it("settles an unattended thread once its run completes, but keeps a failed one", () => {
+    const finished = {
+      createdBy: "system" as const,
+      latestRunId: RunId.make("run-1"),
+      latestUserMessageAt: at(-5 * 60_000),
+      latestRunRequestedAt: at(-5 * 60_000),
+      latestRunStartedAt: at(-5 * 60_000),
+      latestRunCompletedAt: at(-1_000),
+    };
+    const input = {
+      pullRequest: null,
+      nowMs: NOW_MS,
+      autoSettleAfterDays: 3,
+      autoSettleOnMerge: true,
+    };
+    const resolve = (overrides: Partial<SettlementShell>, autoSettleAfterDays: number | null = 3) =>
+      ThreadSettlementService.resolveAutoSettlementAt({
+        ...input,
+        autoSettleAfterDays,
+        thread: shell({ ...finished, ...overrides }),
+      });
+    expect(resolve({ status: "completed" })).toEqual(at(-1_000));
+    expect(resolve({ status: "completed", createdBy: "agent" })).toEqual(at(-1_000));
+    // A broken automation stays in view for the usual window.
+    expect(resolve({ status: "failed" })).toBeNull();
+    // Threads the user opened, including a Run they started, keep the usual window.
+    expect(resolve({ status: "completed", createdBy: "user" })).toBeNull();
+    expect(resolve({ status: "completed", id: ThreadId.make("cc:interactive:run-1") })).toBeNull();
+    // Turning inactivity settlement off covers unattended threads too.
+    expect(resolve({ status: "completed" }, null)).toBeNull();
   });
 
   it.each(["manual", "timer"])("restarts inactivity on a %s snooze wake", (wake) => {
@@ -816,6 +849,44 @@ describe("ThreadSettlementServiceV2 worker", () => {
           expect(commands).toHaveLength(1);
           expect(commands[0]?.settledAt).toEqual(thread.latestRunCompletedAt);
           expect(commands[0]?.snapshotAt).toEqual(thread.updatedAt);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("settles a finished unattended run on the next sweep", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const recent = (offsetMs: number) => DateTime.makeUnsafe(Date.parse(NOW) - offsetMs);
+        const finishedRun = {
+          createdBy: "system" as const,
+          latestRunId: RunId.make("run-1"),
+          latestUserMessageAt: recent(5 * 60_000),
+          latestRunRequestedAt: recent(5 * 60_000),
+          latestRunStartedAt: recent(5 * 60_000),
+          latestRunCompletedAt: recent(1_000),
+        };
+        const completed = makeThread("scheduled-completed", {
+          ...finishedRun,
+          status: "completed",
+        });
+        const failed = makeThread("scheduled-failed", { ...finishedRun, status: "failed" });
+        const userOpened = makeThread("user-completed", {
+          ...finishedRun,
+          createdBy: "user",
+          status: "completed",
+        });
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([completed, failed, userOpened]),
+          settings: { ...DEFAULT_SERVER_SETTINGS, sidebarAutoSettleAfterDays: 3 },
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+          const commands = yield* Ref.get(fixture.commands);
+          expect(commands.map((command) => command.threadId)).toEqual([completed.id]);
+          expect(commands[0]?.settledAt).toEqual(completed.latestRunCompletedAt);
         }).pipe(Effect.provide(fixture.layer));
       }),
     ),
