@@ -1084,6 +1084,11 @@ const make = Effect.gen(function* () {
               initialMessage: {
                 text: message.text,
                 attachments: message.attachments,
+                // A retry must still know the run belongs to a scheduled task,
+                // or the project-folder fallback would not apply to it.
+                ...(message.scheduledTaskId === undefined
+                  ? {}
+                  : { scheduledTaskId: message.scheduledTaskId }),
                 ...(message.context ? { context: message.context } : {}),
               },
             }),

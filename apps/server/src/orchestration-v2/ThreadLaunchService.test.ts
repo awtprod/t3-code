@@ -1439,6 +1439,64 @@ it.effect(
   },
 );
 
+it.effect(
+  "retries a scheduled task's preparation in the project folder when the project is not a repository",
+  () => {
+    let setupFailures = 1;
+    const harness = makeHarness({
+      git: { isRepository: () => Effect.succeed(false) },
+      runSetup: (input) =>
+        setupFailures-- > 0
+          ? Effect.fail(
+              new ProjectSetupScriptRunner.ProjectSetupScriptOperationError({
+                threadId: input.threadId,
+                worktreePath: input.worktreePath,
+                operation: "readSettings",
+                cause: new Error("Settings were briefly unreadable."),
+              }),
+            )
+          : Effect.succeed({ status: "no-script" as const }),
+    });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const launched = yield* launches.launch(
+        launchInput({
+          command: "command:launch:retry-not-a-repository",
+          thread: "thread:launch:retry-not-a-repository",
+          message: "Retry outside Git",
+          workspace: { type: "worktree", baseRef: "main", startFromOrigin: true },
+          scheduledTaskId: ScheduledTaskId.make("scheduled-task:retry-not-a-repository"),
+        }),
+      );
+      yield* waitUntil(() =>
+        threads
+          .getThreadProjection(launched.threadId)
+          .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
+      );
+      const failed = yield* threads.getThreadProjection(launched.threadId);
+      yield* launches.retryPreparation({
+        commandId: CommandId.make("command:launch:retry-not-a-repository:1"),
+        threadId: launched.threadId,
+        runId: failed.runs[0]!.id,
+      });
+      yield* waitUntil(() =>
+        outbox
+          .listByCommandId(CommandId.make("command:launch:retry-not-a-repository:1:release"))
+          .pipe(Effect.map((effects) => effects.length === 1)),
+      );
+      const retried = yield* threads.getThreadProjection(launched.threadId);
+      assert.equal(retried.runs[0]?.status, "starting");
+      // The retry rebuilt its input from the run and still knew it was a scheduled task.
+      assert.isNull(retried.thread.worktreePath);
+      assert.equal(harness.createWorktree.mock.calls.length, 0);
+      assert.equal(harness.runSetup.mock.calls.length, 2);
+      assert.equal(harness.runSetup.mock.calls[1]?.[0]?.worktreePath, project.workspaceRoot);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
 it.effect("retries a failed workspace preparation on the same run", () => {
   let failures = 1;
   const harness = makeHarness({
