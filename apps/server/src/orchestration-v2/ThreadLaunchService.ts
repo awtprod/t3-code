@@ -71,6 +71,14 @@ export interface ThreadLaunchInitialMessage {
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
+  /**
+   * Who wrote the message when it is not whoever opened the thread: a
+   * scheduled task's prompt is its author's, while the server opens the thread.
+   */
+  readonly author?: {
+    readonly createdBy: OrchestrationV2Actor;
+    readonly creationSource: OrchestrationV2CreationSource;
+  };
 }
 
 export interface ThreadLaunchInput {
@@ -919,8 +927,8 @@ const make = Effect.gen(function* () {
               ...(input.generateTitle === true ? { titleSeed: input.title } : {}),
               modelSelection: input.modelSelection,
               dispatchMode: { type: "defer_start", workspaceStrategy },
-              createdBy: input.createdBy,
-              creationSource: input.creationSource,
+              createdBy: input.initialMessage.author?.createdBy ?? input.createdBy,
+              creationSource: input.initialMessage.author?.creationSource ?? input.creationSource,
             })
             .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId)));
           const runCreated = dispatched.storedEvents.find(

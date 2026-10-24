@@ -808,9 +808,12 @@ export const layer = Layer.effect(
                     scheduledTaskId: active.id,
                     text: prompt,
                     attachments: [],
+                    author: { createdBy: active.createdBy, creationSource: active.creationSource },
                   },
-                  createdBy: active.createdBy,
-                  creationSource: active.creationSource,
+                  // The server opens each run's thread, so nobody is watching it:
+                  // it notifies only when it needs the user and settles when done.
+                  createdBy: "system",
+                  creationSource: "server",
                 }),
               )
             : yield* Effect.exit(
