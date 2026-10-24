@@ -37,6 +37,7 @@ import {
   renderSpaceAgentTurn,
   resolveCommandCenterSystemProject,
   SPACE_AGENT_TURN_TEXT_MAX_CHARS,
+  warnIfSpaceInstructionsClipped,
 } from "./RunDispatcher.ts";
 import * as CommandCenterService from "./Service.ts";
 import { spaceAgentThreadId, spaceIdFromSpaceAgentThreadId } from "./SpaceAgentIds.ts";
@@ -44,7 +45,8 @@ import {
   EMPTY_SPACE_AGENT_WAKE_STATUS,
   querySpaceAgentWakeStatuses,
 } from "./SpaceAgentWakeState.ts";
-import type { SpaceBriefMailCalendar } from "./SpaceBrief.ts";
+import type { SpaceBriefContextFeeds, SpaceBriefMailCalendar } from "./SpaceBrief.ts";
+import { SpaceContextFeeds } from "./SpaceContextFeeds.ts";
 
 /** Default model for a Space agent with no agent or Space model configured. */
 const SPACE_AGENT_DEFAULT_MODEL: SpaceModelSelection = {
@@ -159,6 +161,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const sql = yield* SqlClient.SqlClient;
   const googleBrief = yield* GoogleActivityBrief;
+  const contextFeeds = yield* SpaceContextFeeds;
   // One writer at a time, so concurrent wakes cannot both create the thread.
   const threadLock = yield* Semaphore.make(1);
 
@@ -233,13 +236,18 @@ const make = Effect.gen(function* () {
   const busyError = () => agentError("conflict", "The Space agent is already working on a turn.");
 
   /**
-   * The Space's "Mail + calendar" brief input. Read before `threadLock`, which
-   * every Space's turns and wakes share: a Google read can take up to its
-   * timeout and must not stall another Space. The agent's own scope is the
-   * Space policy, which `section` checks, so the server-injected brief is where
-   * mail and calendar reach the agent.
+   * The Space's "Mail + calendar" and "Business context" brief inputs, read
+   * concurrently before `threadLock`, which every Space's turns and wakes
+   * share: a Google read or a feed command can take up to its timeout and must
+   * not stall another Space. The agent's own scope is the Space policy, which
+   * the Google `section` checks, so the server-injected brief is where mail
+   * and calendar reach the agent.
    */
-  const fetchMailCalendar = (space: SpaceType) => googleBrief.section(space);
+  const fetchBriefFeeds = (space: SpaceType) =>
+    Effect.all(
+      { mailCalendar: googleBrief.section(space), contextFeeds: contextFeeds.section(space) },
+      { concurrency: "unbounded" },
+    );
 
   const startTurn = Effect.fn("SpaceAgent.startTurn")(function* (
     space: SpaceType,
@@ -248,6 +256,7 @@ const make = Effect.gen(function* () {
       readonly text: string;
       readonly reason: SpaceAgentTurnReason | "bootstrap";
       readonly mailCalendar: SpaceBriefMailCalendar | undefined;
+      readonly contextFeeds: SpaceBriefContextFeeds | undefined;
     },
   ) {
     const text = input.text.trim();
@@ -258,6 +267,7 @@ const make = Effect.gen(function* () {
     const { brief } = yield* service.spaceBrief({
       spaceId: space.id,
       mailCalendar: input.mailCalendar,
+      contextFeeds: input.contextFeeds,
     });
     const now = DateTime.formatIso(yield* DateTime.now);
     const nonce = yield* crypto
@@ -265,6 +275,7 @@ const make = Effect.gen(function* () {
       .pipe(
         Effect.mapError((cause) => agentError("persistence", "Could not mint a turn id.", cause)),
       );
+    yield* warnIfSpaceInstructionsClipped(space);
     const message = {
       messageId: MessageId.make(`space-agent:${space.id}:message:${nonce}`),
       role: "user" as const,
@@ -335,7 +346,7 @@ const make = Effect.gen(function* () {
   });
 
   // Checks made before the lock (text, busy thread, existing thread) only skip
-  // a needless Google read; the locked section re-checks the thread itself.
+  // needless Google and feed reads; the locked section re-checks the thread itself.
   const sendTurn: SpaceAgentShape["sendTurn"] = (spaceId, input) =>
     Effect.gen(function* () {
       const space = yield* loadEnabledSpace(spaceId);
@@ -343,13 +354,13 @@ const make = Effect.gen(function* () {
       yield* validateTurnText(input.text.trim());
       const current = Option.getOrUndefined(yield* findThread(threadId));
       if (current?.activeRunId != null) return yield* busyError();
-      const mailCalendar = yield* fetchMailCalendar(space);
+      const feeds = yield* fetchBriefFeeds(space);
       return yield* threadLock.withPermits(1)(
         Effect.gen(function* () {
           const existing = yield* findThread(threadId);
           const result = yield* startTurn(space, Option.getOrUndefined(existing), {
             ...input,
-            mailCalendar,
+            ...feeds,
           });
           return { spaceId: space.id, ...result };
         }),
@@ -361,14 +372,14 @@ const make = Effect.gen(function* () {
       const space = yield* loadEnabledSpace(spaceId);
       const threadId = ThreadId.make(spaceAgentThreadId(space.id));
       if (Option.isSome(yield* findThread(threadId))) return { threadId, created: false };
-      const mailCalendar = yield* fetchMailCalendar(space);
+      const feeds = yield* fetchBriefFeeds(space);
       return yield* threadLock.withPermits(1)(
         Effect.gen(function* () {
           if (Option.isSome(yield* findThread(threadId))) return { threadId, created: false };
           const created = yield* startTurn(space, undefined, {
             text: SPACE_AGENT_BOOTSTRAP_TEXT,
             reason: "bootstrap",
-            mailCalendar,
+            ...feeds,
           });
           return { threadId: created.threadId, created: true };
         }),

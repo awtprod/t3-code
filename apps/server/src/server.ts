@@ -223,6 +223,7 @@ import * as SpaceAgent from "./command-center/SpaceAgent.ts";
 import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
 import * as SpaceActivityReactor from "./command-center/SpaceActivityReactor.ts";
 import * as GoogleActivity from "./command-center/GoogleActivity.ts";
+import * as SpaceContextFeeds from "./command-center/SpaceContextFeeds.ts";
 import * as GoogleActivityPoller from "./command-center/GoogleActivityPoller.ts";
 import * as ConferenceCalls from "./command-center/phone/ConferenceCalls.ts";
 import * as ConferenceCallState from "./command-center/phone/ConferenceCallState.ts";
@@ -853,11 +854,17 @@ const layerRunRecoveryCoordinator = RunRecoveryCoordinator.layer.pipe(
 
 const layerGoogleActivityBrief = GoogleActivity.layer.pipe(Layer.provide(layerCommandCenterBase));
 
+const layerSpaceContextFeeds = SpaceContextFeeds.layer.pipe(
+  Layer.provide(layerCommandCenterConfig),
+  Layer.provide(ProcessRunner.layer),
+);
+
 const layerSpaceAgent = SpaceAgent.layer.pipe(
   Layer.provide(layerRunDispatcher),
   Layer.provide(layerCommandCenterBase),
   Layer.provide(layerCommandCenterOrchestrationBridge),
   Layer.provide(layerGoogleActivityBrief),
+  Layer.provide(layerSpaceContextFeeds),
   Layer.provide(layerPersistence),
 );
 

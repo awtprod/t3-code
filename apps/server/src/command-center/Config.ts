@@ -6,6 +6,7 @@ import {
   SPACE_AGENT_DEFAULT_DAILY_WAKE_LIMIT,
   SPACE_AGENT_DEFAULT_DEBOUNCE_MINUTES,
   SPACE_AGENT_MAX_CHECK_INS,
+  SPACE_CONTEXT_FEED_LIMITS,
   Space,
   SpaceAgentClockTime,
   ObservationEligibilityPolicy,
@@ -135,6 +136,21 @@ const normalizeSpaceAgentConfig = (
   };
 };
 
+/**
+ * A context feed as written in a Space config file. Bounds, the id pattern and
+ * the feed count are checked by the canonical `SpaceContextFeed` once defaults
+ * are applied; `path` is resolved inside the config directory first.
+ */
+const SpaceContextFeedFile = Schema.Struct({
+  id: Schema.String,
+  title: Schema.String,
+  argv: Schema.optional(Schema.Array(Schema.String)),
+  path: Schema.optional(NonEmpty),
+  maxChars: Schema.optional(Schema.Int),
+  refreshMinutes: Schema.optional(Schema.Int),
+  timeoutSeconds: Schema.optional(Schema.Int),
+});
+
 const SpaceConfigFile = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   id: NonEmpty,
@@ -162,6 +178,7 @@ const SpaceConfigFile = Schema.Struct({
     model: NonEmpty,
   }),
   agent: Schema.optional(SpaceAgentConfigFile),
+  contextFeeds: Schema.optional(Schema.Array(SpaceContextFeedFile)),
 });
 
 const RuntimeGoogleConnectionsFile = Schema.Struct({
@@ -291,9 +308,16 @@ export const layer = Layer.effect(
       },
     );
 
+    /**
+     * Resolve a config-relative path that must stay inside the config
+     * directory, lexically and after symlinks. With `allowMissing`, a path that
+     * does not exist yet resolves lexically (a feed file a timer has not
+     * written yet); it is canonicalized once it exists, on the next load.
+     */
     const resolveInsideConfig = (
       relativePath: string,
       canonicalConfigDirectory: string,
+      options: { readonly allowMissing?: boolean } = {},
     ): Effect.Effect<string, CommandCenterError> =>
       Effect.gen(function* () {
         const candidate = path.resolve(configDirectory, relativePath);
@@ -307,13 +331,19 @@ export const layer = Layer.effect(
             `Config path escapes the private config directory: ${relativePath}`,
           );
         }
-        const canonicalCandidate = yield* fs
-          .realPath(candidate)
-          .pipe(
-            Effect.mapError((cause) =>
-              configError(`Could not canonicalize config path: ${relativePath}`, cause),
-            ),
-          );
+        const canonicalCandidate = yield* fs.realPath(candidate).pipe(
+          Effect.map((resolved): string | undefined => resolved),
+          Effect.catch((cause) =>
+            options.allowMissing === true && cause.reason._tag === "NotFound"
+              ? Effect.undefined
+              : Effect.fail(
+                  configError(`Could not canonicalize config path: ${relativePath}`, cause),
+                ),
+          ),
+        );
+        if (canonicalCandidate === undefined) {
+          return path.join(canonicalConfigDirectory, relative);
+        }
         const canonicalRelative = path.relative(canonicalConfigDirectory, canonicalCandidate);
         if (
           canonicalRelative === ".." ||
@@ -410,6 +440,34 @@ export const layer = Layer.effect(
         return yield* configError(`Space '${raw.id}' has an invalid agent block: ${agent.message}`);
       }
 
+      // The config repository is the trust boundary for feed commands, as for
+      // `shell.scoped` nodes: `argv` is taken as written. Only `path` needs
+      // resolving, and it must stay inside the config directory.
+      const contextFeeds = yield* Effect.forEach(raw.contextFeeds ?? [], (feed) =>
+        Effect.gen(function* () {
+          const limits = SPACE_CONTEXT_FEED_LIMITS;
+          const common = {
+            id: feed.id,
+            title: feed.title,
+            maxChars: feed.maxChars ?? limits.maxChars.default,
+            refreshMinutes: feed.refreshMinutes ?? limits.refreshMinutes.default,
+            timeoutSeconds: feed.timeoutSeconds ?? limits.timeoutSeconds.default,
+          };
+          if (feed.argv !== undefined && feed.path === undefined) {
+            return { ...common, argv: feed.argv };
+          }
+          if (feed.path !== undefined && feed.argv === undefined) {
+            const resolved = yield* resolveInsideConfig(feed.path, canonicalConfigDirectory, {
+              allowMissing: true,
+            });
+            return { ...common, path: resolved };
+          }
+          return yield* configError(
+            `Space '${raw.id}' context feed '${feed.id}' needs exactly one of argv or path.`,
+          );
+        }),
+      );
+
       return yield* decodeCanonicalSpace({
         id: raw.id,
         slug: raw.id,
@@ -433,6 +491,7 @@ export const layer = Layer.effect(
                 modelId: raw.routing.model,
               },
         ...(agent.agent === undefined ? {} : { agent: agent.agent }),
+        ...(contextFeeds.length === 0 ? {} : { contextFeeds }),
         // Keep the configured assignment on the Space even while a Connection
         // is disabled. Routing may use this non-secret metadata to select the
         // intended Space, but only enabled Connections are projected below and

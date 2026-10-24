@@ -226,6 +226,48 @@ export const SpaceAgentConfig = Schema.Struct({
 });
 export type SpaceAgentConfig = typeof SpaceAgentConfig.Type;
 
+/** Bounds and defaults of Space context feeds. Defaults are applied at the config boundary. */
+export const SPACE_CONTEXT_FEED_LIMITS = {
+  maxFeeds: 6,
+  maxChars: { minimum: 200, maximum: 3_000, default: 1_200 },
+  refreshMinutes: { minimum: 5, maximum: 1_440, default: 30 },
+  timeoutSeconds: { minimum: 5, maximum: 60, default: 20 },
+} as const;
+
+const boundedInt = (bounds: { readonly minimum: number; readonly maximum: number }) =>
+  Schema.Int.check(Schema.isBetween({ minimum: bounds.minimum, maximum: bounds.maximum }));
+
+const SpaceContextFeedFields = {
+  id: Schema.String.check(Schema.isPattern(/^[a-z0-9-]{1,40}$/u)),
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(80)),
+  maxChars: boundedInt(SPACE_CONTEXT_FEED_LIMITS.maxChars),
+  refreshMinutes: boundedInt(SPACE_CONTEXT_FEED_LIMITS.refreshMinutes),
+  timeoutSeconds: boundedInt(SPACE_CONTEXT_FEED_LIMITS.timeoutSeconds),
+};
+
+/**
+ * Owner business context the Space brief shows: the text output of a command
+ * (`argv`, run without a shell in the config directory) or of a file (`path`,
+ * resolved inside the config directory at the config boundary). Exactly one
+ * source is set.
+ */
+export const SpaceContextFeed = Schema.Union([
+  Schema.Struct({
+    ...SpaceContextFeedFields,
+    argv: Schema.Array(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512))).check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(16),
+    ),
+    path: Schema.optionalKey(Schema.Never),
+  }),
+  Schema.Struct({
+    ...SpaceContextFeedFields,
+    path: TrimmedNonEmptyString,
+    argv: Schema.optionalKey(Schema.Never),
+  }),
+]);
+export type SpaceContextFeed = typeof SpaceContextFeed.Type;
+
 export const Space = Schema.Struct({
   id: SpaceId,
   slug: TrimmedNonEmptyString,
@@ -236,6 +278,17 @@ export const Space = Schema.Struct({
   modelDefaults: Schema.optional(ModelSelection),
   /** Absent means the Space has no always-on agent (default off). */
   agent: Schema.optional(SpaceAgentConfig),
+  /** Absent means the brief has no "Business context" section. */
+  contextFeeds: Schema.optional(
+    Schema.Array(SpaceContextFeed).check(
+      Schema.isMaxLength(SPACE_CONTEXT_FEED_LIMITS.maxFeeds),
+      Schema.makeFilter(
+        (feeds) =>
+          new Set(feeds.map((feed) => feed.id)).size === feeds.length ||
+          "Context feed ids must be unique within a Space.",
+      ),
+    ),
+  ),
   connectionIds: Schema.Array(ConnectionId),
   repositories: Schema.Array(RepositoryBinding),
   aliases: Schema.Array(TrimmedNonEmptyString),

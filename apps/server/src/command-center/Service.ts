@@ -73,6 +73,7 @@ import { isSpaceAgentItemMetadata, recordSpaceAgentReply } from "./SpaceAgentRep
 import {
   loadSpaceBriefInput,
   renderSpaceBrief,
+  type SpaceBriefContextFeeds,
   type SpaceBriefMailCalendar,
 } from "./SpaceBrief.ts";
 
@@ -621,13 +622,15 @@ export interface CommandCenterServiceShape {
   /**
    * Bounded brief of approved Memory, open Items, and activity for one
    * configured Space. `mailCalendar` is fetched by a caller that has already
-   * checked the Google read scope (the Space agent turn); it is left out of a
+   * checked the Google read scope (the Space agent turn), and `contextFeeds`
+   * by the Space agent's feed runner; both are left out of a
    * repository-scoped brief, like activity.
    */
   readonly spaceBrief: (input: {
     readonly spaceId: string;
     readonly repositoryId?: string;
     readonly mailCalendar?: SpaceBriefMailCalendar | undefined;
+    readonly contextFeeds?: SpaceBriefContextFeeds | undefined;
   }) => Effect.Effect<CommandCenterSpaceBrief, CommandCenterError>;
   /** The active, configured Space (cached config; fails when absent). */
   readonly getConfiguredSpace: (spaceId: string) => Effect.Effect<SpaceType, CommandCenterError>;
@@ -3187,6 +3190,7 @@ export const layer = Layer.effect(
           brief: renderSpaceBrief({
             ...briefInput,
             mailCalendar: input.repositoryId === undefined ? input.mailCalendar : undefined,
+            contextFeeds: input.repositoryId === undefined ? input.contextFeeds : undefined,
           }),
         };
       }).pipe(

@@ -460,3 +460,97 @@ it.effect("rejects malformed Space agent blocks instead of projecting them", () 
     }
   }).pipe(Effect.provide(configTestLayer)),
 );
+
+const writeFeedSpaceConfig = (contextFeeds: unknown) =>
+  writeAgentSpaceConfig(undefined, { contextFeeds });
+
+const exampleFeed = {
+  id: "outreach-pipeline",
+  title: "Outreach pipeline",
+  argv: ["python3", "feeds/example.py", "--summary"],
+};
+
+it.effect("applies context feed defaults and resolves file feeds inside the config directory", () =>
+  Effect.gen(function* () {
+    const config = yield* CommandCenterConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    yield* fs.makeDirectory(path.join(config.configDirectory, "feeds"), { recursive: true });
+    yield* fs.writeFileString(path.join(config.configDirectory, "feeds/summary.txt"), "ok");
+    const loaded = yield* writeFeedSpaceConfig([
+      exampleFeed,
+      {
+        id: "publishing",
+        title: "Publishing schedule",
+        path: "feeds/summary.txt",
+        maxChars: 3_000,
+        refreshMinutes: 5,
+        timeoutSeconds: 60,
+      },
+      // Not written yet (a timer has not run): allowed, read as unavailable until it exists.
+      { id: "finances", title: "Finances", path: "feeds/later.txt" },
+    ]);
+    expect(loaded.health).toMatchObject({ status: "loaded" });
+    const canonical = yield* fs.realPath(config.configDirectory);
+    expect(loaded.spaces[0]?.contextFeeds).toEqual([
+      { ...exampleFeed, maxChars: 1_200, refreshMinutes: 30, timeoutSeconds: 20 },
+      {
+        id: "publishing",
+        title: "Publishing schedule",
+        path: path.join(canonical, "feeds/summary.txt"),
+        maxChars: 3_000,
+        refreshMinutes: 5,
+        timeoutSeconds: 60,
+      },
+      {
+        id: "finances",
+        title: "Finances",
+        path: path.join(canonical, "feeds/later.txt"),
+        maxChars: 1_200,
+        refreshMinutes: 30,
+        timeoutSeconds: 20,
+      },
+    ]);
+    expect((yield* writeFeedSpaceConfig([])).spaces[0]?.contextFeeds).toBeUndefined();
+    expect((yield* writeAgentSpaceConfig(undefined)).spaces[0]?.contextFeeds).toBeUndefined();
+  }).pipe(Effect.provide(configTestLayer)),
+);
+
+it.effect("rejects malformed context feeds and file feeds outside the config directory", () =>
+  Effect.gen(function* () {
+    const config = yield* CommandCenterConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const outside = yield* fs.makeTempDirectoryScoped({ prefix: "command-center-feed-escape-" });
+    yield* fs.writeFileString(path.join(outside, "secret.txt"), "outside");
+    yield* fs.makeDirectory(path.join(config.configDirectory, "feeds"), { recursive: true });
+    yield* fs.symlink(
+      path.join(outside, "secret.txt"),
+      path.join(config.configDirectory, "feeds/linked.txt"),
+    );
+    const { argv: _argv, ...noSource } = exampleFeed;
+    for (const [feeds, message] of [
+      [[{ ...exampleFeed, path: "feeds/summary.txt" }], "needs exactly one of argv or path"],
+      [[noSource], "needs exactly one of argv or path"],
+      [
+        Array.from({ length: 7 }, (_, index) => ({ ...exampleFeed, id: `feed-${index}` })),
+        "Could not normalize Space",
+      ],
+      [[exampleFeed, exampleFeed], "Could not normalize Space"],
+      [[{ ...exampleFeed, id: "Outreach Pipeline" }], "Could not normalize Space"],
+      [[{ ...exampleFeed, title: "" }], "Could not normalize Space"],
+      [[{ ...exampleFeed, argv: [] }], "Could not normalize Space"],
+      [[{ ...exampleFeed, maxChars: 100 }], "Could not normalize Space"],
+      [[{ ...exampleFeed, refreshMinutes: 2_000 }], "Could not normalize Space"],
+      [[{ ...exampleFeed, timeoutSeconds: 1 }], "Could not normalize Space"],
+      [[{ ...noSource, path: "../outside.txt" }], "escapes the private config directory"],
+      [[{ ...noSource, path: path.join(outside, "secret.txt") }], "escapes the private config"],
+      [[{ ...noSource, path: "feeds/linked.txt" }], "resolves outside the private config"],
+    ] as const) {
+      const loaded = yield* writeFeedSpaceConfig(feeds);
+      expect(loaded.health.status, encodeJson(feeds)).toBe("invalid");
+      expect(loaded.health.message, encodeJson(feeds)).toContain(message);
+      expect(loaded.spaces).toEqual([]);
+    }
+  }).pipe(Effect.provide(configTestLayer)),
+);

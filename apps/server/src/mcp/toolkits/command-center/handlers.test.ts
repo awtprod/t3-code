@@ -308,8 +308,15 @@ const invokeSpaceActivity = (
                       scope.thread?.providerInstanceId ?? ProviderInstanceId.make("codex"),
                   }),
               }),
-              // Unused by this tool; the toolkit still requires them.
-              Layer.mock(CommandCenterService.CommandCenterService)({}),
+              // A Space agent credential re-checks the live Space; the rest are
+              // unused by this tool, but the toolkit still requires them.
+              Layer.mock(CommandCenterService.CommandCenterService)({
+                getConfiguredSpace: () =>
+                  Effect.succeed({
+                    agent: { enabled: true },
+                    policy: { allowedCapabilities: ["cc.items.read"] },
+                  } as never),
+              }),
               Layer.mock(AutomationRuns.AutomationRuns)({}),
               Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
               Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
@@ -425,6 +432,33 @@ describe("cc_space_activity scoping", () => {
       expect(results).toEqual([
         {
           activity: [expect.objectContaining({ sourceKind: "thread", sourceId: "t-feed" })],
+        },
+      ]);
+    }),
+  );
+
+  it.effect("returns Google mail and calendar rows to the Space agent", () =>
+    Effect.gen(function* () {
+      const asked = yield* invokeSpaceActivity(activityScope({ role: "space-agent" }), {
+        limit: 5,
+      });
+      expect(asked.requests).toEqual([
+        { spaceId: "command-center", limit: 5, includeExternal: true },
+      ]);
+
+      const { outputs, results } = yield* invokeSpaceActivity(
+        activityScope({ role: "space-agent" }),
+        { limit: 5 },
+        seededActivityLayer,
+      );
+      expect(outputs).toEqual([false]);
+      expect(results).toEqual([
+        {
+          activity: [
+            expect.objectContaining({ sourceKind: "run", sourceId: "calendar:standup:x" }),
+            expect.objectContaining({ sourceKind: "run", sourceId: "gmail:18c2f0a1:1" }),
+            expect.objectContaining({ sourceKind: "thread", sourceId: "t-feed" }),
+          ],
         },
       ]);
     }),
