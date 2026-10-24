@@ -187,6 +187,7 @@ function makeHarness(options: HarnessOptions = {}) {
       renameBranch,
       fetchRemote: options.fetchRemote ?? (() => Effect.void),
       hasCommit: options.hasCommit ?? (() => Effect.succeed(false)),
+      isRepository: () => Effect.succeed(true),
       remoteExists: () => Effect.succeed(true),
       remoteBranchExists: options.remoteBranchExists ?? (() => Effect.succeed(true)),
       removeWorktree,
@@ -1368,6 +1369,37 @@ it.effect("starts the worktree from the local base branch when origin cannot be 
     assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.refName, "main");
   }).pipe(Effect.provide(harness.layer));
 });
+
+it.effect(
+  "runs a worktree launch in the project folder when the project is not a repository",
+  () => {
+    const harness = makeHarness({ git: { isRepository: () => Effect.succeed(false) } });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const launched = yield* launches.launch(
+        launchInput({
+          command: "command:launch:not-a-repository",
+          thread: "thread:launch:not-a-repository",
+          message: "Run outside Git",
+          workspace: { type: "worktree", baseRef: "main", startFromOrigin: true },
+        }),
+      );
+      yield* waitUntil(() =>
+        outbox
+          .listByCommandId(CommandId.make("command:launch:not-a-repository:release"))
+          .pipe(Effect.map((effects) => effects.length === 1)),
+      );
+      const projection = yield* threads.getThreadProjection(launched.threadId);
+      assert.equal(projection.runs[0]?.status, "starting");
+      assert.isUndefined(projection.turnItems.find((item) => item.type === "error"));
+      assert.isNull(projection.thread.worktreePath);
+      assert.equal(harness.createWorktree.mock.calls.length, 0);
+      assert.equal(harness.runSetup.mock.calls[0]?.[0]?.worktreePath, project.workspaceRoot);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
 
 it.effect("retries a failed workspace preparation on the same run", () => {
   let failures = 1;

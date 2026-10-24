@@ -298,21 +298,47 @@ const make = Effect.gen(function* () {
       });
   });
 
-  const prepareInBackground = Effect.fn("ThreadLaunchService.prepareInBackground")(function* (
+  /**
+   * A stored `worktree` strategy (a scheduled task's, for one) can meet a
+   * project that is not a Git repository, such as the system project. There is
+   * nothing to branch from, so the run uses the project folder instead of
+   * failing in provisioning.
+   */
+  const rootOutsideRepository = Effect.fn("ThreadLaunchService.rootOutsideRepository")(function* (
     input: PreparationInput,
+    workspaceRoot: string,
+  ): Effect.fn.Return<PreparationInput> {
+    if (input.workspaceStrategy.type !== "worktree") return input;
+    // A check that cannot answer is left for provisioning to report.
+    const isRepository = yield* git
+      .isRepository(workspaceRoot)
+      .pipe(Effect.orElseSucceed(() => true));
+    if (isRepository) return input;
+    yield* Effect.logWarning(
+      "Project is not a Git repository; running the thread in the project folder instead of a new worktree.",
+      { commandId: input.commandId, projectId: input.projectId, workspaceRoot },
+    );
+    return { ...input, workspaceStrategy: { type: "root" } };
+  });
+
+  const prepareInBackground = Effect.fn("ThreadLaunchService.prepareInBackground")(function* (
+    requested: PreparationInput,
     threadId: ThreadId,
     runId: RunId | null,
   ) {
-    const project = yield* projects.getById(input.projectId).pipe(
-      Effect.mapError(mapError(input, "resolve-project", threadId)),
+    const project = yield* projects.getById(requested.projectId).pipe(
+      Effect.mapError(mapError(requested, "resolve-project", threadId)),
       Effect.flatMap(
         Option.match({
           onNone: () =>
-            Effect.fail(mapError(input, "resolve-project", threadId)("Project no longer exists.")),
+            Effect.fail(
+              mapError(requested, "resolve-project", threadId)("Project no longer exists."),
+            ),
           onSome: Effect.succeed,
         }),
       ),
     );
+    const input = yield* rootOutsideRepository(requested, project.workspaceRoot);
 
     const reused = input.reusedWorktree;
     const tracked = input.workspaceStrategy.type === "worktree" || reused !== undefined;
