@@ -1,3 +1,4 @@
+import { isUnattendedThread } from "@command-center/core";
 import {
   type CommandCenterEventEnvelope,
   type OrchestrationProjectShell,
@@ -235,6 +236,7 @@ export const make = Effect.gen(function* () {
     const nowMs = (yield* DateTime.now).epochMilliseconds;
     const action = decidePublishAction({
       state,
+      unattended: Option.isSome(thread) && isUnattendedThread(thread.value),
       publishIdentity,
       previousIdentity: published.get(threadId),
       hasPrevious: published.has(threadId),

@@ -13,6 +13,7 @@ const state = vi.hoisted(() => ({
   visible: "visible",
   live: true,
   threadId: "thread-1",
+  createdBy: "user" as "user" | "agent" | "system",
   completedAt: null as string | null,
   archivedAt: null as string | null,
   input: false,
@@ -55,7 +56,7 @@ function mockThreadShell() {
       relationshipToParent: state.subagent ? "subagent" : null,
     },
     forkedFrom: null,
-    createdBy: "user",
+    createdBy: state.createdBy,
     creationSource: "web",
     latestRunId: "run-1",
     activeRunId: null,
@@ -171,6 +172,7 @@ beforeEach(() => {
     visible: "visible",
     live: true,
     threadId: "thread-1",
+    createdBy: "user",
     completedAt: null,
     archivedAt: null,
     input: false,
@@ -216,27 +218,34 @@ describe("thread notifications", () => {
     expect(state.notification).not.toHaveBeenCalled();
   });
 
-  it("rings a Space agent only when it waits on the user", async () => {
-    state.threadId = "cc-space-agent-command-center";
-    state.mode = "notifications-and-sound";
-    state.focused = false;
-    await render();
-    await complete();
-    state.completedAt = null;
-    state.sessionError = true;
-    await render();
-    state.sessionError = false;
-    state.limited = true;
-    await render();
-    expect(state.sound).not.toHaveBeenCalled();
-    expect(state.notification).not.toHaveBeenCalled();
+  it.each([
+    ["the Space agent", "cc-space-agent-command-center", "system"],
+    ["an agent-launched thread", "thread-1", "agent"],
+  ] as const)(
+    "rings an unattended thread (%s) only when it waits on the user",
+    async (_label, threadId, createdBy) => {
+      state.threadId = threadId;
+      state.createdBy = createdBy;
+      state.mode = "notifications-and-sound";
+      state.focused = false;
+      await render();
+      await complete();
+      state.completedAt = null;
+      state.sessionError = true;
+      await render();
+      state.sessionError = false;
+      state.limited = true;
+      await render();
+      expect(state.sound).not.toHaveBeenCalled();
+      expect(state.notification).not.toHaveBeenCalled();
 
-    state.limited = false;
-    state.approval = true;
-    await render();
-    expect(state.sound).toHaveBeenCalledTimes(1);
-    expect(state.notification).toHaveBeenCalledWith("Approval needed", expect.any(Object));
-  });
+      state.limited = false;
+      state.approval = true;
+      await render();
+      expect(state.sound).toHaveBeenCalledTimes(1);
+      expect(state.notification).toHaveBeenCalledWith("Approval needed", expect.any(Object));
+    },
+  );
 
   it("alerts on the parent when its delegated subagent asks for approval", async () => {
     state.mode = "notifications-and-sound";

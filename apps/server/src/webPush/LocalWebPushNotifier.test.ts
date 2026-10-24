@@ -300,6 +300,32 @@ it.effect(
     ),
 );
 
+it.effect("rings an unattended thread for approval but not when it completes", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { harness, depsLayer } = yield* makeHarness();
+      const opened = (phase: Parameters<typeof threadForPhase>[0], createdBy: "user" | "system") =>
+        Option.some({ ...threadForPhase(phase), createdBy });
+      yield* Effect.gen(function* () {
+        const store = yield* WebPushSubscriptions;
+        yield* store.upsert(SUBSCRIPTION);
+        const notifier = yield* makeNotifier;
+        yield* notifier.seedFromSnapshot;
+        yield* Ref.set(harness.threadRef, opened("completed", "system"));
+        yield* notifier.processThread(THREAD_ID);
+        assert.equal((yield* Ref.get(harness.sends)).length, 0);
+        yield* Ref.set(harness.threadRef, opened("approval", "system"));
+        yield* notifier.processThread(THREAD_ID);
+        assert.equal((yield* Ref.get(harness.sends)).length, 1);
+        // The same completion on a thread the user opened still rings.
+        yield* Ref.set(harness.threadRef, opened("completed", "user"));
+        yield* notifier.processThread(THREAD_ID);
+        assert.equal((yield* Ref.get(harness.sends)).length, 2);
+      }).pipe(Effect.provide(depsLayer));
+    }),
+  ),
+);
+
 const insertAgentItem = (input: {
   readonly id: string;
   readonly kind: string;
