@@ -3,9 +3,11 @@ import { isElectron } from "~/env";
 import { isMacPlatform, isWindowsPlatform, normalizeSearchText } from "~/lib/utils";
 import { STATIC_KEYBINDING_COMMANDS, type KeybindingCommand } from "@t3tools/contracts";
 import type { EnvironmentId } from "@t3tools/contracts";
+import type { CommandCenterSidebarShortcutKey } from "@t3tools/contracts/settings";
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { DEFAULT_KEYBINDINGS } from "@t3tools/shared/keybindings";
+import { COMMAND_CENTER_SHORTCUTS } from "../sidebar/commandCenterShortcuts";
 import { commandLabel } from "./KeybindingsSettings.logic";
 import {
   validateSettingsScopeSearch,
@@ -144,6 +146,19 @@ const KEYBINDING_SEARCH_ITEMS = STATIC_KEYBINDING_COMMANDS.toSorted((left, right
     ...(defaultKeys.length === 0 ? { targetId: "keybindings" } : {}),
   };
 });
+
+/** Anchor id of a Command Center sidebar shortcut's switch on the General page. */
+export function commandCenterShortcutSettingsSearchId(key: CommandCenterSidebarShortcutKey) {
+  return `sidebar-shortcut-${key}` as const;
+}
+
+/** One result per sidebar shortcut, titled as the sidebar labels it. */
+const COMMAND_CENTER_SHORTCUT_SEARCH_ITEMS = COMMAND_CENTER_SHORTCUTS.map((shortcut) => ({
+  id: commandCenterShortcutSettingsSearchId(shortcut.key),
+  title: shortcut.label,
+  to: "/settings/general" as const,
+  searchTerms: ["sidebar shortcut command center navigation show hide"],
+}));
 
 /** Anchor id of a source control host's settings form on the Source Control page. */
 export function sourceControlHostSettingsSearchId(kind: string) {
@@ -371,6 +386,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/general",
     searchTerms: ["hide fold running monitoring threads inbox sidebar shelf"],
   },
+  {
+    id: "sidebar-shortcuts",
+    title: "Sidebar shortcuts",
+    to: "/settings/general",
+    searchTerms: ["command center navigation show hide pages needs you inbox new thread"],
+  },
+  ...COMMAND_CENTER_SHORTCUT_SEARCH_ITEMS,
   {
     id: "auto-settle-inactive-threads",
     title: "Auto-settle inactive threads",

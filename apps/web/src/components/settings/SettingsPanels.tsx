@@ -172,7 +172,11 @@ import {
   useSettingsSearchTarget,
   useSettingsSearchTargetId,
 } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import {
+  COMMAND_CENTER_SHORTCUTS,
+  toggleCommandCenterShortcut,
+} from "../sidebar/commandCenterShortcuts";
+import { commandCenterShortcutSettingsSearchId, searchableSetting } from "./settingsSearch";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
 
@@ -584,6 +588,12 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled
         ? ["Working section"]
         : []),
+      ...(!Equal.equals(
+        settings.commandCenterSidebarShortcuts,
+        DEFAULT_UNIFIED_SETTINGS.commandCenterSidebarShortcuts,
+      )
+        ? ["Sidebar shortcuts"]
+        : []),
       ...(settings.sidebarAutoSettleAfterDays !==
       DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays
         ? ["Auto-settle inactive threads"]
@@ -726,6 +736,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.sidebarProjectGroupingMode,
       settings.sidebarProjectSortOrder,
       settings.sidebarWorkingShelfEnabled,
+      settings.commandCenterSidebarShortcuts,
       settings.sidebarThreadPreviewCount,
       settings.showSkillsInSlashMenu,
       settings.timestampFormat,
@@ -826,6 +837,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
       sidebarProjectSortOrder: DEFAULT_UNIFIED_SETTINGS.sidebarProjectSortOrder,
       sidebarWorkingShelfEnabled: DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled,
+      commandCenterSidebarShortcuts: DEFAULT_UNIFIED_SETTINGS.commandCenterSidebarShortcuts,
       sidebarAutoSettleAfterDays: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
       sidebarAutoSettleKeepPullRequests: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleKeepPullRequests,
       sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
@@ -2520,6 +2532,30 @@ export function GeneralSettingsPanel() {
             ) : null}
           </>
         ) : null}
+      </SettingsSection>
+
+      <SettingsSection {...searchableSetting("sidebar-shortcuts")}>
+        {COMMAND_CENTER_SHORTCUTS.map((shortcut) => (
+          <SettingsRow
+            key={shortcut.key}
+            {...searchableSetting(commandCenterShortcutSettingsSearchId(shortcut.key))}
+            control={
+              <Switch
+                checked={settings.commandCenterSidebarShortcuts.includes(shortcut.key)}
+                onCheckedChange={(checked) =>
+                  updateSettings({
+                    commandCenterSidebarShortcuts: toggleCommandCenterShortcut(
+                      settings.commandCenterSidebarShortcuts,
+                      shortcut.key,
+                      Boolean(checked),
+                    ),
+                  })
+                }
+                aria-label={`${shortcut.label} shortcut`}
+              />
+            }
+          />
+        ))}
       </SettingsSection>
 
       <SettingsSection id="behavior" title="Behavior">
