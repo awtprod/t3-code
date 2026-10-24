@@ -25,6 +25,7 @@ import {
 import {
   type ClientSettingsPatch,
   type ClientSettings,
+  type CommandCenterSidebarShortcutKey,
   DEFAULT_CLIENT_SETTINGS,
   type EnvironmentIdentificationMode,
   type UnifiedSettings,
@@ -426,6 +427,16 @@ export function useLegacySidebarEnabled(): boolean {
   const settingsHydrated = useClientSettingsHydrated();
   const legacySidebarEnabled = useClientSettingsValue().legacySidebarEnabled;
   return settingsHydrated && legacySidebarEnabled;
+}
+
+/**
+ * The Command Center sidebar shortcuts the user has switched on (Settings →
+ * General → Sidebar shortcuts). Before client settings hydrate this is the
+ * schema default; callers that act on it once, such as the `/` redirect, wait
+ * for hydration first.
+ */
+export function useCommandCenterSidebarShortcuts(): ReadonlyArray<CommandCenterSidebarShortcutKey> {
+  return useClientSettingsValue().commandCenterSidebarShortcuts;
 }
 
 /** Hydrate legacy preferences before a mutation can claim either server-owned list. */
