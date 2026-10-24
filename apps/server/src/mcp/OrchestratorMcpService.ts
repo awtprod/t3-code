@@ -84,6 +84,7 @@ import {
 import { runOutcome } from "../orchestration-v2/RestartBackgroundNote.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -227,19 +228,6 @@ function threadManagementFailure(error: unknown): OrchestratorMcpFailure {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * Workspace strategy for a scheduled task created/updated over MCP: bound runs
- * post into the existing thread (the strategy is unused, keep root); unbound
- * runs launch a fresh worktree per run.
- */
-function scheduledTaskWorkspaceStrategy(
-  boundToThread: boolean,
-): ScheduledTask["workspaceStrategy"] {
-  return boundToThread
-    ? { type: "root" }
-    : { type: "worktree", baseRef: "main", startFromOrigin: true };
 }
 
 /**
@@ -911,6 +899,7 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
+  const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
 
   /** A caller-named project, which must exist before anything is recorded against it. */
@@ -1547,6 +1536,28 @@ const make = Effect.gen(function* () {
     }).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)), Effect.map(Option.flatten));
 
   /**
+   * Workspace strategy for a scheduled task created/updated over MCP: bound
+   * runs post into the existing thread (the strategy is unused, keep root);
+   * unbound runs launch a fresh worktree per run when the project is a Git
+   * repository, and otherwise run in the project folder, where there is
+   * nothing to branch from.
+   */
+  const scheduledTaskWorkspaceStrategy = (projectId: ProjectId, boundToThread: boolean) =>
+    Effect.gen(function* () {
+      const root: ScheduledTask["workspaceStrategy"] = { type: "root" };
+      if (boundToThread) return root;
+      const project = yield* requireProject(projectId);
+      // A check that cannot answer keeps the worktree default; the run reports
+      // whatever is wrong with the repository.
+      const isRepository = yield* gitWorkflow
+        .isRepository(project.workspaceRoot)
+        .pipe(Effect.orElseSucceed(() => true));
+      return isRepository
+        ? ({ type: "worktree", baseRef: "main", startFromOrigin: true } as const)
+        : root;
+    });
+
+  /**
    * The modes a task's runs execute at: its own, or for a task bound to a
    * thread, also that thread's modes as they are now, since its runs are
    * messages to that thread.
@@ -1669,7 +1680,7 @@ const make = Effect.gen(function* () {
           schedule: input.schedule,
           projectId,
           threadId: bindToCurrentThread && parent !== undefined ? parent.thread.id : null,
-          workspaceStrategy: scheduledTaskWorkspaceStrategy(bindToCurrentThread),
+          workspaceStrategy: yield* scheduledTaskWorkspaceStrategy(projectId, bindToCurrentThread),
           modelSelection,
           runtimeMode: limits.runtimeMode,
           interactionMode: limits.interactionMode,
@@ -1742,7 +1753,7 @@ const make = Effect.gen(function* () {
         const workspaceStrategy =
           input.bindToCurrentThread === undefined
             ? existing.workspaceStrategy
-            : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+            : yield* scheduledTaskWorkspaceStrategy(existing.projectId, input.bindToCurrentThread);
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           title: input.title ?? existing.title,
@@ -2718,6 +2729,7 @@ export const layer: Layer.Layer<
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService
   | GitVcsDriver.GitVcsDriver
+  | GitWorkflowService.GitWorkflowService
   | ProviderRegistry.ProviderRegistry
   | ProviderAdapterRegistry.ProviderAdapterRegistryV2
   | ScheduledTaskService.ScheduledTaskService
