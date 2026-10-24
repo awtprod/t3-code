@@ -36,6 +36,7 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
 import * as AutomationDefinitionConfig from "../../../command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
+import * as GmailDrafts from "../../../command-center/GmailDrafts.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts";
 import { PhoneCalls } from "../../../command-center/phone/PhoneCalls.ts";
@@ -74,6 +75,7 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
   Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
   Layer.mock(SpaceActivity.SpaceActivity)({}),
+  Layer.mock(GmailDrafts.GmailDrafts)({}),
   Layer.mock(PhoneCalls)({}),
   Layer.mock(PhoneCallProposals)({}),
   Layer.mock(SupabaseMcpConnector.SupabaseMcpConnector)({}),

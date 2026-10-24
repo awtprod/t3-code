@@ -1,6 +1,7 @@
 # Google connector
 
-Command Center supports Gmail, Calendar, and Drive reads plus approval-gated Gmail draft creation through
+Command Center supports Gmail, Calendar, and Drive reads plus Gmail draft creation (approval-gated
+in automations and the Inbox, capped for Space agents) through
 [`gog` v0.15.0](https://github.com/openclaw/gogcli/releases/tag/v0.15.0). It intentionally exposes no
 send operation.
 
@@ -117,3 +118,30 @@ labels, message count) without a snippet, so neither surface shows message text.
 Live smoke tests are deliberately opt-in. They should cover only search, retrieval, agenda,
 availability, conflict detection, listing, and metadata/export reads, plus negative checks proving
 that send, update, share, and delete commands are unavailable.
+
+## Space agent Gmail drafts
+
+`cc_google_draft_create` leaves a plain-text Gmail draft (to, cc, subject, body, and optionally the
+`threadId` and `replyToMessageId` it answers) in the Space's connected mailbox, so the agent can triage
+mail: read the thread, draft a reply, and file an Item pointing at it. It never sends. gog runs with
+the draft-only command allowlist and `--gmail-no-send`, and the owner reviews and sends the draft from
+Gmail. Bcc, HTML bodies, and attachments are not offered.
+
+- Authorization: the Space policy, and so the agent's credential, must allow
+  `cc.connections.google.gmail.drafts.create`, and the selected Google connection of that Space must
+  carry the same capability. A connection has it only when its consent requested Gmail drafts
+  (`gmail.compose`). `connectionId` may be left out when exactly one connection of the Space
+  qualifies.
+- Limit: at most 10 draft attempts per Space in any rolling 24 hours. Before gog runs, each attempt
+  appends an `agent` audit event, `cc.connections.google.gmail.draft.requested`, and the limit counts
+  those. The audit log is append-only and never pruned, so a later failure cannot free the slot, and
+  an attempt gog fails still uses one. The 11th attempt is refused before gog runs.
+- Visibility: each saved draft adds a Space activity row (status `draft`, title
+  `Draft saved: <subject>`, text `to <n> recipients`, and a Drafts link that opens in the browser's
+  default Google account) and a `cc.connections.google.gmail.draft.created` audit event. None of these
+  record addresses or the body. Like the poller's rows, the activity row uses event sequence 0, so it
+  reaches the owner's Space activity view and the agent's wake delta but not `cc_space_activity` or
+  `cc_space_brief`. If that row and event cannot be written, the tool still reports the draft as
+  saved, names its draft id and asks the agent not to create it again, and the server logs a warning.
+- No approval step: a draft is a visible, deletable write to the owner's own mailbox, and sending is
+  blocked at the CLI. The daily cap bounds a misbehaving agent.

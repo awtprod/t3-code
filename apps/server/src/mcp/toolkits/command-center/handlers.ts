@@ -1,14 +1,23 @@
-import { CommandCenterError, type CommandCenterItemUpdateInput } from "@t3tools/contracts";
-import { RepositoryId, SpaceId } from "@command-center/core";
+import {
+  CommandCenterError,
+  type CommandCenterItemUpdateInput,
+  GoogleDraftCreateRequest,
+} from "@t3tools/contracts";
+import { type CapabilityName, RepositoryId, SpaceId } from "@command-center/core";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as AutomationDefinitionConfig from "../../../command-center/AutomationDefinitionConfig.ts";
 import { automationConfigIsSafeForGit } from "../../../command-center/automation/Definition.ts";
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
+import * as GmailDrafts from "../../../command-center/GmailDrafts.ts";
 import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
-import { googleCapabilityForOperation } from "../../../command-center/GoogleCapabilities.ts";
+import {
+  googleCapabilityForDraft,
+  googleCapabilityForOperation,
+} from "../../../command-center/GoogleCapabilities.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
 import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
 import { PhoneCalls } from "../../../command-center/phone/PhoneCalls.ts";
@@ -306,6 +315,36 @@ const spaceAgentItemActor = (scope: {
   readonly threadId: string;
 }): CommandCenterService.CommandCenterItemActor | undefined =>
   scope.role === "space-agent" ? { kind: "space-agent", threadId: scope.threadId } : undefined;
+
+/**
+ * The Space's Google connections that grant `capability`, narrowed to
+ * `connectionId` when one is given. The connection check of `cc_google_read`
+ * and `cc_google_draft_create`.
+ */
+const googleConnectionsGranting = <
+  Connection extends {
+    readonly id: string;
+    readonly spaceId: string;
+    readonly kind: string;
+    readonly capabilities: ReadonlyArray<CapabilityName>;
+  },
+>(
+  connections: ReadonlyArray<Connection>,
+  input: {
+    readonly spaceId: string;
+    readonly capability: CapabilityName;
+    readonly connectionId?: string | undefined;
+  },
+): ReadonlyArray<Connection> =>
+  connections.filter(
+    (connection) =>
+      connection.spaceId === input.spaceId &&
+      (input.connectionId === undefined || connection.id === input.connectionId) &&
+      connection.kind === "google" &&
+      connection.capabilities.includes(input.capability),
+  );
+
+const decodeGoogleDraftCreateRequest = Schema.decodeUnknownEffect(GoogleDraftCreateRequest);
 
 const handlers = {
   cc_spaces_list: (_input) =>
@@ -655,13 +694,12 @@ const handlers = {
       const connector = yield* GoogleReadConnector.GoogleReadConnector;
       const service = yield* CommandCenterService.CommandCenterService;
       const snapshot = yield* service.bootstrap;
-      const accountIsScoped = snapshot.connections.some(
-        (connection) =>
-          connection.spaceId === scope.spaceId &&
-          connection.id === input.connectionId &&
-          connection.kind === "google" &&
-          connection.capabilities.includes(requiredCapability),
-      );
+      const accountIsScoped =
+        googleConnectionsGranting(snapshot.connections, {
+          spaceId: scope.spaceId,
+          capability: requiredCapability,
+          connectionId: input.connectionId,
+        }).length > 0;
       if (!accountIsScoped) {
         return yield* new CommandCenterError({
           reason: "validation",
@@ -745,6 +783,57 @@ const handlers = {
         plan: { ...plan, spaceId: SpaceId.make(scope.spaceId) },
       });
     }),
+  // Creation, the 24-hour limit, and the activity row and audit event are
+  // GmailDrafts' (see there for why a draft needs no approval).
+  cc_google_draft_create: ({ spaceId, connectionId, ...draft }) =>
+    Effect.gen(function* () {
+      const requiredCapability = googleCapabilityForDraft("gmail.draft.create");
+      const scope = yield* requireScopedSpace(requiredCapability, spaceId);
+      const service = yield* CommandCenterService.CommandCenterService;
+      // Without `connectionId`, the Space's one connection that can create drafts.
+      const eligible = googleConnectionsGranting((yield* service.bootstrap).connections, {
+        spaceId: scope.spaceId,
+        capability: requiredCapability,
+        connectionId,
+      });
+      const connection = eligible.length === 1 ? eligible[0] : undefined;
+      if (connection === undefined) {
+        return yield* new CommandCenterError({
+          reason: "validation",
+          message:
+            eligible.length > 1
+              ? "More than one Google connection in this Space can create drafts; pass connectionId."
+              : "The requested Google connection is not available in this Space.",
+        });
+      }
+      const request = yield* decodeGoogleDraftCreateRequest({
+        ...draft,
+        spaceId: scope.spaceId,
+        connectionId: connection.id,
+        operation: "gmail.draft.create",
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new CommandCenterError({
+              reason: "validation",
+              message: "The Gmail draft request is invalid.",
+              cause,
+            }),
+        ),
+      );
+      const drafts = yield* GmailDrafts.GmailDrafts;
+      const { recorded, ...created } = yield* drafts.createForSpace({
+        request,
+        agentThreadId: scope.threadId,
+      });
+      const saved = `Draft saved in Gmail (not sent): ${request.subject}`;
+      return {
+        ...created,
+        summary: recorded
+          ? saved
+          : `${saved}. Command Center could not record draft ${created.draftId}; do not create it again.`,
+      };
+    }),
 } satisfies Parameters<typeof CommandCenterToolkit.toLayer>[0];
 
 /**
@@ -794,6 +883,9 @@ export const CommandCenterToolkitHandlersLive = McpToolAccess.toLayer(CommandCen
   cc_automations_save: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_automations_save)),
   cc_runs_start: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_runs_start)),
   cc_automations_run: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_automations_run)),
+  cc_google_draft_create: McpToolAccess.writesWithCapability(
+    jsonSafe(handlers.cc_google_draft_create),
+  ),
   // Phone tools act (the owner call dials; the third-party call files an approval).
   cc_phone_call_me: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_phone_call_me)),
   cc_phone_call: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_phone_call)),

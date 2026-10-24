@@ -64,7 +64,9 @@ it("records the committed static-context baseline", () => {
     // that opt in see them) take Command Center from 16 to 18. Supabase (9) unchanged.
     // 2026-10: -44 bytes: cc_memory_propose confidence advertised as a plain
     // bounded number (no NaN/Infinity union).
-    mcp: { toolCount: 46, schemaBytes: 35_725, toolkitCounts: [19, 18, 9] },
+    // 2026-10: +566 bytes: cc_google_draft_create added (Command Center 18 -> 19 tools;
+    // only credentials holding the Gmail drafts capability see it).
+    mcp: { toolCount: 47, schemaBytes: 36_291, toolkitCounts: [19, 19, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,
