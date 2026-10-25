@@ -188,6 +188,19 @@ describe("AutomationsScreen", () => {
 
     expect(loading).toContain('data-slot="automations-loading"');
     expect(loading).toContain("Loading committed automation definitions");
+    // Until both sources answer, the detail pane must not claim there is nothing recurring.
+    expect(loading).toContain('data-slot="automations-selection-loading"');
+    expect(loading).not.toContain("Nothing recurring yet");
+    const tasksLoading = renderToStaticMarkup(
+      <AutomationsScreen
+        automations={[]}
+        scheduledTasksStatus="loading"
+        spaces={[]}
+        status="ready"
+      />,
+    );
+    expect(tasksLoading).toContain('data-slot="automations-selection-loading"');
+    expect(tasksLoading).not.toContain("Nothing recurring yet");
     expect(empty).toContain('data-slot="automations-empty"');
     expect(empty).toContain("No committed automations yet");
     expect(empty).toContain("Check again");

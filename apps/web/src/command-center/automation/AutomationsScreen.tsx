@@ -862,6 +862,15 @@ export function AutomationsScreen({
                   </p>
                 </div>
               )
+            ) : status === "loading" || scheduledTasksStatus === "loading" ? (
+              <div
+                className="flex h-full min-h-[28rem] items-center justify-center rounded-lg border bg-card text-sm text-muted-foreground"
+                data-slot="automations-selection-loading"
+                role="status"
+              >
+                <LoaderCircleIcon className="mr-2 size-4 animate-spin motion-reduce:animate-none" />
+                Loading recurring tasks
+              </div>
             ) : (
               <div
                 className="flex h-full min-h-[28rem] flex-col rounded-lg border bg-card"

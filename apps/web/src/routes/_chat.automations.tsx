@@ -163,14 +163,24 @@ function AutomationsEnvironmentRouteView({
         : undefined,
     [automations, resolvedSelection],
   );
-  // Pin whatever the page opened on. The live task list changes health under the
+  const status = resolveAutomationsScreenStatus({
+    connected: environmentId !== null,
+    isPending: bootstrapQuery.isPending,
+    hasData: bootstrap !== null,
+    hasError: bootstrapQuery.error !== null,
+    ...(bootstrap === null ? {} : { configStatus: bootstrap.configHealth.status }),
+  });
+  // Pin whatever the page opened on, once both sources have answered so the pick
+  // is the most urgent item overall, not just the first list to arrive.
+  // The live task list changes health under the
   // user, and a fallback that kept re-resolving would swap the open item mid-read
   // or mid-edit. Only an empty selection is pinned: a chosen item that is briefly
   // absent (an automation created a moment ago, until the bootstrap refresh lists
   // it) shows the fallback meanwhile and is opened as soon as it appears. Setting
   // state during render is React's pattern for deriving state from data; it
   // re-renders once and cannot loop, since the selection is non-empty afterwards.
-  if (selection === undefined && resolvedSelection !== undefined) {
+  const sourcesSettled = status !== "loading" && scheduledTasksStatus !== "loading";
+  if (sourcesSettled && selection === undefined && resolvedSelection !== undefined) {
     setSelection(resolvedSelection);
   }
   const definitionQuery = useEnvironmentQuery(
@@ -210,13 +220,6 @@ function AutomationsEnvironmentRouteView({
   });
   const runScheduledTaskNow = useAtomCommand(serverEnvironment.runScheduledTaskNow, {
     label: "automations scheduled task run now",
-  });
-  const status = resolveAutomationsScreenStatus({
-    connected: environmentId !== null,
-    isPending: bootstrapQuery.isPending,
-    hasData: bootstrap !== null,
-    hasError: bootstrapQuery.error !== null,
-    ...(bootstrap === null ? {} : { configStatus: bootstrap.configHealth.status }),
   });
   const selectedId = selectedAutomation?.id;
   const activeDraft = selectedId === undefined ? undefined : drafts[selectedId];
