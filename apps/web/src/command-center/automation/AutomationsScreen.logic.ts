@@ -1,5 +1,16 @@
-import type { Automation, AutomationNodeKind, Space } from "@command-center/core";
-import type { EnvironmentId, ExecutionEnvironmentPlatformOs } from "@t3tools/contracts";
+import type {
+  Automation,
+  AutomationNodeKind,
+  AutomationTrigger,
+  Run,
+  Space,
+} from "@command-center/core";
+import type {
+  EnvironmentId,
+  ExecutionEnvironmentPlatformOs,
+  ScheduledTask,
+} from "@t3tools/contracts";
+import { describeAutomationSchedule } from "@t3tools/shared/automationSchedule";
 
 import type {
   AutomationEditorDefinition,
@@ -209,4 +220,157 @@ export function projectAutomationForEditor(automation: Automation): AutomationEd
 
 export function automationSpaceName(automation: Automation, spaces: ReadonlyArray<Space>): string {
   return spaces.find((space) => space.id === automation.spaceId)?.displayName ?? "Unknown Space";
+}
+
+/** What the Automations page is showing on the right: one scheduled task or one committed automation. */
+export type AutomationsSelection =
+  | { readonly kind: "scheduled-task"; readonly id: string }
+  | { readonly kind: "automation"; readonly id: string };
+
+/** How much a recurring task needs the user, most urgent first. */
+export type RecurringHealth = "failing" | "running" | "ok" | "idle" | "paused";
+
+const HEALTH_RANK: Record<RecurringHealth, number> = {
+  failing: 0,
+  running: 1,
+  ok: 2,
+  idle: 3,
+  paused: 4,
+};
+
+export function scheduledTaskHealth(
+  task: Pick<ScheduledTask, "enabled" | "lastRunStatus">,
+): RecurringHealth {
+  if (!task.enabled) return "paused";
+  switch (task.lastRunStatus) {
+    case "failed":
+      return "failing";
+    case "running":
+      return "running";
+    case "succeeded":
+      return "ok";
+    case "never":
+      return "idle";
+  }
+}
+
+/** The most recent run of a committed automation, by creation time. */
+export function latestAutomationRun(
+  automation: Pick<Automation, "id">,
+  runs: ReadonlyArray<Run>,
+): Run | undefined {
+  let latest: Run | undefined;
+  for (const run of runs) {
+    if (run.automationId !== automation.id) continue;
+    if (latest === undefined || new Date(run.createdAt) > new Date(latest.createdAt)) latest = run;
+  }
+  return latest;
+}
+
+export function automationHealth(
+  automation: Pick<Automation, "id" | "enabled">,
+  runs: ReadonlyArray<Run>,
+): RecurringHealth {
+  if (!automation.enabled) return "paused";
+  const latest = latestAutomationRun(automation, runs);
+  if (latest === undefined) return "idle";
+  switch (latest.status) {
+    case "failed":
+      return "failing";
+    case "queued":
+    case "running":
+    case "waiting_approval":
+    case "waiting":
+      return "running";
+    case "succeeded":
+      return "ok";
+    case "canceled":
+      return "idle";
+  }
+}
+
+/** Most urgent first; items of equal health keep their incoming order. */
+export function sortByHealth<T>(
+  items: ReadonlyArray<T>,
+  health: (item: T) => RecurringHealth,
+): ReadonlyArray<T> {
+  return items
+    .map((item, index) => ({ item, index, rank: HEALTH_RANK[health(item)] }))
+    .sort((left, right) => left.rank - right.rank || left.index - right.index)
+    .map(({ item }) => item);
+}
+
+export interface RecurringTasksInput {
+  readonly tasks: ReadonlyArray<ScheduledTask>;
+  readonly automations: ReadonlyArray<Automation>;
+  readonly runs: ReadonlyArray<Run>;
+}
+
+export interface RecurringHealthSummary {
+  readonly total: number;
+  readonly failing: number;
+  readonly running: number;
+  readonly paused: number;
+}
+
+export function summarizeRecurringHealth(input: RecurringTasksInput): RecurringHealthSummary {
+  const healths = [
+    ...input.tasks.map(scheduledTaskHealth),
+    ...input.automations.map((automation) => automationHealth(automation, input.runs)),
+  ];
+  const count = (health: RecurringHealth) => healths.filter((value) => value === health).length;
+  return {
+    total: healths.length,
+    failing: count("failing"),
+    running: count("running"),
+    paused: count("paused"),
+  };
+}
+
+/** Enabled recurring tasks whose last run failed: the number the sidebar shows. */
+export function countFailingRecurringTasks(input: RecurringTasksInput): number {
+  return summarizeRecurringHealth(input).failing;
+}
+
+/**
+ * Keeps the user's pick while it still exists, otherwise opens whatever needs
+ * them most: the first failing task, then running, then the rest. Scheduled
+ * tasks come before committed automations of the same health.
+ */
+export function resolveAutomationsSelection(
+  selection: AutomationsSelection | undefined,
+  input: RecurringTasksInput,
+): AutomationsSelection | undefined {
+  if (selection !== undefined) {
+    const exists =
+      selection.kind === "scheduled-task"
+        ? input.tasks.some((task) => task.id === selection.id)
+        : input.automations.some((automation) => automation.id === selection.id);
+    if (exists) return selection;
+  }
+  const candidates: ReadonlyArray<{
+    readonly selection: AutomationsSelection;
+    readonly health: RecurringHealth;
+  }> = [
+    ...input.tasks.map((task) => ({
+      selection: { kind: "scheduled-task" as const, id: task.id },
+      health: scheduledTaskHealth(task),
+    })),
+    ...input.automations.map((automation) => ({
+      selection: { kind: "automation" as const, id: automation.id },
+      health: automationHealth(automation, input.runs),
+    })),
+  ];
+  return sortByHealth(candidates, (candidate) => candidate.health)[0]?.selection;
+}
+
+export function describeAutomationTrigger(trigger: AutomationTrigger): string {
+  switch (trigger.type) {
+    case "manual":
+      return "Manual";
+    case "schedule":
+      return describeAutomationSchedule(trigger.expression);
+    case "webhook":
+      return "On webhook";
+  }
 }

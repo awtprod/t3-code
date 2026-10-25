@@ -25,9 +25,11 @@ import {
 } from "../../hooks/useSettings";
 import { APP_BASE_NAME } from "../../branding";
 import { cn } from "../../lib/utils";
+import { countFailingRecurringTasks } from "../../command-center/automation/AutomationsScreen.logic";
 import { commandCenterEnvironment } from "../../state/commandCenter";
 import { usePrimaryEnvironmentId, usePullRequestsSupported } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
+import { serverEnvironment } from "../../state/server";
 import {
   resolveEnvironmentIdentificationPillLabel,
   resolveSidebarStageBackdropVariant,
@@ -305,10 +307,27 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
     if (isMobile) setOpenMobile(false);
   }, [isMobile, setOpenMobile]);
   const shortcuts = useCommandCenterSidebarShortcuts();
+  const automationsVisible = shortcuts.includes("automations");
+  // The Automations shortcut carries the number of enabled recurring tasks whose
+  // last run failed, so a broken task is visible without ringing. Scheduled tasks
+  // arrive live; committed automations follow the bootstrap snapshot.
+  const scheduledTasksQuery = useEnvironmentQuery(
+    automationsVisible && environmentId !== null
+      ? serverEnvironment.scheduledTasksLive({ environmentId, input: {} })
+      : null,
+  );
+  const failingRecurring = automationsVisible
+    ? countFailingRecurringTasks({
+        tasks: scheduledTasksQuery.data?.tasks ?? [],
+        automations: bootstrapQuery.data?.automations ?? [],
+        runs: bootstrapQuery.data?.runs ?? [],
+      })
+    : 0;
   const entries = visibleCommandCenterShortcuts(shortcuts).map((shortcut) => ({
     ...shortcut,
     icon: SHORTCUT_ICONS[shortcut.key],
     active: isCommandCenterShortcutActive(shortcut, pathname),
+    attention: shortcut.key === "automations" ? failingRecurring : 0,
   }));
   const inboxUnavailable =
     bootstrapQuery.error !== null &&
@@ -336,6 +355,11 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
               >
                 <Icon />
                 <span>{entry.label}</span>
+                {entry.attention > 0 ? (
+                  <Badge aria-label={`${entry.attention} failing`} size="sm" variant="destructive">
+                    {entry.attention}
+                  </Badge>
+                ) : null}
               </Link>
             );
           })}
@@ -362,7 +386,18 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
                 size="sm"
               >
                 <Icon />
-                <span>{entry.label}</span>
+                <span className="min-w-0 flex-1 truncate">{entry.label}</span>
+                {entry.attention > 0 ? (
+                  <span className="flex shrink-0">
+                    <Badge
+                      aria-label={`${entry.attention} failing`}
+                      size="sm"
+                      variant="destructive"
+                    >
+                      {entry.attention}
+                    </Badge>
+                  </span>
+                ) : null}
               </SidebarMenuButton>
             </SidebarMenuItem>
           );

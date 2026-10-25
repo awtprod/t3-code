@@ -39,7 +39,7 @@ describe("visibleCommandCenterShortcuts", () => {
 
 describe("commandCenterLandingShortcut", () => {
   it("lands on New thread with the default shortcuts", () => {
-    expect(commandCenterLandingShortcut(["new", "resources"]).to).toBe("/new");
+    expect(commandCenterLandingShortcut(["new", "automations", "resources"]).to).toBe("/new");
   });
 
   it("lands on the inbox whenever it is visible, since it comes first", () => {

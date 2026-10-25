@@ -105,9 +105,9 @@ export const CommandCenterSidebarShortcutKey = Schema.Literals([
   "resources",
 ]);
 export type CommandCenterSidebarShortcutKey = typeof CommandCenterSidebarShortcutKey.Type;
-/** The shortcuts visible until the user chooses otherwise. */
+/** The shortcuts visible until the user chooses otherwise: start work, watch recurring work, watch the host. */
 export const DEFAULT_COMMAND_CENTER_SIDEBAR_SHORTCUTS: ReadonlyArray<CommandCenterSidebarShortcutKey> =
-  ["new", "resources"];
+  ["new", "automations", "resources"];
 const isCommandCenterSidebarShortcutKey = Schema.is(CommandCenterSidebarShortcutKey);
 /**
  * The visible shortcut keys. A key this build does not know (one a newer build

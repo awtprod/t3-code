@@ -690,8 +690,12 @@ describe("ClientSettings sidebar", () => {
 
 describe("ClientSettings Command Center sidebar shortcuts", () => {
   it("shows only New thread and Resources by default", () => {
-    expect(DEFAULT_COMMAND_CENTER_SIDEBAR_SHORTCUTS).toEqual(["new", "resources"]);
-    expect(decodeClientSettings({}).commandCenterSidebarShortcuts).toEqual(["new", "resources"]);
+    expect(DEFAULT_COMMAND_CENTER_SIDEBAR_SHORTCUTS).toEqual(["new", "automations", "resources"]);
+    expect(decodeClientSettings({}).commandCenterSidebarShortcuts).toEqual([
+      "new",
+      "automations",
+      "resources",
+    ]);
   });
 
   it("round-trips a chosen list, including an empty one", () => {
