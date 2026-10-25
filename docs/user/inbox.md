@@ -1,6 +1,8 @@
 # Inbox
 
-Inbox is the default Command Center workspace for decisions, questions, proposed changes, useful results, and incidents that need attention. Each item has a durable URL, so browser Back and Forward work normally and a specific item can be bookmarked or shared.
+Inbox is the Command Center workspace for decisions, questions, proposed changes, useful results, and incidents that need attention. Each item has a durable URL, so browser Back and Forward work normally and a specific item can be bookmarked or shared.
+
+The Command Center sidebar shows only **New thread**, **Automations** and **Resources** by default. On web and desktop, turn on **Needs You** (this page) and the other shortcuts under **Settings → General → Sidebar shortcuts**; T3 Code opens on the first shortcut you keep on, so turn on **Needs You** to start here.
 
 Use the Space menu to view one Space or all Spaces. **Actionable** excludes completed and canceled items. **Recent** includes completed results as well as dismissed items. **Snoozed** follows the environment's current server state, including wake-time expiry. Command Center reads each Space independently and loads more items on demand; counts with a plus sign describe only the loaded page, and an empty Space remains empty instead of showing sample activity.
 

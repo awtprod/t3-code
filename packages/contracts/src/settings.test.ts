@@ -7,6 +7,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  DEFAULT_COMMAND_CENTER_SIDEBAR_SHORTCUTS,
   DEFAULT_SERVER_SETTINGS,
   DEFAULT_USAGE_PRICE_OVERRIDES,
   requiredScopesForProjectMutation,
@@ -684,6 +685,38 @@ describe("ClientSettings sidebar", () => {
     expect(decodeClientSettings({}).confirmThreadUnpin).toBe(false);
     expect(decodeClientSettingsPatch({ confirmThreadUnpin: true }).confirmThreadUnpin).toBe(true);
     expect(() => decodeClientSettingsPatch({ confirmThreadUnpin: "yes" })).toThrow();
+  });
+});
+
+describe("ClientSettings Command Center sidebar shortcuts", () => {
+  it("shows only New thread and Resources by default", () => {
+    expect(DEFAULT_COMMAND_CENTER_SIDEBAR_SHORTCUTS).toEqual(["new", "automations", "resources"]);
+    expect(decodeClientSettings({}).commandCenterSidebarShortcuts).toEqual([
+      "new",
+      "automations",
+      "resources",
+    ]);
+  });
+
+  it("round-trips a chosen list, including an empty one", () => {
+    for (const commandCenterSidebarShortcuts of [["inbox", "sprint-plan", "resources"], []]) {
+      expect(
+        encodeClientSettings(decodeClientSettings({ commandCenterSidebarShortcuts })),
+      ).toMatchObject({ commandCenterSidebarShortcuts });
+      expect(decodeClientSettingsPatch({ commandCenterSidebarShortcuts })).toEqual({
+        commandCenterSidebarShortcuts,
+      });
+    }
+  });
+
+  it("drops unknown keys instead of failing the stored settings", () => {
+    const commandCenterSidebarShortcuts = ["resources", "retired-page", 7, "inbox"];
+    expect(decodeClientSettings({ commandCenterSidebarShortcuts })).toMatchObject({
+      commandCenterSidebarShortcuts: ["resources", "inbox"],
+    });
+    expect(decodeClientSettingsPatch({ commandCenterSidebarShortcuts })).toEqual({
+      commandCenterSidebarShortcuts: ["resources", "inbox"],
+    });
   });
 });
 

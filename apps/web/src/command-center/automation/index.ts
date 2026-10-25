@@ -1,12 +1,29 @@
 export { AutomationEditor } from "./AutomationEditor";
-export { AutomationsScreen, type AutomationsScreenProps } from "./AutomationsScreen";
 export {
+  AutomationsScreen,
+  type AutomationsScreenProps,
+  type ScheduledTasksStatus,
+} from "./AutomationsScreen";
+export {
+  automationHealth,
   automationSpaceName,
+  countFailingRecurringTasks,
+  describeAutomationTrigger,
+  latestAutomationRun,
   projectAutomationForEditor,
   resolveAutomationsScreenStatus,
+  resolveAutomationsSelection,
+  scheduledTaskHealth,
+  sortByHealth,
+  summarizeRecurringHealth,
   type AutomationsScreenStatus,
+  type AutomationsSelection,
+  type RecurringHealth,
+  type RecurringHealthSummary,
+  type RecurringTasksInput,
   type ResolveAutomationsScreenStatusInput,
 } from "./AutomationsScreen.logic";
+export { ScheduledTaskDetails, type ScheduledTaskDetailsProps } from "./ScheduledTaskDetails";
 export {
   AUTOMATION_NODE_HEIGHT,
   AUTOMATION_NODE_WIDTH,

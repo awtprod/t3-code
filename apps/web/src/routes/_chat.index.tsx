@@ -6,6 +6,11 @@ import { Button } from "../components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { SidebarInset } from "../components/ui/sidebar";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
+import { commandCenterLandingShortcut } from "../components/sidebar/commandCenterShortcuts";
+import {
+  useClientSettingsHydrationStatus,
+  useCommandCenterSidebarShortcuts,
+} from "../hooks/useSettings";
 import { useEnvironments } from "../state/environments";
 import { isElectron } from "../env";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
@@ -21,15 +26,29 @@ function ChatIndexRouteView() {
     if (environments.length === 0) return <HostedStaticOnboardingState />;
   }
 
-  return <InboxRedirect />;
+  return <CommandCenterLandingRedirect />;
 }
 
-/** Command Center lands on the inbox; `/new` owns the draft auto-start. */
-function InboxRedirect() {
+/**
+ * Command Center lands on its first visible sidebar shortcut: the inbox when it
+ * is shown, otherwise whatever the user kept (New thread by default, where
+ * `/new` owns the draft auto-start). Waits for saved settings so a stored
+ * choice is not overridden by the default list.
+ */
+function CommandCenterLandingRedirect() {
   const navigate = useNavigate();
+  const shortcuts = useCommandCenterSidebarShortcuts();
+  const hydrationStatus = useClientSettingsHydrationStatus();
+  const settingsSettled = hydrationStatus === "ready" || hydrationStatus === "failed";
+  const landing = commandCenterLandingShortcut(shortcuts).to;
   useEffect(() => {
-    void navigate({ to: "/inbox", search: { tab: "actionable" }, replace: true });
-  }, [navigate]);
+    if (!settingsSettled) return;
+    if (landing === "/inbox") {
+      void navigate({ to: "/inbox", search: { tab: "actionable" }, replace: true });
+      return;
+    }
+    void navigate({ to: landing, replace: true });
+  }, [landing, navigate, settingsSettled]);
   return null;
 }
 

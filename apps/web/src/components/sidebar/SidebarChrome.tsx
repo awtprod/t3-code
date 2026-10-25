@@ -12,18 +12,24 @@ import {
   LightbulbIcon,
   SettingsIcon,
   SquarePenIcon,
+  type LucideIcon,
   WorkflowIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useCallback } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 
-import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
+import {
+  useCommandCenterSidebarShortcuts,
+  useEnvironmentIdentificationMode,
+} from "../../hooks/useSettings";
 import { APP_BASE_NAME } from "../../branding";
 import { cn } from "../../lib/utils";
+import { countFailingRecurringTasks } from "../../command-center/automation/AutomationsScreen.logic";
 import { commandCenterEnvironment } from "../../state/commandCenter";
 import { usePrimaryEnvironmentId, usePullRequestsSupported } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
+import { serverEnvironment } from "../../state/server";
 import {
   resolveEnvironmentIdentificationPillLabel,
   resolveSidebarStageBackdropVariant,
@@ -42,6 +48,11 @@ import {
 } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { readPullRequestListPreferences } from "../pullRequest/pullRequestListPreferences";
+import {
+  type CommandCenterShortcut,
+  isCommandCenterShortcutActive,
+  visibleCommandCenterShortcuts,
+} from "./commandCenterShortcuts";
 import { isSidebarUtilityPage, useNavigateToMainApp } from "./mainAppLocation";
 import { SidebarThreadUndoNotice } from "./SidebarThreadUndoNotice";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
@@ -269,6 +280,19 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   );
 });
 
+const SHORTCUT_ICONS: Record<CommandCenterShortcut["key"], LucideIcon> = {
+  inbox: InboxIcon,
+  new: SquarePenIcon,
+  command: CommandIcon,
+  automations: WorkflowIcon,
+  responsibilities: ListChecksIcon,
+  prospects: ContactRoundIcon,
+  "sprint-plan": CalendarDaysIcon,
+  observations: ListFilterIcon,
+  lessons: LightbulbIcon,
+  resources: HardDriveIcon,
+};
+
 /** Command Center-owned navigation shared by both sidebar generations. */
 export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenterNavigation() {
   const pathname = useLocation({ select: (location) => location.pathname });
@@ -282,64 +306,35 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
   const closeMobileSidebar = useCallback(() => {
     if (isMobile) setOpenMobile(false);
   }, [isMobile, setOpenMobile]);
-  const entries = [
-    {
-      to: "/inbox" as const,
-      label: "Needs You",
-      icon: InboxIcon,
-      active: pathname === "/" || pathname.startsWith("/inbox"),
-    },
-    { to: "/new" as const, label: "New thread", icon: SquarePenIcon, active: pathname === "/new" },
-    {
-      to: "/command" as const,
-      label: "Command",
-      icon: CommandIcon,
-      active: pathname.startsWith("/command"),
-    },
-    {
-      to: "/automations" as const,
-      label: "Automations",
-      icon: WorkflowIcon,
-      active: pathname.startsWith("/automations"),
-    },
-    {
-      to: "/responsibilities" as const,
-      label: "Responsibilities",
-      icon: ListChecksIcon,
-      active: pathname.startsWith("/responsibilities"),
-    },
-    {
-      to: "/prospects" as const,
-      label: "Prospects",
-      icon: ContactRoundIcon,
-      active: pathname.startsWith("/prospects"),
-    },
-    {
-      to: "/sprint-plan" as const,
-      label: "Sprint plan",
-      icon: CalendarDaysIcon,
-      active: pathname.startsWith("/sprint-plan"),
-    },
-    {
-      to: "/observations" as const,
-      label: "Observations",
-      icon: ListFilterIcon,
-      active: pathname.startsWith("/observations"),
-    },
-    {
-      to: "/lessons" as const,
-      label: "Lessons",
-      icon: LightbulbIcon,
-      active: pathname.startsWith("/lessons"),
-    },
-    {
-      to: "/resources" as const,
-      label: "Resources",
-      icon: HardDriveIcon,
-      active: pathname.startsWith("/resources"),
-    },
-  ];
-  const inboxUnavailable = bootstrapQuery.error !== null && environmentId !== null;
+  const shortcuts = useCommandCenterSidebarShortcuts();
+  const automationsVisible = shortcuts.includes("automations");
+  // The Automations shortcut carries the number of enabled recurring tasks whose
+  // last run failed, so a broken task is visible without ringing. Scheduled tasks
+  // arrive live; committed automations follow the bootstrap snapshot.
+  const scheduledTasksQuery = useEnvironmentQuery(
+    automationsVisible && environmentId !== null
+      ? serverEnvironment.scheduledTasksLive({ environmentId, input: {} })
+      : null,
+  );
+  const failingRecurring = automationsVisible
+    ? countFailingRecurringTasks({
+        tasks: scheduledTasksQuery.data?.tasks ?? [],
+        automations: bootstrapQuery.data?.automations ?? [],
+        runs: bootstrapQuery.data?.runs ?? [],
+      })
+    : 0;
+  const entries = visibleCommandCenterShortcuts(shortcuts).map((shortcut) => ({
+    ...shortcut,
+    icon: SHORTCUT_ICONS[shortcut.key],
+    active: isCommandCenterShortcutActive(shortcut, pathname),
+    attention: shortcut.key === "automations" ? failingRecurring : 0,
+  }));
+  const inboxUnavailable =
+    bootstrapQuery.error !== null &&
+    environmentId !== null &&
+    entries.some((entry) => entry.key === "inbox");
+  // Every shortcut can be hidden; an empty group would still take up its padding.
+  if (entries.length === 0) return null;
 
   if (isMobile) {
     // The phone drawer is mostly for switching threads. Wrapping chips keep
@@ -351,7 +346,7 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
             const Icon = entry.icon;
             return (
               <Link
-                key={entry.label}
+                key={entry.key}
                 aria-current={entry.active ? "page" : undefined}
                 className="inline-flex h-8 items-center gap-1.5 rounded-full bg-sidebar-control-surface px-2 text-xs font-medium text-sidebar-muted-foreground ring-1 ring-sidebar-border outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring active:bg-sidebar-row-active data-[active=true]:bg-sidebar-row-selected data-[active=true]:text-sidebar-foreground [&>svg]:size-3.5 [&>svg]:shrink-0"
                 data-active={entry.active}
@@ -360,6 +355,11 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
               >
                 <Icon />
                 <span>{entry.label}</span>
+                {entry.attention > 0 ? (
+                  <Badge aria-label={`${entry.attention} failing`} size="sm" variant="destructive">
+                    {entry.attention}
+                  </Badge>
+                ) : null}
               </Link>
             );
           })}
@@ -379,14 +379,25 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
         {entries.map((entry) => {
           const Icon = entry.icon;
           return (
-            <SidebarMenuItem key={entry.label}>
+            <SidebarMenuItem key={entry.key}>
               <SidebarMenuButton
                 isActive={entry.active}
                 render={<Link to={entry.to} onClick={closeMobileSidebar} />}
                 size="sm"
               >
                 <Icon />
-                <span>{entry.label}</span>
+                <span className="min-w-0 flex-1 truncate">{entry.label}</span>
+                {entry.attention > 0 ? (
+                  <span className="flex shrink-0">
+                    <Badge
+                      aria-label={`${entry.attention} failing`}
+                      size="sm"
+                      variant="destructive"
+                    >
+                      {entry.attention}
+                    </Badge>
+                  </span>
+                ) : null}
               </SidebarMenuButton>
             </SidebarMenuItem>
           );

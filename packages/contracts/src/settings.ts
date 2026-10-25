@@ -86,6 +86,47 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 );
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
+
+/**
+ * Stable ids for the Command Center shortcuts in the left sidebar. Persisted in
+ * client settings, so ids are never renamed; the order the web client lists
+ * them in is its own concern.
+ */
+export const CommandCenterSidebarShortcutKey = Schema.Literals([
+  "inbox",
+  "new",
+  "command",
+  "automations",
+  "responsibilities",
+  "prospects",
+  "sprint-plan",
+  "observations",
+  "lessons",
+  "resources",
+]);
+export type CommandCenterSidebarShortcutKey = typeof CommandCenterSidebarShortcutKey.Type;
+/** The shortcuts visible until the user chooses otherwise: start work, watch recurring work, watch the host. */
+export const DEFAULT_COMMAND_CENTER_SIDEBAR_SHORTCUTS: ReadonlyArray<CommandCenterSidebarShortcutKey> =
+  ["new", "automations", "resources"];
+const isCommandCenterSidebarShortcutKey = Schema.is(CommandCenterSidebarShortcutKey);
+/**
+ * The visible shortcut keys. A key this build does not know (one a newer build
+ * added, or one since retired) is dropped on decode rather than failing the
+ * whole settings blob. Not `ForwardCompatibleArray`: that codec's encoded side
+ * is strict, which `withDecodingDefault` would then validate before it runs.
+ */
+const CommandCenterSidebarShortcuts = Schema.Array(Schema.Unknown).pipe(
+  Schema.decodeTo(
+    Schema.Array(CommandCenterSidebarShortcutKey),
+    SchemaTransformation.transform<
+      ReadonlyArray<CommandCenterSidebarShortcutKey>,
+      ReadonlyArray<unknown>
+    >({
+      decode: (stored) => stored.filter(isCommandCenterSidebarShortcutKey),
+      encode: (keys) => keys,
+    }),
+  ),
+);
 export const MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 1;
 export const MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 90;
 export const SidebarAutoSettleAfterDays = Schema.Number.check(
@@ -490,6 +531,10 @@ export const ClientSettingsSchema = Schema.Struct({
   // `sidebarV2Enabled`/`sidebarV2ConfiguredByUser` beta pair below, which
   // opts into the newer experimental sidebar from Settings → Beta.
   legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // The Command Center sidebar shortcuts the user has switched on.
+  commandCenterSidebarShortcuts: CommandCenterSidebarShortcuts.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_COMMAND_CENTER_SIDEBAR_SHORTCUTS)),
+  ),
   // Beta: working and monitoring threads fold into a Working shelf and return
   // to the top of the inbox once they need the user. The inbox then orders by
   // time, so manual placement there is ignored (and kept) while it is on.
@@ -1922,6 +1967,7 @@ export const ClientSettingsPatch = Schema.Struct({
   proactivePanelsEnabled: Schema.optionalKey(Schema.Boolean),
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
+  commandCenterSidebarShortcuts: Schema.optionalKey(CommandCenterSidebarShortcuts),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
   sidebarProjectGroupingOverrides: Schema.optionalKey(

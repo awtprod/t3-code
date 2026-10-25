@@ -3,14 +3,30 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  automationHealth,
   automationSpaceName,
+  countFailingRecurringTasks,
+  describeAutomationTrigger,
+  latestAutomationRun,
   projectAutomationForEditor,
   reconcileAutomationDraftAfterSave,
   resolveAutomationEnvironmentId,
   resolveAutomationsScreenStatus,
+  resolveAutomationsSelection,
+  scheduledTaskHealth,
   shouldAutosaveAutomationDraft,
+  sortByHealth,
+  summarizeRecurringHealth,
 } from "./AutomationsScreen.logic";
-import { SAMPLE_AUTOMATION, SAMPLE_SPACE } from "./AutomationsScreen.test-fixtures";
+import {
+  SAMPLE_AUTOMATION,
+  SAMPLE_FAILED_RUN,
+  SAMPLE_FAILED_SCHEDULED_TASK,
+  SAMPLE_OLDER_SUCCEEDED_RUN,
+  SAMPLE_PAUSED_SCHEDULED_TASK,
+  SAMPLE_SCHEDULED_TASK,
+  SAMPLE_SPACE,
+} from "./AutomationsScreen.test-fixtures";
 import { AUTOMATION_EDITOR_ADDABLE_NODE_KINDS } from "./types";
 
 describe("automations route state", () => {
@@ -242,5 +258,122 @@ describe("committed automation projection", () => {
       },
     });
     expect(automationSpaceName(SAMPLE_AUTOMATION, [SAMPLE_SPACE])).toBe("Sample Space");
+  });
+});
+
+describe("recurring task health", () => {
+  const enabledAutomation = { ...SAMPLE_AUTOMATION, enabled: true };
+
+  it("ranks a scheduled task by its enabled flag and last run", () => {
+    expect(scheduledTaskHealth(SAMPLE_FAILED_SCHEDULED_TASK)).toBe("failing");
+    expect(scheduledTaskHealth(SAMPLE_SCHEDULED_TASK)).toBe("ok");
+    expect(scheduledTaskHealth(SAMPLE_PAUSED_SCHEDULED_TASK)).toBe("paused");
+    expect(scheduledTaskHealth({ enabled: true, lastRunStatus: "running" })).toBe("running");
+    expect(scheduledTaskHealth({ enabled: true, lastRunStatus: "never" })).toBe("idle");
+    // A failing task that was paused no longer needs anyone.
+    expect(scheduledTaskHealth({ enabled: false, lastRunStatus: "failed" })).toBe("paused");
+  });
+
+  it("judges a committed automation by its newest run, whatever order runs arrive in", () => {
+    const runs = [SAMPLE_OLDER_SUCCEEDED_RUN, SAMPLE_FAILED_RUN];
+    expect(latestAutomationRun(SAMPLE_AUTOMATION, runs)?.id).toBe(SAMPLE_FAILED_RUN.id);
+    expect(latestAutomationRun(SAMPLE_AUTOMATION, runs.toReversed())?.id).toBe(
+      SAMPLE_FAILED_RUN.id,
+    );
+    expect(automationHealth(enabledAutomation, runs)).toBe("failing");
+    expect(automationHealth(enabledAutomation, [SAMPLE_OLDER_SUCCEEDED_RUN])).toBe("ok");
+    expect(automationHealth(enabledAutomation, [])).toBe("idle");
+    expect(automationHealth(SAMPLE_AUTOMATION, runs)).toBe("paused");
+    expect(
+      automationHealth(enabledAutomation, [{ ...SAMPLE_FAILED_RUN, status: "waiting_approval" }]),
+    ).toBe("running");
+  });
+
+  it("ignores runs that belong to other automations", () => {
+    const other = { ...SAMPLE_FAILED_RUN, automationId: undefined };
+    expect(latestAutomationRun(SAMPLE_AUTOMATION, [other])).toBeUndefined();
+  });
+
+  it("sorts most urgent first and keeps the incoming order within a rank", () => {
+    const sorted = sortByHealth(
+      [
+        SAMPLE_PAUSED_SCHEDULED_TASK,
+        SAMPLE_SCHEDULED_TASK,
+        { ...SAMPLE_SCHEDULED_TASK, id: "second-ok" },
+        SAMPLE_FAILED_SCHEDULED_TASK,
+      ],
+      scheduledTaskHealth,
+    ).map((task) => task.id);
+    expect(sorted).toEqual([
+      SAMPLE_FAILED_SCHEDULED_TASK.id,
+      SAMPLE_SCHEDULED_TASK.id,
+      "second-ok",
+      SAMPLE_PAUSED_SCHEDULED_TASK.id,
+    ]);
+  });
+
+  it("counts failing tasks across both systems, skipping paused ones", () => {
+    const input = {
+      tasks: [SAMPLE_FAILED_SCHEDULED_TASK, SAMPLE_SCHEDULED_TASK, SAMPLE_PAUSED_SCHEDULED_TASK],
+      automations: [enabledAutomation, SAMPLE_AUTOMATION],
+      runs: [SAMPLE_FAILED_RUN],
+    };
+    expect(summarizeRecurringHealth(input)).toEqual({
+      total: 5,
+      failing: 2,
+      running: 0,
+      paused: 2,
+    });
+    expect(countFailingRecurringTasks(input)).toBe(2);
+    expect(countFailingRecurringTasks({ tasks: [], automations: [], runs: [] })).toBe(0);
+  });
+
+  it("describes committed triggers the way the editor does", () => {
+    expect(describeAutomationTrigger({ type: "manual" })).toBe("Manual");
+    expect(describeAutomationTrigger(SAMPLE_AUTOMATION.trigger)).toBe("Every Monday at 9:00 AM");
+    expect(describeAutomationTrigger({ type: "webhook", route: "/hooks/x" })).toBe("On webhook");
+  });
+});
+
+describe("resolveAutomationsSelection", () => {
+  const input = {
+    tasks: [SAMPLE_PAUSED_SCHEDULED_TASK, SAMPLE_SCHEDULED_TASK, SAMPLE_FAILED_SCHEDULED_TASK],
+    automations: [SAMPLE_AUTOMATION],
+    runs: [SAMPLE_FAILED_RUN],
+  };
+
+  it("keeps a selection that still exists", () => {
+    const selection = { kind: "automation" as const, id: SAMPLE_AUTOMATION.id };
+    expect(resolveAutomationsSelection(selection, input)).toEqual(selection);
+  });
+
+  it("opens the failing scheduled task when nothing is selected", () => {
+    expect(resolveAutomationsSelection(undefined, input)).toEqual({
+      kind: "scheduled-task",
+      id: SAMPLE_FAILED_SCHEDULED_TASK.id,
+    });
+  });
+
+  it("drops a selection that disappeared and falls back to the most urgent item", () => {
+    expect(resolveAutomationsSelection({ kind: "scheduled-task", id: "deleted" }, input)).toEqual({
+      kind: "scheduled-task",
+      id: SAMPLE_FAILED_SCHEDULED_TASK.id,
+    });
+  });
+
+  it("prefers a failing automation over healthy scheduled tasks", () => {
+    expect(
+      resolveAutomationsSelection(undefined, {
+        tasks: [SAMPLE_SCHEDULED_TASK],
+        automations: [{ ...SAMPLE_AUTOMATION, enabled: true }],
+        runs: [SAMPLE_FAILED_RUN],
+      }),
+    ).toEqual({ kind: "automation", id: SAMPLE_AUTOMATION.id });
+  });
+
+  it("is undefined with nothing to show", () => {
+    expect(
+      resolveAutomationsSelection(undefined, { tasks: [], automations: [], runs: [] }),
+    ).toBeUndefined();
   });
 });

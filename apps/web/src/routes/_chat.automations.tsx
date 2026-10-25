@@ -1,35 +1,48 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { useAtomValue } from "@effect/atom-react";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { AutomationNodeId, SpaceId } from "@command-center/core";
 import {
+  AuthOrchestrationOperateScope,
   CommandCenterAutomationSourceDefinition,
   type EnvironmentId,
   type CommandCenterAutomationDefinitionSnapshot,
+  type ScheduledTask,
 } from "@t3tools/contracts";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import * as Schema from "effect/Schema";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   type AutomationEnvironmentOption,
   AutomationsScreen,
+  type ScheduledTasksStatus,
 } from "../command-center/automation/AutomationsScreen";
 import {
   type AutomationEditorDraft,
+  type AutomationsSelection,
   readPreferredAutomationEnvironmentId,
   reconcileAutomationDraftAfterSave,
   rememberPreferredAutomationEnvironmentId,
   resolveAutomationEnvironmentId,
   resolveAutomationsScreenStatus,
+  resolveAutomationsSelection,
   shouldAutosaveAutomationDraft,
 } from "../command-center/automation/AutomationsScreen.logic";
 import type { AutomationEditorDefinition } from "../command-center/automation/types";
+import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { commandCenterEnvironment } from "../state/commandCenter";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useEnvironmentQuery } from "../state/query";
+import { serverEnvironment } from "../state/server";
+import { readEnvironmentScope } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
 
 const decodeSourceDefinition = Schema.decodeUnknownSync(CommandCenterAutomationSourceDefinition);
 const AUTOMATION_AUTOSAVE_DELAY_MS = 1_000;
+const EMPTY_SCHEDULED_TASKS: ReadonlyArray<ScheduledTask> = [];
 
 function automationCommandError(cause: unknown, fallback: string): Error {
   if (cause instanceof Error && cause.message.trim().length > 0) return cause;
@@ -64,6 +77,16 @@ function saveFailureMessage(failure: unknown): string {
     : "The automation config commit could not be created on the selected environment.";
 }
 
+function reportScheduledTaskFailure(title: string, error: unknown) {
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title,
+      description: error instanceof Error ? error.message : String(error),
+    }),
+  );
+}
+
 interface AutomationsEnvironmentRouteViewProps {
   readonly environmentId: EnvironmentId | null;
   readonly environmentOptions: ReadonlyArray<AutomationEnvironmentOption>;
@@ -75,7 +98,8 @@ function AutomationsEnvironmentRouteView({
   environmentOptions,
   onEnvironmentChange,
 }: AutomationsEnvironmentRouteViewProps) {
-  const [selectedAutomationId, setSelectedAutomationId] = useState<string>();
+  const navigate = useNavigate();
+  const [selection, setSelection] = useState<AutomationsSelection>();
   const [drafts, setDrafts] = useState<Readonly<Record<string, AutomationEditorDraft>>>({});
   const [savingAutomationId, setSavingAutomationId] = useState<string>();
   const savingAutomationIdRef = useRef<string | undefined>(undefined);
@@ -83,6 +107,7 @@ function AutomationsEnvironmentRouteView({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [busyScheduledTaskId, setBusyScheduledTaskId] = useState<string | null>(null);
   const bootstrapQuery = useEnvironmentQuery(
     environmentId === null
       ? null
@@ -96,6 +121,15 @@ function AutomationsEnvironmentRouteView({
           input: { afterSequence: 0, batchSize: 200 },
         }),
   );
+  // Live: the scheduler pushes run status and next-run changes as they happen.
+  const scheduledTasksQuery = useEnvironmentQuery(
+    environmentId === null
+      ? null
+      : serverEnvironment.scheduledTasksLive({ environmentId, input: {} }),
+  );
+  const canOperateScheduledTasks = useAtomValue(
+    serverEnvironment.runScheduledTaskNow.permissionAtom(environmentId),
+  );
   const lastRefreshSequence = useRef(0);
   useEffect(() => {
     const sequence = eventQuery.data?.sequence;
@@ -104,12 +138,51 @@ function AutomationsEnvironmentRouteView({
     bootstrapQuery.refresh();
   }, [bootstrapQuery.refresh, eventQuery.data?.sequence]);
   const bootstrap = bootstrapQuery.data;
+  const automations = bootstrap?.automations;
+  const runs = bootstrap?.runs;
+  const scheduledTasks = scheduledTasksQuery.data?.tasks ?? EMPTY_SCHEDULED_TASKS;
+  const scheduledTasksStatus: ScheduledTasksStatus =
+    scheduledTasksQuery.data !== null
+      ? "ready"
+      : scheduledTasksQuery.error !== null
+        ? "unavailable"
+        : "loading";
+  const resolvedSelection = useMemo(
+    () =>
+      resolveAutomationsSelection(selection, {
+        tasks: scheduledTasks,
+        automations: automations ?? [],
+        runs: runs ?? [],
+      }),
+    [automations, runs, scheduledTasks, selection],
+  );
   const selectedAutomation = useMemo(
     () =>
-      bootstrap?.automations.find((automation) => automation.id === selectedAutomationId) ??
-      bootstrap?.automations[0],
-    [bootstrap?.automations, selectedAutomationId],
+      resolvedSelection?.kind === "automation"
+        ? automations?.find((automation) => automation.id === resolvedSelection.id)
+        : undefined,
+    [automations, resolvedSelection],
   );
+  const status = resolveAutomationsScreenStatus({
+    connected: environmentId !== null,
+    isPending: bootstrapQuery.isPending,
+    hasData: bootstrap !== null,
+    hasError: bootstrapQuery.error !== null,
+    ...(bootstrap === null ? {} : { configStatus: bootstrap.configHealth.status }),
+  });
+  // Pin whatever the page opened on, once both sources have answered so the pick
+  // is the most urgent item overall, not just the first list to arrive.
+  // The live task list changes health under the
+  // user, and a fallback that kept re-resolving would swap the open item mid-read
+  // or mid-edit. Only an empty selection is pinned: a chosen item that is briefly
+  // absent (an automation created a moment ago, until the bootstrap refresh lists
+  // it) shows the fallback meanwhile and is opened as soon as it appears. Setting
+  // state during render is React's pattern for deriving state from data; it
+  // re-renders once and cannot loop, since the selection is non-empty afterwards.
+  const sourcesSettled = status !== "loading" && scheduledTasksStatus !== "loading";
+  if (sourcesSettled && selection === undefined && resolvedSelection !== undefined) {
+    setSelection(resolvedSelection);
+  }
   const definitionQuery = useEnvironmentQuery(
     environmentId === null || selectedAutomation === undefined
       ? null
@@ -142,12 +215,11 @@ function AutomationsEnvironmentRouteView({
     reportFailure: false,
   });
   const syncSpaces = useAtomCommand(commandCenterEnvironment.syncSpaces, { reportFailure: false });
-  const status = resolveAutomationsScreenStatus({
-    connected: environmentId !== null,
-    isPending: bootstrapQuery.isPending,
-    hasData: bootstrap !== null,
-    hasError: bootstrapQuery.error !== null,
-    ...(bootstrap === null ? {} : { configStatus: bootstrap.configHealth.status }),
+  const setScheduledTaskEnabled = useAtomCommand(serverEnvironment.setScheduledTaskEnabled, {
+    label: "automations scheduled task toggle",
+  });
+  const runScheduledTaskNow = useAtomCommand(serverEnvironment.runScheduledTaskNow, {
+    label: "automations scheduled task run now",
   });
   const selectedId = selectedAutomation?.id;
   const activeDraft = selectedId === undefined ? undefined : drafts[selectedId];
@@ -302,7 +374,7 @@ function AutomationsEnvironmentRouteView({
       });
       if (result._tag === "Success") {
         const snapshot = result.value;
-        setSelectedAutomationId(snapshot.automationId);
+        setSelection({ kind: "automation", id: snapshot.automationId });
         setDrafts((current) => ({
           ...current,
           [snapshot.automationId]: {
@@ -346,10 +418,45 @@ function AutomationsEnvironmentRouteView({
     setIsRefreshing(false);
   }, [bootstrapQuery, definitionQuery, environmentId, isRefreshing, selectedId, syncSpaces]);
 
+  const operateScheduledTask = useCallback(
+    async (
+      task: ScheduledTask,
+      action: { readonly kind: "run" } | { readonly kind: "enable"; readonly enabled: boolean },
+    ) => {
+      if (
+        environmentId === null ||
+        busyScheduledTaskId !== null ||
+        !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
+      ) {
+        return;
+      }
+      setBusyScheduledTaskId(task.id);
+      // Partial update: only the enabled flag changes, so a toggle can never
+      // revert concurrent edits made to the task elsewhere.
+      const result =
+        action.kind === "run"
+          ? await runScheduledTaskNow({ environmentId, input: { id: task.id } })
+          : await setScheduledTaskEnabled({
+              environmentId,
+              input: { id: task.id, enabled: action.enabled },
+            });
+      setBusyScheduledTaskId(null);
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        reportScheduledTaskFailure(
+          action.kind === "run" ? "Could not run the task" : "Could not update the task",
+          squashAtomCommandFailure(result),
+        );
+      }
+    },
+    [busyScheduledTaskId, environmentId, runScheduledTaskNow, setScheduledTaskEnabled],
+  );
+
   return (
     <AutomationsScreen
       authoringHealth={definitionQuery.data?.authoringHealth ?? bootstrap?.authoringHealth}
-      automations={bootstrap?.automations ?? []}
+      automations={automations ?? []}
+      busyScheduledTaskId={busyScheduledTaskId}
+      canOperateScheduledTasks={canOperateScheduledTasks}
       connections={bootstrap?.connections ?? []}
       configCommitSha={
         activeDraft?.configCommitSha ?? definitionQuery.data?.configCommitSha ?? undefined
@@ -366,6 +473,10 @@ function AutomationsEnvironmentRouteView({
       isSaving={savingAutomationId === selectedAutomation?.id}
       isRefreshing={isRefreshing}
       refreshError={refreshError}
+      runs={runs}
+      scheduledTasks={scheduledTasks}
+      scheduledTasksError={scheduledTasksQuery.error}
+      scheduledTasksStatus={scheduledTasksStatus}
       onDefinitionChange={changeDefinition}
       onBeginGoogleConnectionSetup={async (input) => {
         if (environmentId === null || selectedAutomation === undefined) {
@@ -431,11 +542,37 @@ function AutomationsEnvironmentRouteView({
       onSave={() => {
         void save();
       }}
-      onSelectAutomation={(automationId) => {
-        setSelectedAutomationId(automationId);
+      onSelect={(next) => {
+        setSelection(next);
         setSaveError(null);
       }}
-      selectedAutomationId={selectedAutomation?.id}
+      onRunScheduledTaskNow={(task) => {
+        void operateScheduledTask(task, { kind: "run" });
+      }}
+      onSetScheduledTaskEnabled={(task, enabled) => {
+        void operateScheduledTask(task, { kind: "enable", enabled });
+      }}
+      onOpenScheduledTaskThread={(task) => {
+        if (environmentId === null || task.threadId === null) return;
+        void navigate({
+          to: "/$environmentId/$threadId",
+          params: { environmentId, threadId: task.threadId },
+        });
+      }}
+      onEditScheduledTask={(task) => {
+        if (environmentId === null) return;
+        void navigate({
+          to: "/settings/scheduled-tasks",
+          search: { environmentId, taskId: task.id },
+        });
+      }}
+      onOpenScheduledTasksSettings={() => {
+        void navigate({
+          to: "/settings/scheduled-tasks",
+          search: environmentId === null ? {} : { environmentId },
+        });
+      }}
+      selection={resolvedSelection}
       spaces={bootstrap?.spaces ?? []}
       status={status}
     />

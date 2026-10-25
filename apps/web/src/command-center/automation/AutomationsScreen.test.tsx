@@ -4,7 +4,14 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import { AutomationsScreen } from "./AutomationsScreen";
 import { projectAutomationForEditor } from "./AutomationsScreen.logic";
-import { SAMPLE_AUTOMATION, SAMPLE_SPACE } from "./AutomationsScreen.test-fixtures";
+import {
+  SAMPLE_AUTOMATION,
+  SAMPLE_FAILED_RUN,
+  SAMPLE_FAILED_SCHEDULED_TASK,
+  SAMPLE_PAUSED_SCHEDULED_TASK,
+  SAMPLE_SCHEDULED_TASK,
+  SAMPLE_SPACE,
+} from "./AutomationsScreen.test-fixtures";
 
 // Each of these renders the whole automations screen synchronously through
 // renderToStaticMarkup. That costs ~5s under full-suite load locally and was
@@ -12,6 +19,9 @@ import { SAMPLE_AUTOMATION, SAMPLE_SPACE } from "./AutomationsScreen.test-fixtur
 // default — one slow runner away from a spurious failure. Give the SSR renders
 // room rather than letting runner variance decide the build.
 const SSR_RENDER_TIMEOUT_MS = 60_000;
+
+const navMarkup = (html: string, label: string) =>
+  new RegExp(`<nav aria-label="${label}"[\\s\\S]*?</nav>`, "u").exec(html)?.[0] ?? "";
 
 describe("AutomationsScreen", () => {
   const windowsEnvironmentId = EnvironmentId.make("windows-primary");
@@ -96,6 +106,7 @@ describe("AutomationsScreen", () => {
 
     expect(html).toContain('data-slot="automations-empty"');
     expect(html).toContain("New automation");
+    expect(html).toContain('data-slot="automations-nothing-recurring"');
     expect(html).not.toContain("Push");
   });
 
@@ -177,6 +188,19 @@ describe("AutomationsScreen", () => {
 
     expect(loading).toContain('data-slot="automations-loading"');
     expect(loading).toContain("Loading committed automation definitions");
+    // Until both sources answer, the detail pane must not claim there is nothing recurring.
+    expect(loading).toContain('data-slot="automations-selection-loading"');
+    expect(loading).not.toContain("Nothing recurring yet");
+    const tasksLoading = renderToStaticMarkup(
+      <AutomationsScreen
+        automations={[]}
+        scheduledTasksStatus="loading"
+        spaces={[]}
+        status="ready"
+      />,
+    );
+    expect(tasksLoading).toContain('data-slot="automations-selection-loading"');
+    expect(tasksLoading).not.toContain("Nothing recurring yet");
     expect(empty).toContain('data-slot="automations-empty"');
     expect(empty).toContain("No committed automations yet");
     expect(empty).toContain("Check again");
@@ -190,5 +214,94 @@ describe("AutomationsScreen", () => {
 
     expect(html).toContain("Automations could not be loaded");
     expect(html).toContain('href="/"');
+  });
+
+  it(
+    "lists scheduled tasks failing first and opens the failing one with its error and controls",
+    () => {
+      const html = renderToStaticMarkup(
+        <AutomationsScreen
+          automations={[SAMPLE_AUTOMATION]}
+          canOperateScheduledTasks
+          onOpenScheduledTaskThread={vi.fn()}
+          onRunScheduledTaskNow={vi.fn()}
+          onSetScheduledTaskEnabled={vi.fn()}
+          runs={[SAMPLE_FAILED_RUN]}
+          scheduledTasks={[
+            SAMPLE_PAUSED_SCHEDULED_TASK,
+            SAMPLE_SCHEDULED_TASK,
+            SAMPLE_FAILED_SCHEDULED_TASK,
+          ]}
+          spaces={[SAMPLE_SPACE]}
+          status="ready"
+        />,
+      );
+
+      const tasksNav = navMarkup(html, "Scheduled tasks");
+      const titles = ["Weekday prospect digest", "Editing opportunity watch", "Paused inbox sync"];
+      const positions = titles.map((title) => tasksNav.indexOf(title));
+      expect(positions.every((position) => position >= 0)).toBe(true);
+      expect(positions).toEqual([...positions].sort((left, right) => left - right));
+      // Enabled rows lead with the outcome and point at the next run; paused rows show the schedule.
+      expect(tasksNav).toMatch(/text-destructive">Failed /u);
+      expect(tasksNav).toContain("Paused · Every 15 min");
+
+      expect(html).toContain('data-slot="scheduled-task-details"');
+      expect(html).toContain('aria-label="Scheduled task Weekday prospect digest"');
+      expect(html).toContain("Workspace preparation failed during provision worktree.");
+      expect(html).toContain("claude-haiku-5-5");
+      expect(html).toContain("Run now");
+      expect(html).toContain("Pause");
+      expect(html).toContain("New worktree each run");
+      // The failing task has no bound thread, so there is nothing to open.
+      expect(html).not.toContain("Open thread");
+      expect(html).not.toContain('data-slot="automation-editor"');
+
+      // Header summary: three tasks plus one automation whose latest run failed, but it is paused.
+      expect(html).toContain("4 recurring");
+      expect(html).toContain("1 failing");
+      expect(html).toContain("2 paused");
+    },
+    SSR_RENDER_TIMEOUT_MS,
+  );
+
+  it(
+    "keeps scheduled tasks usable when the private configuration is unavailable",
+    () => {
+      const html = renderToStaticMarkup(
+        <AutomationsScreen
+          automations={[]}
+          canOperateScheduledTasks
+          onOpenScheduledTaskThread={vi.fn()}
+          scheduledTasks={[SAMPLE_SCHEDULED_TASK]}
+          spaces={[]}
+          status="config-unavailable"
+        />,
+      );
+
+      expect(html).toContain('data-slot="automations-config-unavailable"');
+      expect(html).toContain("Private configuration is unavailable");
+      expect(html).toContain('aria-label="Scheduled task Editing opportunity watch"');
+      expect(html).toContain("Daily at 17:00");
+      expect(html).toContain("Open thread");
+      expect(html).toContain("Last run succeeded");
+    },
+    SSR_RENDER_TIMEOUT_MS,
+  );
+
+  it("explains where recurring work comes from when there is none", () => {
+    const html = renderToStaticMarkup(
+      <AutomationsScreen
+        automations={[]}
+        onOpenScheduledTasksSettings={vi.fn()}
+        scheduledTasks={[]}
+        spaces={[]}
+        status="ready"
+      />,
+    );
+
+    expect(html).toContain('data-slot="scheduled-tasks-empty"');
+    expect(html).toContain("Scheduled tasks settings");
+    expect(html).toContain("Nothing recurring yet");
   });
 });
