@@ -163,6 +163,17 @@ function AutomationsEnvironmentRouteView({
         : undefined,
     [automations, resolvedSelection],
   );
+  // Pin whatever the page opened on. The live task list changes health under the
+  // user, and a fallback that kept re-resolving would swap the open item mid-read
+  // or mid-edit. A pinned item that disappears falls back once and is pinned again.
+  // Setting state during render is React's pattern for deriving state from data;
+  // it re-renders once and never loops, since a pinned item resolves to itself.
+  if (
+    resolvedSelection !== undefined &&
+    (selection?.kind !== resolvedSelection.kind || selection.id !== resolvedSelection.id)
+  ) {
+    setSelection(resolvedSelection);
+  }
   const definitionQuery = useEnvironmentQuery(
     environmentId === null || selectedAutomation === undefined
       ? null
