@@ -18,6 +18,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import {
@@ -30,6 +31,7 @@ import {
 } from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -46,6 +48,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(Layer.mock(GitWorkflowService.GitWorkflowService)({})),
 );
 
 describe("OrchestratorMcpService", () => {
@@ -2175,6 +2178,104 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(updated.webhookUrl, undefined);
       }),
     );
+
+    describe("workspace strategy", () => {
+      const workspaceRoot = "/srv/projects/workspace";
+      const strategyService = (
+        isRepository: boolean,
+        existing: ScheduledTask,
+        saved: Ref.Ref<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>,
+      ) =>
+        OrchestratorMcpService.layer.pipe(
+          Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+          Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+          Layer.provide(
+            Layer.mock(GitWorkflowService.GitWorkflowService)({
+              isRepository: (cwd) => Effect.succeed(cwd === workspaceRoot && isRepository),
+            }),
+          ),
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              Layer.mock(ThreadManagementService.ThreadManagementService)({
+                getThreadShell: () => Effect.succeed(null),
+              }),
+              ServerSettings.layerTest(),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+              Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                list: () => Effect.succeed([]),
+              }),
+              Layer.mock(ProjectService.ProjectService)({
+                getById: () =>
+                  Effect.succeed(
+                    Option.some({
+                      id: projectId,
+                      workspaceRoot,
+                      defaultModelSelection: existing.modelSelection,
+                    } as never),
+                  ),
+              }),
+              Layer.mock(SecretRequests.SecretRequests)({}),
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+                list: () => Effect.succeed({ tasks: [existing] }),
+                upsert: (input) =>
+                  Ref.update(saved, (all) => [...all, input.workspaceStrategy]).pipe(
+                    Effect.as({ task: existing }),
+                  ),
+              }),
+            ),
+          ),
+        );
+      const worktreeFromOrigin: ScheduledTask["workspaceStrategy"] = {
+        type: "worktree",
+        baseRef: "main",
+        startFromOrigin: true,
+      };
+      const root: ScheduledTask["workspaceStrategy"] = { type: "root" };
+
+      it.effect.each([
+        { isRepository: true, expected: worktreeFromOrigin },
+        { isRepository: false, expected: root },
+      ])(
+        "gives a fresh-thread task $expected.type when the project repository is $isRepository",
+        ({ isRepository, expected }) =>
+          Effect.gen(function* () {
+            const saved = yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]);
+            const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+              Effect.provide(strategyService(isRepository, task({}), saved)),
+            );
+            yield* mcp.scheduleTask(supervisedClient, {
+              projectId,
+              prompt: "Check the build",
+              schedule: { type: "interval", everyMs: 3_600_000 },
+              bindToCurrentThread: false,
+            });
+            assert.deepEqual(yield* Ref.get(saved), [expected]);
+          }),
+      );
+
+      it.effect(
+        "re-roots a task unbound outside a repository and otherwise keeps its strategy",
+        () =>
+          Effect.gen(function* () {
+            const saved = yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]);
+            const existing = task({ workspaceStrategy: worktreeFromOrigin });
+            const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+              Effect.provide(strategyService(false, existing, saved)),
+            );
+            // Leaving the binding out keeps the stored strategy as it is.
+            yield* mcp.updateScheduledTask(supervisedClient, {
+              scheduledTaskId: existing.id,
+              prompt: "Something else",
+            });
+            yield* mcp.updateScheduledTask(supervisedClient, {
+              scheduledTaskId: existing.id,
+              bindToCurrentThread: false,
+            });
+            assert.deepEqual(yield* Ref.get(saved), [worktreeFromOrigin, root]);
+          }),
+      );
+    });
   });
 
   describe("resolveRuntimeMode", () => {

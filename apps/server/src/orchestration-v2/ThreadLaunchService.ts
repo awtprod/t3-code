@@ -306,21 +306,50 @@ const make = Effect.gen(function* () {
       });
   });
 
-  const prepareInBackground = Effect.fn("ThreadLaunchService.prepareInBackground")(function* (
+  /**
+   * A scheduled task's stored `worktree` strategy can meet a project that is
+   * not a Git repository, such as the system project. Nobody is there to pick
+   * another strategy, so its run uses the project folder instead of failing in
+   * provisioning. An explicit worktree request (UI, t3_thread_launch) keeps the
+   * provisioning failure: the caller asked for isolation and should hear that
+   * it is not available.
+   */
+  const rootOutsideRepository = Effect.fn("ThreadLaunchService.rootOutsideRepository")(function* (
     input: PreparationInput,
+    workspaceRoot: string,
+  ): Effect.fn.Return<PreparationInput> {
+    if (input.workspaceStrategy.type !== "worktree") return input;
+    if (input.initialMessage?.scheduledTaskId === undefined) return input;
+    // A check that cannot answer is left for provisioning to report.
+    const isRepository = yield* git
+      .isRepository(workspaceRoot)
+      .pipe(Effect.orElseSucceed(() => true));
+    if (isRepository) return input;
+    yield* Effect.logWarning(
+      "Project is not a Git repository; running the scheduled task in the project folder instead of a new worktree.",
+      { commandId: input.commandId, projectId: input.projectId, workspaceRoot },
+    );
+    return { ...input, workspaceStrategy: { type: "root" } };
+  });
+
+  const prepareInBackground = Effect.fn("ThreadLaunchService.prepareInBackground")(function* (
+    requested: PreparationInput,
     threadId: ThreadId,
     runId: RunId | null,
   ) {
-    const project = yield* projects.getById(input.projectId).pipe(
-      Effect.mapError(mapError(input, "resolve-project", threadId)),
+    const project = yield* projects.getById(requested.projectId).pipe(
+      Effect.mapError(mapError(requested, "resolve-project", threadId)),
       Effect.flatMap(
         Option.match({
           onNone: () =>
-            Effect.fail(mapError(input, "resolve-project", threadId)("Project no longer exists.")),
+            Effect.fail(
+              mapError(requested, "resolve-project", threadId)("Project no longer exists."),
+            ),
           onSome: Effect.succeed,
         }),
       ),
     );
+    const input = yield* rootOutsideRepository(requested, project.workspaceRoot);
 
     const reused = input.reusedWorktree;
     const tracked = input.workspaceStrategy.type === "worktree" || reused !== undefined;
@@ -1063,6 +1092,11 @@ const make = Effect.gen(function* () {
               initialMessage: {
                 text: message.text,
                 attachments: message.attachments,
+                // A retry must still know the run belongs to a scheduled task,
+                // or the project-folder fallback would not apply to it.
+                ...(message.scheduledTaskId === undefined
+                  ? {}
+                  : { scheduledTaskId: message.scheduledTaskId }),
                 ...(message.context ? { context: message.context } : {}),
               },
             }),

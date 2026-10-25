@@ -143,6 +143,7 @@ function makeHarness(
       renameBranch: (input) => Effect.succeed({ branch: input.newBranch }),
       fetchRemote: () => Effect.void,
       hasCommit: () => Effect.succeed(false),
+      isRepository: () => Effect.succeed(true),
       remoteExists: () => Effect.succeed(true),
       remoteBranchExists: () => Effect.succeed(true),
       removeWorktree: () => Effect.void,
