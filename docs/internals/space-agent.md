@@ -194,6 +194,9 @@ replay old ones:
 
 Questions are the agent's only way to reach Andrew. The agent thread itself alerts
 only when it waits on him (an approval or input request): a finished, failed or
-usage-limited wake raises no web push, desktop banner, toast or sound. The rule is
-checked by thread id in `notifierDecision.ts` and in both web notifiers
-(`ThreadNotificationCoordinator`, `AgentActivityNotifications`).
+usage-limited wake raises no web push, desktop banner, toast or sound. This is the
+rule for every unattended thread (`isUnattendedThread` in `@command-center/core`),
+which the agent thread falls under because the bridge opens it as `system`. It is
+checked in `notifierDecision.ts` and in both web notifiers
+(`ThreadNotificationCoordinator`, `AgentActivityNotifications`). The same predicate
+settles the thread as soon as a wake completes, and its next wake leaves it settled.

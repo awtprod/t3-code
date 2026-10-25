@@ -385,6 +385,70 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
+  it.effect("brings a settled thread back when its run starts waiting on the user", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      if (threadEvent.type !== "thread.created") return assert.fail("expected a created thread");
+      const threadId = threadEvent.threadId;
+      yield* eventSink.write({
+        events: [
+          {
+            ...threadEvent,
+            payload: { ...threadEvent.payload, settledOverride: "settled", settledAt: now },
+          },
+        ],
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const ingestRequest = (key: string, status: "pending" | "resolved") =>
+        ingestor
+          .ingestNormalized({
+            providerSessionId,
+            providerInstanceId: modelSelection.instanceId,
+            threadId,
+            event: {
+              type: "runtime_request.updated",
+              driver: CODEX_DRIVER,
+              runtimeRequest: {
+                id: RuntimeRequestId.make(`${threadId}:${key}`),
+                nodeId: NodeId.make(`${threadId}:${key}`),
+                providerTurnId: null,
+                nativeRequestRef: null,
+                kind: "command",
+                status,
+                responseCapability: { type: "live", providerSessionId },
+                createdAt: now,
+                resolvedAt: status === "pending" ? null : now,
+              },
+            },
+          })
+          .pipe(Effect.map((stored) => stored.map(({ event }) => event.type)));
+
+      // Settling stays put for anything that does not need the user.
+      assert.deepEqual(yield* ingestRequest("answered", "resolved"), ["runtime-request.updated"]);
+      assert.equal((yield* projectionStore.getThread(threadId)).settledOverride, "settled");
+
+      assert.deepEqual(yield* ingestRequest("approval", "pending"), [
+        "runtime-request.updated",
+        "thread.unsettled",
+      ]);
+      const resurfaced = yield* projectionStore.getThread(threadId);
+      assert.isNull(resurfaced.settledOverride);
+      assert.isNull(resurfaced.settledAt);
+      assert.isNotNull(resurfaced.unsettledAt);
+
+      // A thread already in the active list is left alone.
+      assert.deepEqual(yield* ingestRequest("question", "pending"), ["runtime-request.updated"]);
+    }),
+  );
+
   it.effect("rolls back runs a provider rewound off its active branch", () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;

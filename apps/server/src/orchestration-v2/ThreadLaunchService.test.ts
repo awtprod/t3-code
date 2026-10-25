@@ -374,6 +374,9 @@ it.effect.each(
       assert.equal(wire.messages[0]?.text, task.prompt);
       assert.equal(wire.messages[0]?.scheduledTaskId, task.id);
       assert.equal(wire.messages[0]?.createdBy, createdBy);
+      // The server opens each run's thread, so nobody is watching it; a thread
+      // the task was bound to keeps whoever opened it.
+      assert.equal(projection.thread.createdBy, target === "new" ? "system" : "user");
       const turnItem = wire.turnItems.find(
         (item): item is Extract<typeof item, { type: "user_message" }> =>
           item.type === "user_message",

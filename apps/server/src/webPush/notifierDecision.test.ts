@@ -79,12 +79,12 @@ describe("decidePublishAction", () => {
     expect(action).toEqual({ kind: "proceed", notify: false });
   });
 
-  it("rings a Space agent thread only when it waits on the user", () => {
-    const threadId = ThreadId.make("cc-space-agent-command-center");
-    const notifies = (phase: RelayAgentActivityState["phase"]) => {
+  const notifiesFor =
+    (threadId: ThreadId, unattended: boolean) => (phase: RelayAgentActivityState["phase"]) => {
       const state = makeState({ phase, threadId });
       return decidePublishAction({
         state,
+        unattended,
         publishIdentity: agentAwarenessPublishIdentity(state),
         previousIdentity: agentAwarenessPublishIdentity(makeState({ phase: "running", threadId })),
         hasPrevious: true,
@@ -92,9 +92,22 @@ describe("decidePublishAction", () => {
         existingDeadlineMs: undefined,
       });
     };
+
+  it.each([
+    ["the Space agent", "cc-space-agent-command-center"],
+    ["a scheduled run", "thread-scheduled"],
+  ])("rings an unattended thread (%s) only when it waits on the user", (_label, id) => {
+    const notifies = notifiesFor(ThreadId.make(id), true);
     expect(notifies("completed")).toEqual({ kind: "proceed", notify: false });
     expect(notifies("failed")).toEqual({ kind: "proceed", notify: false });
     expect(notifies("waiting_for_approval")).toEqual({ kind: "proceed", notify: true });
+    expect(notifies("waiting_for_input")).toEqual({ kind: "proceed", notify: true });
+  });
+
+  it("still rings a thread the user opened when it completes or fails", () => {
+    const notifies = notifiesFor(ThreadId.make("thread-1"), false);
+    expect(notifies("completed")).toEqual({ kind: "proceed", notify: true });
+    expect(notifies("failed")).toEqual({ kind: "proceed", notify: true });
     expect(notifies("waiting_for_input")).toEqual({ kind: "proceed", notify: true });
   });
 

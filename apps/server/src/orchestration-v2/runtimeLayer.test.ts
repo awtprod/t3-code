@@ -27,6 +27,7 @@ import {
   ProviderThreadId,
   ProviderTurnId,
   RunId,
+  ScheduledTaskId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -3409,6 +3410,70 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.isNull(projection.thread.settledOverride);
       assert.isNull(projection.thread.settledAt);
       assert.isNotNull(projection.thread.unsettledAt);
+    }),
+  );
+
+  it.effect("only the user's own message revives a settled thread", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("runtime-layer-unattended-dispatch-thread");
+
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-unattended-dispatch-create"),
+        threadId,
+        projectId: ProjectId.make("runtime-layer-unattended-dispatch-project"),
+        title: "Scheduled into a settled thread",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-unattended-dispatch",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("runtime-layer-unattended-dispatch-settle"),
+        threadId,
+      });
+      const send = (
+        name: string,
+        origin: {
+          readonly createdBy: "user" | "agent";
+          readonly creationSource: "web" | "mcp";
+          readonly scheduledTaskId?: ScheduledTaskId;
+        },
+      ) =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          ...origin,
+          commandId: CommandId.make(`runtime-layer-unattended-dispatch-${name}`),
+          threadId,
+          messageId: MessageId.make(`runtime-layer-unattended-dispatch-${name}`),
+          text: `Message from ${name}.`,
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "queue_after_active" },
+        });
+
+      // A scheduled task the user created, then another agent, write to it.
+      yield* send("schedule", {
+        createdBy: "user",
+        creationSource: "web",
+        scheduledTaskId: ScheduledTaskId.make("runtime-layer-unattended-dispatch-task"),
+      });
+      yield* send("agent", { createdBy: "agent", creationSource: "mcp" });
+      const untouched = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(untouched.thread.settledOverride, "settled");
+      assert.isNotNull(untouched.thread.settledAt);
+      assert.equal(untouched.messages.filter((message) => message.role === "user").length, 2);
+
+      yield* send("user", { createdBy: "user", creationSource: "web" });
+      const revived = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(revived.thread.settledOverride);
+      assert.isNull(revived.thread.settledAt);
+      assert.isNotNull(revived.thread.unsettledAt);
     }),
   );
 

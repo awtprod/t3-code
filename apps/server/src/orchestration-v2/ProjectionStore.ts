@@ -183,6 +183,7 @@ export type ProjectionThreadPullRequests = Pick<
 export type ProjectionSettlementCandidate = Pick<
   OrchestrationV2ThreadShell,
   | "id"
+  | "createdBy"
   | "projectId"
   | "branch"
   | "worktreePath"

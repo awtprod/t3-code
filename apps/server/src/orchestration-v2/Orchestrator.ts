@@ -4667,7 +4667,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (run) => run.id === command.restartContinuationOfRunId,
       )?.delegatedTaskId;
 
-      if (projection.thread.settledOverride !== null) {
+      // Writing to a thread re-engages it, but only when the user writes. A
+      // scheduled task or an agent sending to a settled thread does not revive
+      // it; the thread resurfaces when its run waits on the user.
+      if (
+        projection.thread.settledOverride !== null &&
+        command.createdBy === "user" &&
+        command.scheduledTaskId === undefined
+      ) {
         const now = yield* DateTime.now;
         const thread: OrchestrationV2AppThread = {
           ...projection.thread,

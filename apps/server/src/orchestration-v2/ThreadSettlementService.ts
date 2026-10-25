@@ -1,3 +1,4 @@
+import { isUnattendedThread } from "@command-center/core";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -240,14 +241,23 @@ export function resolveAutoSettlementAt(input: {
   const hasPullRequest =
     pullRequest !== null || thread.linkedPullRequest != null || thread.branchPullRequest != null;
   if (input.autoSettleKeepPullRequests === true && hasPullRequest) return null;
-  if (input.autoSettleAfterDays === null || activityAtMs === null) return null;
+  // Nobody closes out an unattended thread, so once its run completes it has no
+  // inactivity window. A failed one waits out the usual window so a broken
+  // automation stays in view.
+  const autoSettleAfterDays =
+    input.autoSettleAfterDays !== null &&
+    isUnattendedThread(thread) &&
+    thread.status === "completed"
+      ? 0
+      : input.autoSettleAfterDays;
+  if (autoSettleAfterDays === null || activityAtMs === null) return null;
   // A passed wake timer restarts inactivity. An earlier wake can only delay settlement.
   const snoozedUntilMs = toMillis(thread.snoozedUntil);
   const timerWakeAtMs =
     snoozedUntilMs !== null && snoozedUntilMs <= input.nowMs ? snoozedUntilMs : null;
   const inactivityAtMs =
     latestMillis([activityAtMs, toMillis(thread.lastSnoozeWakeAt), timerWakeAtMs]) ?? activityAtMs;
-  return inactivityAtMs < input.nowMs - input.autoSettleAfterDays * DAY_MS
+  return inactivityAtMs < input.nowMs - autoSettleAfterDays * DAY_MS
     ? DateTime.makeUnsafe(inactivityAtMs)
     : null;
 }

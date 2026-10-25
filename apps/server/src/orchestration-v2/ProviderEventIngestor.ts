@@ -456,6 +456,43 @@ export const layer: Layer.Layer<
     );
 
     /**
+     * A settled thread that starts waiting on the user returns to the active
+     * list, so the request it raised is not hidden behind its notification.
+     * Nothing else revives an unattended thread (see `dispatchMessage`).
+     */
+    const resurfaceSettledThread = Effect.fn("ProviderEventIngestor.resurfaceSettledThread")(
+      function* (input: ProviderEventIngestInput, threadId: ThreadId) {
+        const settledThread = projections.getThread(threadId).pipe(
+          Effect.map((thread) => (thread.settledOverride === "settled" ? thread : null)),
+          Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+        );
+        // Nearly every request lands on a live thread; only a settled one takes the lock.
+        if ((yield* settledThread) === null) return [];
+        return yield* threadCommands.withLock(
+          threadId,
+          Effect.gen(function* () {
+            const thread = yield* settledThread;
+            if (thread === null) return [];
+            const now = yield* DateTime.now;
+            const event = yield* makeDomainEvent(input, {
+              type: "thread.unsettled",
+              threadId,
+              payload: {
+                ...thread,
+                settledOverride: null,
+                settledAt: null,
+                unsettledAt: now,
+                updatedAt: now,
+              },
+              occurredAt: now,
+            });
+            return yield* eventSink.write({ events: [event] });
+          }),
+        );
+      },
+    );
+
+    /**
      * The provider rewound its conversation outside T3. Retire the runs that
      * fell off its active branch with the same run, root-node, and checkpoint
      * updates CheckpointRollbackService writes for a T3 revert. The run
@@ -795,6 +832,30 @@ export const layer: Layer.Layer<
                   ),
                 ),
           ),
+          Effect.flatMap((storedEvents) => {
+            const waitingThreadIds = new Set(
+              storedEvents.flatMap(({ event }) =>
+                event.type === "runtime-request.updated" && event.payload.status === "pending"
+                  ? [event.threadId]
+                  : [],
+              ),
+            );
+            return waitingThreadIds.size === 0
+              ? Effect.succeed(storedEvents)
+              : Effect.forEach(waitingThreadIds, (threadId) =>
+                  resurfaceSettledThread(input, threadId),
+                ).pipe(
+                  Effect.map((resurfaced) => [...storedEvents, ...resurfaced.flat()]),
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderEventPublishError({
+                        providerSessionId: input.providerSessionId,
+                        eventCount: 1,
+                        cause,
+                      }),
+                  ),
+                );
+          }),
           Effect.tap((storedEvents) =>
             Effect.gen(function* () {
               if (storedEvents.length === 0 || input.event.type !== "provider_turn.updated") return;
