@@ -4,7 +4,8 @@ import * as NodeV8 from "node:v8";
 import * as NodeVM from "node:vm";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as KeyValueStore from "effect/persistence/KeyValueStore";
-import { assert, it } from "@effect/vitest";
+import { afterEach, assert, it, vi } from "@effect/vitest";
+
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -37,6 +38,7 @@ import * as SourceControlRateLimit from "@t3tools/source-control-core/server/Sou
 import * as ForgejoCli from "@t3tools/source-control-forgejo/server/ForgejoCli";
 import * as ForgejoPullRequestProvider from "@t3tools/source-control-forgejo/server/ForgejoPullRequestProvider";
 import * as GitHubApi from "@t3tools/source-control-github/server/GitHubApi";
+import * as GitHubProfileAuth from "../sourceControl/GitHubProfileAuth.ts";
 import * as GitHubCredentials from "@t3tools/source-control-github/server/GitHubCredentials";
 import * as GitHubPullRequestApi from "@t3tools/source-control-github/server/GitHubPullRequestApi";
 import * as GitHubPullRequestProvider from "@t3tools/source-control-github/server/GitHubPullRequestProvider";
@@ -54,6 +56,8 @@ import {
   FILE_REVISIONS_CACHE_CAPACITY,
   MAX_FILE_REVISION_PATHS,
 } from "./pullRequestViewedFiles.ts";
+
+afterEach(() => vi.unstubAllEnvs());
 
 function project(input: {
   readonly id: string;
@@ -534,6 +538,7 @@ function fakeProvider(
 }
 
 function makeService(input: {
+  readonly githubProfile?: GitHubProfileAuth.GitHubProfileAuth["Service"]["get"];
   readonly settings?: ServerSettings;
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
   readonly providers: ReadonlyArray<PullRequestProviderApi>;
@@ -545,6 +550,9 @@ function makeService(input: {
   return Effect.flatMap(
     Layer.build(
       Layer.mergeAll(
+        Layer.mock(GitHubProfileAuth.GitHubProfileAuth)({
+          get: input.githubProfile ?? (() => Effect.die("Unexpected configured GitHub profile")),
+        }),
         Layer.mock(ServerSettingsService.ServerSettingsService)({
           getSettings: Effect.succeed(input.settings ?? DEFAULT_SERVER_SETTINGS),
         }),
@@ -5199,6 +5207,150 @@ it.effect("isolates routed caches for two credentials belonging to the same acco
       assert.strictEqual(calls, 3);
     }
   }),
+);
+
+it.effect(
+  "reads watched repositories with their configured profile and isolates rotated credentials",
+  () =>
+    Effect.gen(function* () {
+      vi.stubEnv(
+        "COMMAND_CENTER_GITHUB_PROFILE_MAP",
+        JSON.stringify({
+          acme: { profile: "organization", login: "organization" },
+        }),
+      );
+      let token = "organization-token";
+      let unavailable = false;
+      const readTokens: string[] = [];
+      const read = Effect.gen(function* () {
+        const pinned = yield* GitHubApi.PinnedGitHubCredential;
+        const selected = pinned === null ? "host-default" : Redacted.value(pinned.token);
+        readTokens.push(selected);
+        if (selected === "host-default") {
+          return yield* new PullRequestProviderError({
+            provider: SourceControlProviderKind.make("github"),
+            operation: "read",
+            reason: "not-found",
+            detail: "This account cannot see the private repository.",
+          });
+        }
+        return hostedChangeRequest(selected);
+      });
+      const service = yield* makeService({
+        projects: [
+          project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
+        ],
+        githubProfile: (owner) =>
+          Effect.suspend(() => {
+            assert.strictEqual(owner, "acme");
+            return unavailable
+              ? Effect.fail(
+                  new GitHubProfileAuth.GitHubProfileUnavailableError({ account: "acme" }),
+                )
+              : Effect.succeed({
+                  account: "organization",
+                  token: Redacted.make(token),
+                  fingerprint: `github.com:${token}`,
+                });
+          }),
+        providers: [
+          fakeProvider(SourceControlProviderKind.make("github"), {
+            getChangeRequest: () => read,
+            getChangeRequestSummary: () => read,
+            getChangeRequestActivity: () =>
+              read.pipe(
+                Effect.as({
+                  comments: [],
+                  commentCount: 0,
+                  commentsTruncated: false,
+                  reviewThreads: [],
+                  commits: [],
+                }),
+              ),
+          }),
+        ],
+      });
+      const ref = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+      yield* service.activity(ref);
+      assert.strictEqual((yield* service.detail(ref)).body, "organization-token");
+      token = "rotated-token";
+      yield* service.activity(ref);
+      assert.strictEqual(
+        (yield* service.detail({ ...ref, allowStale: true })).body,
+        "rotated-token",
+      );
+      assert.deepStrictEqual(readTokens, [
+        "organization-token",
+        "organization-token",
+        "rotated-token",
+        "rotated-token",
+      ]);
+      unavailable = true;
+      const error = yield* service.activity(ref).pipe(Effect.flip);
+      assert.strictEqual(error._tag, "PullRequestOperationError");
+      assert.strictEqual(readTokens.length, 4);
+    }),
+);
+
+it.effect(
+  "keeps explicitly verified reads on their selected account and honors disabled hosts",
+  () =>
+    Effect.gen(function* () {
+      vi.stubEnv(
+        "COMMAND_CENTER_GITHUB_PROFILE_MAP",
+        JSON.stringify({
+          acme: { profile: "organization", login: "organization" },
+        }),
+      );
+      let profileReads = 0;
+      let reads = 0;
+      const provider = fakeProvider(SourceControlProviderKind.make("github"), {
+        withVerifiedCredential: (_, use) =>
+          use({ accountId: "101", viewer: "explicit", credentialFingerprint: "explicit" }),
+        getChangeRequestSummary: () =>
+          Effect.sync(() => {
+            reads++;
+            return hostedChangeRequest("explicit");
+          }),
+      });
+      const input = {
+        projects: [
+          project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
+        ],
+        providers: [provider],
+        githubProfile: () =>
+          Effect.sync(() => {
+            profileReads++;
+            return {
+              account: "organization",
+              token: Redacted.make("organization-token"),
+              fingerprint: "organization",
+            };
+          }),
+      };
+      const service = yield* makeService(input);
+      const ref = {
+        projectId: "p1" as ProjectId,
+        host: "github.com",
+        repository: "acme/web",
+        number: 1,
+        expectedAccountId: "101",
+      };
+      yield* service.withRoutingCredential(ref, service.summary(ref));
+      assert.strictEqual(profileReads, 0);
+      assert.strictEqual(reads, 1);
+      const disabled = yield* makeService({
+        ...input,
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          sourceControlHosts: { github: { hosts: { "github.com": { enabled: false } } } },
+        },
+      });
+      const { expectedAccountId: _expectedAccountId, ...backgroundRef } = ref;
+      const error = yield* disabled.summary(backgroundRef).pipe(Effect.flip);
+      assert.strictEqual(error._tag, "PullRequestOperationError");
+      assert.strictEqual(reads, 1);
+    }),
 );
 
 it.effect("rejects mismatched routing credentials before use and preserves action errors", () =>

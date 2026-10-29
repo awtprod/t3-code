@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import { parseGitHubRepositorySelector } from "@t3tools/source-control-github/server/gitHubRepositoryResolution";
 
 import { resolveTrustedHostExecutable } from "../vcs/HostGitSecurity.ts";
 
@@ -180,3 +181,20 @@ export const layer = Layer.succeed(
       ),
   }),
 );
+
+/** Resolve only an explicitly configured repository profile; other hosts retain their defaults. */
+export const forRepository = Effect.fn("GitHubProfileAuth.forRepository")(function* (input: {
+  readonly host: string;
+  readonly repository: string;
+}) {
+  if (input.host.toLowerCase() !== "github.com") return null;
+  const locator = parseGitHubRepositorySelector(input.repository, "github.com");
+  if (locator?.host !== "github.com") return null;
+  const owner = yield* Effect.try({
+    try: () => approvedGitHubProfileForOwner(locator.owner),
+    catch: () => new GitHubProfileUnavailableError({ account: locator.owner }),
+  });
+  if (owner === null) return null;
+  const profiles = yield* GitHubProfileAuth;
+  return yield* profiles.get(owner);
+});

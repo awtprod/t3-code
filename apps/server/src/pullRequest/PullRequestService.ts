@@ -83,6 +83,10 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as PullRequestFilesViewed from "../persistence/PullRequestFilesViewed.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
+import * as GitHubProfileAuth from "../sourceControl/GitHubProfileAuth.ts";
+import * as GitHubApi from "@t3tools/source-control-github/server/GitHubApi";
+import * as GitHubClient from "@t3tools/source-control-github/client/definition";
+import { readSourceControlHostSettings } from "@t3tools/source-control-core/client/definition";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import {
   type ProviderChangeRequest,
@@ -718,6 +722,7 @@ export const make = Effect.gen(function* () {
   const rateLimits = yield* SourceControlRateLimit.SourceControlRateLimit;
   const filesViewedStore = yield* PullRequestFilesViewed.PullRequestFilesViewedRepository;
   const readCache = yield* PullRequestReadCache.PullRequestReadCache;
+  const githubProfiles = yield* GitHubProfileAuth.GitHubProfileAuth;
 
   const refineUnknownProjectKinds = (
     projects: ReadonlyArray<OrchestrationProjectShell>,
@@ -3567,6 +3572,58 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const ref = yield* canonicalRef(input);
         const credential = yield* routingCredential;
+        // Interactive routes already pin their verified account. Background watches have no
+        // such context: select the repository's host-configured profile before any cache read.
+        if (credential === null && ref.host === "github.com") {
+          const profile = yield* GitHubProfileAuth.forRepository({
+            host: ref.host,
+            repository: ref.repository,
+          }).pipe(
+            Effect.provideService(GitHubProfileAuth.GitHubProfileAuth, githubProfiles),
+            Effect.mapError(
+              (cause) =>
+                new PullRequestOperationError({
+                  operation: "readCredential",
+                  detail: "The configured GitHub profile for this repository is unavailable.",
+                  cause,
+                }),
+            ),
+          );
+          if (profile !== null) {
+            const settings = yield* serverSettings.getSettings.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new PullRequestOperationError({
+                    operation: "readCredential",
+                    detail: "GitHub host settings could not be read.",
+                    cause,
+                  }),
+              ),
+            );
+            if (
+              readSourceControlHostSettings(
+                GitHubClient.settings,
+                settings.sourceControlHosts.github,
+              ).hosts[ref.host]?.enabled === false
+            ) {
+              return yield* new PullRequestOperationError({
+                operation: "readCredential",
+                detail: "GitHub is turned off in Settings → Source Control.",
+              });
+            }
+            return yield* read(
+              { ...ref, [credentialNamespace]: profile.fingerprint },
+              ...args,
+            ).pipe(
+              Effect.provideService(GitHubApi.PinnedGitHubCredential, {
+                host: ref.host,
+                token: profile.token,
+                credentialFingerprint: profile.fingerprint,
+              }),
+              Effect.provideService(SourceControlRateLimit.CredentialScope, profile.fingerprint),
+            );
+          }
+        }
         return yield* read(
           credential === null
             ? ref
