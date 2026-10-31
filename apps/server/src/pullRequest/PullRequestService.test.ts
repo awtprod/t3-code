@@ -5672,6 +5672,191 @@ it.effect("routes, verifies and writes a profile repository with the profile's t
   }),
 );
 
+// The host records whoever's token sent the mutation as the author of the merge commit, comment
+// or review. Downstream checks that admit only the organization's own account (a deploy hook, for
+// one) refuse anything else, even though the host itself accepted the write. So this checks the
+// token on the wire rather than the host's answer.
+it.effect("merges, comments and reviews a profile repository with the profile's token", () =>
+  Effect.gen(function* () {
+    vi.stubEnv(
+      "COMMAND_CENTER_GITHUB_PROFILE_MAP",
+      JSON.stringify({
+        acme: { profile: "organization", login: "organization" },
+      }),
+    );
+    const requests: Array<{ operation: string; authorization: string | undefined }> = [];
+    const credentials = Layer.succeed(
+      GitHubCredentials.GitHubCredentials,
+      GitHubCredentials.GitHubCredentials.of({
+        get: (host) =>
+          Effect.succeed({
+            host,
+            token: Redacted.make("host-token"),
+            source: "gh" as const,
+            fingerprint: `${host}:host-token`,
+          }),
+        invalidate: () => Effect.void,
+      }),
+    );
+    const http = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.sync(() => {
+          const authorization = request.headers["authorization"];
+          const text =
+            request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "";
+          const operation = request.url.endsWith("/user")
+            ? "user"
+            : request.url.endsWith("/pulls/1/reviews")
+              ? "submitReview"
+              : text.includes("mergePullRequest(")
+                ? "merge"
+                : text.includes("addComment(")
+                  ? "comment"
+                  : text.includes("query PullRequestActionState")
+                    ? "actionState"
+                    : text.includes("{ pullRequest(number: $number) { id } }")
+                      ? "nodeId"
+                      : text.includes("viewerCanUpdate viewerDidAuthor")
+                        ? "viewerAccess"
+                        : "other";
+          requests.push({ operation, authorization });
+          const body =
+            operation === "user"
+              ? authorization === "Bearer organization-token"
+                ? { id: 202, login: "organization" }
+                : { id: 101, login: "host" }
+              : operation === "submitReview"
+                ? { id: 1 }
+                : operation === "merge"
+                  ? { data: { mergePullRequest: { clientMutationId: null } } }
+                  : operation === "comment"
+                    ? { data: { addComment: { clientMutationId: null } } }
+                    : operation === "actionState"
+                      ? {
+                          data: {
+                            repository: {
+                              pullRequest: {
+                                id: "PR_1",
+                                headRefOid: "abc123",
+                                isMergeQueueEnabled: false,
+                                mergeStateStatus: "CLEAN",
+                                baseRef: { compare: { behindBy: 0 } },
+                              },
+                            },
+                          },
+                        }
+                      : operation === "nodeId"
+                        ? { data: { repository: { pullRequest: { id: "PR_1" } } } }
+                        : operation === "viewerAccess"
+                          ? {
+                              data: {
+                                repository: {
+                                  mergeCommitAllowed: true,
+                                  squashMergeAllowed: true,
+                                  rebaseMergeAllowed: true,
+                                  viewerPermission: "WRITE",
+                                  pullRequest: {
+                                    viewerCanUpdate: true,
+                                    viewerDidAuthor: false,
+                                    headRepository: { viewerPermission: "WRITE" },
+                                  },
+                                },
+                              },
+                            }
+                          : {};
+          return HttpClientResponse.fromWeb(request, new Response(JSON.stringify(body)));
+        }),
+      ),
+    );
+    const provider = yield* GitHubPullRequestProvider.make.pipe(
+      Effect.provide(
+        GitHubPullRequestApi.layer.pipe(
+          Layer.provide(
+            GitHubApi.layer.pipe(
+              Layer.provide(Layer.mergeAll(credentials, http)),
+              Layer.provide(GitHubQuota.layer),
+              Layer.provide(SourceControlRateLimit.layer),
+            ),
+          ),
+          Layer.provide(TestSourceControlHost.layer()),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+    const service = yield* makeService({
+      projects: [
+        project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
+        project({ id: "p2", title: "app", workspaceRoot: "/b", repository: "other/app" }),
+      ],
+      // The read that confirms a merge waits on a batching window the test clock never opens,
+      // and it is a read, not a write, so it is answered here instead.
+      providers: [
+        {
+          ...provider,
+          getChangeRequestSummary: () => Effect.succeed(changeRequest(1, "2026-07-02")),
+        },
+      ],
+      githubProfile: (owner) =>
+        Effect.suspend(() => {
+          assert.strictEqual(owner, "acme");
+          return Effect.succeed({
+            account: "organization",
+            token: Redacted.make("organization-token"),
+            fingerprint: "github.com:organization",
+          });
+        }),
+    });
+    const tokensFor = (operation: string) =>
+      requests
+        .filter((request) => request.operation === operation)
+        .map(({ authorization }) => authorization);
+    const ref = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+
+    // A merge pressed with no account pinned, as a single-environment page sends it.
+    yield* service.runAction({ ...ref, action: "merge", mergeMethod: "merge" });
+    assert.deepStrictEqual(tokensFor("merge"), ["Bearer organization-token"]);
+    // A routed merge, as a page with more than one environment sends it.
+    const route = yield* service.routing(ref);
+    assert.strictEqual(route.accountId, "202");
+    const routed = { ...ref, host: route.host, expectedAccountId: route.accountId };
+    yield* service.withRoutingCredential(
+      routed,
+      service.runAction({ ...routed, action: "merge", mergeMethod: "merge" }),
+    );
+    yield* service.comment({ ...ref, body: "hello" });
+    yield* service.submitReview({ ...ref, verdict: "comment", body: "Looks fine", comments: [] });
+
+    assert.deepStrictEqual(tokensFor("merge"), [
+      "Bearer organization-token",
+      "Bearer organization-token",
+    ]);
+    assert.deepStrictEqual(tokensFor("comment"), ["Bearer organization-token"]);
+    assert.deepStrictEqual(tokensFor("submitReview"), ["Bearer organization-token"]);
+    // Nothing on the way to those writes (access checks, state and node id reads) went out
+    // under the host's credential either.
+    assert.deepStrictEqual(
+      [...new Set(requests.map(({ authorization }) => authorization))],
+      ["Bearer organization-token"],
+    );
+
+    // Another owner's repository is still merged with the host's own credential.
+    requests.length = 0;
+    yield* service.runAction({
+      projectId: "p2" as ProjectId,
+      repository: "other/app",
+      number: 1,
+      action: "merge",
+      mergeMethod: "merge",
+    });
+    assert.deepStrictEqual(tokensFor("merge"), ["Bearer host-token"]);
+    assert.deepStrictEqual(
+      [...new Set(requests.map(({ authorization }) => authorization))],
+      ["Bearer host-token"],
+    );
+  }),
+);
+
 it.effect("rejects mismatched routing credentials before use and preserves action errors", () =>
   Effect.gen(function* () {
     let operations = 0;
