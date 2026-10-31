@@ -1922,6 +1922,56 @@ it.effect("gates arming a merge for later exactly as it gates merging now", () =
   }),
 );
 
+it.effect("says auto-merge is off, not that access is missing, to a viewer who may merge", () =>
+  Effect.gen(function* () {
+    let ran: string | null = null;
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          capabilities: {
+            diff: true,
+            comment: true,
+            actions: ["merge", "enable-auto-merge", "disable-auto-merge"],
+            mergeMethods: ["merge"],
+            search: true,
+            reactions: true,
+            review: FULL_REVIEW,
+            reviewers: FULL_REVIEWERS,
+          },
+          // A writer on a repository with auto-merge switched off: the host merges for this
+          // account now, and will not arm a merge for later for anyone.
+          getViewerPermissions: () =>
+            Effect.succeed({
+              actions: ["merge", "disable-auto-merge"],
+              comment: true,
+              resolve: true,
+              verdicts: ["comment", "approve", "request-changes"],
+              requestReviewers: true,
+            }),
+          runAction: (input) => {
+            ran = input.action;
+            return Effect.void;
+          },
+        }),
+      ],
+    });
+    const reference = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+
+    const refused = yield* Effect.flip(
+      service.runAction({ ...reference, action: "enable-auto-merge", mergeMethod: "merge" }),
+    );
+    assert.strictEqual(refused._tag, "PullRequestOperationError");
+    assert.include(refused.message, "This repository has auto-merge turned off.");
+    assert.notInclude(refused.message, "write access");
+    assert.strictEqual(ran, null);
+
+    // Taking back a merge armed before the switch is still this writer's to do.
+    yield* service.runAction({ ...reference, action: "disable-auto-merge" });
+    assert.strictEqual(ran, "disable-auto-merge");
+  }),
+);
+
 it.effect("hands the host the strategy an armed merge was asked for", () =>
   Effect.gen(function* () {
     let ranWith: { readonly action: string; readonly mergeMethod?: string } | null = null;

@@ -720,6 +720,12 @@ const RawRepositoryAccessSchema = Schema.Struct({
   squashMergeAllowed: Schema.Boolean,
   rebaseMergeAllowed: Schema.Boolean,
   /**
+   * The repository's "Allow auto-merge" setting. GitHub refuses to arm auto-merge where it is
+   * off, so a false here keeps that button out of the panel. Optional, unlike the merge methods:
+   * an answer without it leaves the button where it was rather than failing the read.
+   */
+  autoMergeAllowed: Schema.optional(Schema.Boolean),
+  /**
    * ADMIN, MAINTAIN, WRITE, TRIAGE, READ or NONE, or null for a GitHub App. Optional rather than
    * required, unlike the three above: an install that does not report it still decodes rather
    * than failing the whole detail read, and `toCanWrite` decides what that standing allows.
@@ -849,7 +855,7 @@ function checkContextNodesSelection(host: string): string {
 export const pullRequestCoreGraphQlQuery = (host: string) => {
   return `query($owner: String!, $name: String!, $number: Int!, $headRef: String!) {
   repository(owner: $owner, name: $name) {
-    mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission
+    mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed autoMergeAllowed viewerPermission
     pullRequest(number: $number) {
       number title url body state isDraft mergeable reviewDecision
       additions deletions changedFiles createdAt updatedAt mergedAt closedAt
@@ -2380,6 +2386,7 @@ export function decodePullRequestCoreJson(
       canDeleteBranch: toCanWrite(pr.headRepository?.viewerPermission) && pr.headRef !== null,
       canTriage: toCanTriage(repository.viewerPermission),
       ...toPullRequestViewerFields(pr),
+      ...toAutoMergeAllowed(repository),
       mergeCapabilities: {
         merge: repository.mergeCommitAllowed,
         squash: repository.squashMergeAllowed,
@@ -3214,12 +3221,22 @@ export interface GitHubViewerAccess {
    * something to update" at once. Absent where the comparison was not read.
    */
   readonly canUpdateBranch?: boolean;
+  /** The repository's "Allow auto-merge" setting, where GitHub reported it. */
+  readonly autoMergeAllowed?: boolean;
 }
+
+/** Absent stays absent, so a response without the setting leaves auto-merge offered. */
+const toAutoMergeAllowed = (repository: {
+  readonly autoMergeAllowed?: boolean | undefined;
+}): { readonly autoMergeAllowed?: boolean } =>
+  repository.autoMergeAllowed === undefined
+    ? {}
+    : { autoMergeAllowed: repository.autoMergeAllowed };
 
 /** Core detail and write checks share one read of permissions and merge settings. */
 export const VIEWER_PERMISSIONS_GRAPHQL_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
-    mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission
+    mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed autoMergeAllowed viewerPermission
     pullRequest(number: $number) {
       viewerCanUpdate viewerDidAuthor
       headRepository { viewerPermission }
@@ -3259,6 +3276,7 @@ export function decodeViewerPermissionsJson(
     canDeleteBranch: toCanWrite(repository.pullRequest?.headRepository?.viewerPermission),
     canTriage: toCanTriage(repository.viewerPermission),
     ...toPullRequestViewerFields(repository.pullRequest),
+    ...toAutoMergeAllowed(repository),
   });
 }
 
