@@ -1116,17 +1116,16 @@ it.live.each(["thread.settled", "stopped", "ready"] as const)(
         yield* fixture.activate(
           Stream.fromEffect(Deferred.await(fixture.measuring)).pipe(
             Stream.flatMap(() => Stream.range(0, 19)),
-            Stream.map(
-              (index): OrchestrationV2DomainEvent =>
-                trigger === "thread.settled"
-                  ? {
-                      id: EventId.make(`settled-${index}`),
-                      type: "thread.settled",
-                      threadId: thread.id,
-                      occurredAt: at(0),
-                      payload: { ...thread, lastVisitedAt: null },
-                    }
-                  : sessionUpdated(index, trigger),
+            Stream.map((index): OrchestrationV2DomainEvent =>
+              trigger === "thread.settled"
+                ? {
+                    id: EventId.make(`settled-${index}`),
+                    type: "thread.settled",
+                    threadId: thread.id,
+                    occurredAt: at(0),
+                    payload: { ...thread, lastVisitedAt: null },
+                  }
+                : sessionUpdated(index, trigger),
             ),
             Stream.concat(
               Stream.fromEffect(Deferred.succeed(handled, undefined)).pipe(Stream.drain),
