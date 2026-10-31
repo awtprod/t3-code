@@ -9,6 +9,7 @@ import type * as Path from "effect/Path";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
+import { ChildProcessSpawner } from "effect/process";
 import { SCAN_CACHE_FILE_NAME } from "./usage/usageScanCache.ts";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -643,6 +644,58 @@ describe("storage cleanup reports and local file policies", () => {
         yield* fs.writeFileString(`${worktree}/.git`, gitFile);
         expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
         expect(fullStatusCalls()).toBe(0);
+      }),
+    ),
+  );
+  it.live.each([
+    ["fatal: not a git repository: /missing-git-directory", "kept"],
+    ["fatal: gitfile does not point to a valid repository: /worktrees/feature/.git", "kept"],
+    ["fatal: unable to read gitfile /worktrees/feature/.git: Permission denied", "failed"],
+    ["fatal: Unable to create '/worktrees/feature/index.lock': File exists", "failed"],
+    ["fatal: unexpected Git failure", "failed"],
+  ] as const)("reports %j without attempting cleanup", ([stderr, outcome]) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const git = yield* GitVcsDriver.GitVcsDriver;
+        const calls: GitVcsDriver.ExecuteGitInput[] = [];
+        const { service, fs, worktree, setPolicy } = yield* cleanupFixture().pipe(
+          Effect.provideService(GitVcsDriver.GitVcsDriver, {
+            ...git,
+            execute: (input) => {
+              calls.push(input);
+              return input.operation === "StorageCleanup.branchChanged"
+                ? Effect.succeed({
+                    exitCode: ChildProcessSpawner.ExitCode(128),
+                    stdout: "",
+                    stderr: `${stderr}\n`,
+                    stdoutTruncated: false,
+                    stderrTruncated: false,
+                  })
+                : git.execute(input);
+            },
+          }),
+        );
+        setPolicy("tracked-changes");
+        yield* fs.writeFileString(`${worktree}/notes.txt`, "untracked\n");
+        calls.length = 0;
+        const report = yield* service.runNow;
+        expect(report.entries).toMatchObject([
+          {
+            outcome,
+            reason: outcome === "kept" ? "Repository or branch changed" : `git: ${stderr}`,
+            bytes: null,
+          },
+        ]);
+        expect(report.counts).toEqual({
+          kept: outcome === "kept" ? 1 : 0,
+          failed: outcome === "failed" ? 1 : 0,
+          removed: 0,
+        });
+        expect(report.bytesFreed).toBe(0);
+        expect(calls.map((input) => input.args)).toEqual([["rev-parse", "--git-path", "index"]]);
+        expect(yield* fs.exists(worktree)).toBe(true);
+        expect(yield* fs.readFileString(`${worktree}/tracked.txt`)).toBe("original\n");
+        expect(yield* fs.readFileString(`${worktree}/notes.txt`)).toBe("untracked\n");
       }),
     ),
   );
