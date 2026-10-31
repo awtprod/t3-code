@@ -231,7 +231,10 @@ const handleTwilio = Effect.fn("ConferenceRoutes.twilio")(function* (
     case "hold":
       return { kind: "twiml", body: HOLD_TWIML } as const;
     case "announce":
-      return { kind: "twiml", body: announceTwiml(connection.ownerName) } as const;
+      return {
+        kind: "twiml",
+        body: announceTwiml(connection.ownerName, connection.conference.sayVoice),
+      } as const;
     case "owner-twiml": {
       const callSid = single(params, "CallSid");
       if (callSid === undefined || !isCallSid(callSid)) return invalid;

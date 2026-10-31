@@ -53,6 +53,41 @@ describe("conference-mode phone connection", () => {
     expect(decodePhoneConnection(bytes({ ...legacy, twilio }))).toEqual(Option.none());
   });
 
+  it.each([
+    "Polly.Joanna-Neural",
+    "Google.en-US-Chirp3-HD-Aoede",
+    "ElevenLabs.voice_test_1",
+    `Polly.${"a".repeat(194)}`,
+  ])("preserves the optional Say voice %s when decoding stored bytes", (sayVoice) => {
+    const configured = { ...full, conference: { ...conference, sayVoice } };
+    expect(decodePhoneConnection(bytes(configured))).toEqual(Option.some(configured));
+  });
+
+  it.each([
+    "",
+    "Joanna",
+    "Other.Joanna",
+    "Polly.",
+    "Polly.Joanna.extra",
+    " Polly.Joanna",
+    "Polly.Joanna ",
+    "Polly.Joanna\n",
+    "Polly.Joanna\u2028",
+    "Polly.Joanna\u0000",
+    "Polly.Joanna\u007f",
+    'Polly.Joanna" language="en-US',
+    "Polly.<Joanna>",
+    "Polly.Joanna&amp;",
+    `Polly.${"a".repeat(195)}`,
+    null,
+    42,
+    {},
+  ])("rejects a malformed stored Say voice %j", (sayVoice) => {
+    expect(
+      decodePhoneConnection(bytes({ ...full, conference: { ...conference, sayVoice } })),
+    ).toEqual(Option.none());
+  });
+
   it("rejects malformed numbers, SIDs, secrets, and base URLs", () => {
     const withConference = (patch: Partial<typeof conference>) => ({
       ...full,

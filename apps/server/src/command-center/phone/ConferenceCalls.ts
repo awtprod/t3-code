@@ -130,7 +130,8 @@ const escapeXml = (text: string) => text.replace(/[&<>"']/gu, (match) => XML_ESC
 
 const twiml = (...verbs: ReadonlyArray<string>) =>
   `<?xml version="1.0" encoding="UTF-8"?><Response>${verbs.join("")}</Response>`;
-const say = (text: string) => `<Say>${escapeXml(text)}</Say>`;
+const say = (text: string, voice?: string) =>
+  `<Say${voice === undefined ? "" : ` voice="${escapeXml(voice)}"`}>${escapeXml(text)}</Say>`;
 
 /** Whitespace collapsed, trailing sentence punctuation dropped, then one period. */
 const asSentence = (text: string) =>
@@ -143,8 +144,8 @@ const asSentence = (text: string) =>
 export const HOLD_TWIML = twiml('<Pause length="600"/>');
 
 /** What the agent hears when the owner hangs up. */
-export const announceTwiml = (ownerName: string) =>
-  twiml(say(`${ownerName} has finished and left the call. Continue with the callee.`));
+export const announceTwiml = (ownerName: string, voice?: string) =>
+  twiml(say(`${ownerName} has finished and left the call. Continue with the callee.`, voice));
 
 const hangupTwiml = (text: string) => twiml(say(text), "<Hangup/>");
 
@@ -152,15 +153,16 @@ const CALL_ALREADY_ENDED_TWIML = hangupTwiml(
   "Command Center. This call has already ended. Goodbye.",
 );
 
-const ownerJoinTwiml = (record: ConferenceCallRecord, bridge: OwnerBridge) =>
+const ownerJoinTwiml = (record: ConferenceCallRecord, bridge: OwnerBridge, voice?: string) =>
   twiml(
     say(
       [
         "Command Center.",
-        asSentence(`I have ${record.plan.calleeName} on the line about ${record.plan.purpose}`),
+        asSentence(`I have ${record.plan.calleeName} on the line`),
         asSentence(bridge.reason),
         "Hang up when you are done; the assistant continues the call.",
       ].join(" "),
+      voice,
     ),
     `<Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="false">${escapeXml(
       conferenceName(record.callId),
@@ -894,7 +896,7 @@ export const make = Effect.gen(function* () {
           const joined = yield* transition(holding, "owner-joined", {
             owner: { ...heldBridge, state: "joined" },
           });
-          return ownerJoinTwiml(joined, joined.owner ?? heldBridge);
+          return ownerJoinTwiml(joined, joined.owner ?? heldBridge, connection.conference.sayVoice);
         }),
       )
       .pipe(

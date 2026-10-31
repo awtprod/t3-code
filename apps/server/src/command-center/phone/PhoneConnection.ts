@@ -119,6 +119,18 @@ export const PhonePublicBaseUrl = Schema.String.check(
 /** Shared secret of the ElevenLabs initiation webhook and server tool header. */
 const ToolSecret = SecretToken.check(Schema.isMinLength(32));
 
+/** Twilio <Say> provider-qualified voice id; availability is checked by Twilio. */
+const TwilioSayVoice = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(200),
+  Schema.isPattern(/^(?:Polly|Google|ElevenLabs)\.[A-Za-z0-9][A-Za-z0-9_-]*$/u),
+  Schema.makeFilter(
+    (value) =>
+      (value.trim() === value && !hasControlCharacters(value)) ||
+      "The Say voice must be a single-line Provider.Voice identifier.",
+  ),
+);
+
 /**
  * Conference mode for third-party calls: Command Center owns a Twilio
  * Conference and the third-party agent joins it as one participant.
@@ -130,6 +142,8 @@ export const PhoneConferenceConfig = Schema.Struct({
   callerId: Schema.Struct({ callee: PhoneNumberE164, owner: PhoneNumberE164 }),
   publicBaseUrl: PhonePublicBaseUrl,
   toolSecret: ToolSecret,
+  /** Voice for the owner brief and return announcement; absent uses Twilio's default. */
+  sayVoice: Schema.optional(TwilioSayVoice),
 });
 export type PhoneConferenceConfig = typeof PhoneConferenceConfig.Type;
 
