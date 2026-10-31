@@ -664,84 +664,100 @@ describe("conference-mode third-party calls", () => {
 });
 
 describe("bring_owner_in", () => {
-  it.effect("holds and mutes the agent before Andrew joins, then hands the call back", () => {
-    const { harness, layer } = makeLayer();
-    return Effect.gen(function* () {
-      yield* seedSpace;
-      const callId = yield* connectCall;
-      const tool = yield* Effect.forkChild(bringOwnerIn({ call_sid: "" }));
-      yield* Deferred.await(harness.ownerDialed);
-      expect(calls(harness, "createCall")).toEqual([
-        {
-          from: conference.callerId.owner,
-          to: legacyConnection.ownerNumber,
-          url: `${BASE_URL}/twilio/owner-twiml?call=${callId}`,
-          timeout: 30,
-          statusCallback: `${BASE_URL}/twilio/status?call=${callId}&leg=owner`,
-          statusCallbackEvents: ["answered", "completed"],
+  it.effect.each([undefined, "Polly.Joanna-Neural"])(
+    "holds and mutes the agent before Andrew joins, then hands the call back (Say voice: %s)",
+    (sayVoice) => {
+      const { harness, layer } = makeLayer({
+        connection: {
+          ...connection,
+          conference: { ...conference, ...(sayVoice === undefined ? {} : { sayVoice }) },
         },
-      ]);
-      const twiml = yield* twilioRequest({
-        route: "owner-twiml",
-        callId,
-        params: { CallSid: OWNER_SID, CallStatus: "in-progress" },
       });
-      // The agent is held and muted before the TwiML that joins Andrew is returned.
-      expect(calls(harness, "updateParticipant")).toEqual([
-        {
-          conferenceSid: CONFERENCE_SID,
-          callSid: AGENT_SID,
-          hold: true,
-          holdUrl: `${BASE_URL}/twilio/hold?call=${callId}`,
-          muted: true,
-        },
-      ]);
-      expect(twiml).toEqual({
-        kind: "twiml",
-        body: [
-          '<?xml version="1.0" encoding="UTF-8"?><Response>',
-          "<Say>Command Center. I have Acme Bank on the line about Dispute a card charge. ",
-          "The bank needs Andrew to confirm the card holder&apos;s date of birth. ",
-          "Hang up when you are done; the assistant continues the call.</Say>",
-          '<Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="false">',
-          `cc-${callId}</Conference></Dial></Response>`,
-        ].join(""),
-      });
-      expect(bodyOf(yield* Fiber.join(tool))).toMatchObject({ status: "joined" });
-      expect((yield* loadRecord).phase).toBe("owner-joined");
-      // A repeated tool call reports the bridge instead of dialing again.
-      expect(bodyOf(yield* bringOwnerIn())).toMatchObject({ status: "joined" });
-      expect(calls(harness, "createCall")).toHaveLength(1);
+      return Effect.gen(function* () {
+        yield* seedSpace;
+        const callId = yield* connectCall;
+        const tool = yield* Effect.forkChild(bringOwnerIn({ call_sid: "" }));
+        yield* Deferred.await(harness.ownerDialed);
+        expect(calls(harness, "createCall")).toEqual([
+          {
+            from: conference.callerId.owner,
+            to: legacyConnection.ownerNumber,
+            url: `${BASE_URL}/twilio/owner-twiml?call=${callId}`,
+            timeout: 30,
+            statusCallback: `${BASE_URL}/twilio/status?call=${callId}&leg=owner`,
+            statusCallbackEvents: ["answered", "completed"],
+          },
+        ]);
+        const twiml = yield* twilioRequest({
+          route: "owner-twiml",
+          callId,
+          params: { CallSid: OWNER_SID, CallStatus: "in-progress" },
+        });
+        // The agent is held and muted before the TwiML that joins Andrew is returned.
+        expect(calls(harness, "updateParticipant")).toEqual([
+          {
+            conferenceSid: CONFERENCE_SID,
+            callSid: AGENT_SID,
+            hold: true,
+            holdUrl: `${BASE_URL}/twilio/hold?call=${callId}`,
+            muted: true,
+          },
+        ]);
+        expect(twiml).toEqual({
+          kind: "twiml",
+          body: [
+            '<?xml version="1.0" encoding="UTF-8"?><Response>',
+            `<Say${sayVoice === undefined ? "" : ` voice="${sayVoice}"`}>Command Center. I have Acme Bank on the line. `,
+            "The bank needs Andrew to confirm the card holder&apos;s date of birth. ",
+            "Hang up when you are done; the assistant continues the call.</Say>",
+            '<Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="false">',
+            `cc-${callId}</Conference></Dial></Response>`,
+          ].join(""),
+        });
+        expect(bodyOf(yield* Fiber.join(tool))).toMatchObject({ status: "joined" });
+        expect((yield* loadRecord).phase).toBe("owner-joined");
+        // A repeated tool call reports the bridge instead of dialing again.
+        expect(bodyOf(yield* bringOwnerIn())).toMatchObject({ status: "joined" });
+        expect(calls(harness, "createCall")).toHaveLength(1);
 
-      yield* status(callId, "owner", OWNER_SID, "in-progress");
-      yield* status(callId, "owner", OWNER_SID, "completed");
-      // Unhold, announce, unmute — in that order, to the agent only.
-      expect(calls(harness, "updateParticipant").slice(1)).toEqual([
-        { conferenceSid: CONFERENCE_SID, callSid: AGENT_SID, hold: false },
-        {
-          conferenceSid: CONFERENCE_SID,
-          callSid: AGENT_SID,
-          announceUrl: `${BASE_URL}/twilio/announce?call=${callId}`,
-        },
-        { conferenceSid: CONFERENCE_SID, callSid: AGENT_SID, muted: false },
-      ]);
-      const record = yield* loadRecord;
-      expect(record.phase).toBe("in-progress");
-      expect(record.owner).toMatchObject({ n: 1, state: "ended" });
-      expect(calls(harness, "endConference")).toEqual([]);
-      const rows = yield* phoneRows;
-      expect(rows.map((row) => [row.sourceId, row.status])).toEqual([
-        ["phone-start:conv_third_party_1", "calling-third-party"],
-        [`phone-bridge:${callId}:1`, "bridging-owner"],
-        [`phone-bridge-end:${callId}:1`, "bridge-ended"],
-      ]);
-      expect(rows[1]?.title).toBe(
-        "Phone: bringing Andrew in — The bank needs Andrew to confirm the card holder's date of birth.",
-      );
-      expect(rows[2]?.title).toBe("Phone: Andrew left; assistant continued");
-      expect(JSON.stringify(rows)).not.toContain(legacyConnection.ownerNumber);
-    }).pipe(Effect.provide(layer));
-  });
+        yield* status(callId, "owner", OWNER_SID, "in-progress");
+        yield* status(callId, "owner", OWNER_SID, "completed");
+        // Unhold, announce, unmute — in that order, to the agent only.
+        expect(calls(harness, "updateParticipant").slice(1)).toEqual([
+          { conferenceSid: CONFERENCE_SID, callSid: AGENT_SID, hold: false },
+          {
+            conferenceSid: CONFERENCE_SID,
+            callSid: AGENT_SID,
+            announceUrl: `${BASE_URL}/twilio/announce?call=${callId}`,
+          },
+          { conferenceSid: CONFERENCE_SID, callSid: AGENT_SID, muted: false },
+        ]);
+        const announce = yield* twilioRequest({ route: "announce", callId, params: {} });
+        expect(announce).toEqual({
+          kind: "twiml",
+          body: `<?xml version="1.0" encoding="UTF-8"?><Response><Say${sayVoice === undefined ? "" : ` voice="${sayVoice}"`}>Andrew has finished and left the call. Continue with the callee.</Say></Response>`,
+        });
+        // Replayed hang-up callbacks must not repeat the restoration or activity row.
+        yield* status(callId, "owner", OWNER_SID, "completed");
+        expect(calls(harness, "updateParticipant")).toHaveLength(4);
+        const record = yield* loadRecord;
+        expect(record.phase).toBe("in-progress");
+        expect(record.owner).toMatchObject({ n: 1, state: "ended" });
+        expect(calls(harness, "endConference")).toEqual([]);
+        const rows = yield* phoneRows;
+        expect(rows.map((row) => [row.sourceId, row.status])).toEqual([
+          ["phone-start:conv_third_party_1", "calling-third-party"],
+          [`phone-bridge:${callId}:1`, "bridging-owner"],
+          [`phone-bridge-end:${callId}:1`, "bridge-ended"],
+        ]);
+        expect(rows[1]?.title).toBe(
+          "Phone: bringing Andrew in — The bank needs Andrew to confirm the card holder's date of birth.",
+        );
+        expect(rows[2]?.title).toBe("Phone: Andrew left; assistant continued");
+        expect(JSON.stringify(rows)).not.toContain(legacyConnection.ownerNumber);
+      }).pipe(Effect.provide(layer));
+    },
+  );
 
   it.effect("keeps the call up while Andrew talks after the agent left, then ends it", () => {
     const { harness, layer } = makeLayer();

@@ -13,16 +13,21 @@ calls and SMS are not supported.
   it. **Approve and call** in the Inbox places the call; that accept needs the
   `command-center:approve` scope and a plan the Space agent filed itself, and it does not dial if
   the agent has since been disabled or lost `cc.phone.call` (a `Phone: not placed …` row says so).
-  A placed call closes the Item (`done`), so it leaves Needs You and cannot be approved twice. A
+  A placed call closes the Item (`done`), so it leaves Needs You and cannot be approved twice.
+  This proves placement only, not a completed business request or owner verification. A
   call that was not placed, or whose outcome is unknown, leaves the Item open with the reason
   appended to its description. **Discard** on the plan declines the call and cancels the Item.
 - During any call the voice agent can bridge the owner in ("patch me in") through ElevenLabs'
-  `transfer_to_number` tool in conference mode. The owner hears a short brief before the callee is
+  `transfer_to_number` tool in the default mode. The owner hears a short brief before the callee is
   connected, and the voice agent leaves the call. With [conference mode](#5-conference-mode) the
   agent instead steps out while the owner talks and takes the call back when he hangs up.
 - Every call leaves Space activity rows: `Phone: calling …` when it starts, then `Phone: ended …`
   with the summary, the outcome, and the conversation link, or `Phone: not connected …`. Numbers
   are masked to their last four digits.
+
+Treat approval, dialing, owner handoff, and the business outcome separately. Monitor until a
+confirmed result or explicit owner takeover; a handoff or "assistant continued" row alone does not
+prove verification finished or that the assistant spoke after resumption.
 
 ## Limits
 
@@ -58,6 +63,11 @@ not get them; list them explicitly next to the Space's other capabilities:
 ```
 
 Only the Space agent's own credential can use the phone tools.
+Ordinary thread agents should inspect the enabled Space agent and config, then message its existing
+`cc-space-agent-<spaceId>` thread with `t3_thread_send`, a stable `clientRequestId`, and the user's
+exact limits within the phone tools' field bounds. Missing phone tools in an ordinary thread does
+not mean calling is unavailable. Use the existing call approval once without extra questions for
+routine preparation; never create another conversation, borrow credentials, or bypass policy.
 
 ## 1. Import the Twilio number into ElevenLabs
 
@@ -81,6 +91,8 @@ parties. For both:
   You are {{owner_name}}'s assistant on a phone call with {{callee_name}}.
   Purpose: {{purpose}}
   Background: {{brief}}
+  For a third-party call, navigate IVR menus first and wait for a human before explaining
+  the purpose or making the business request. Use skip_turn to wait silently when appropriate.
   You may agree only to: {{allowed_outcomes}}. Decline anything else politely and say
   {{owner_name}} will follow up.
   If the question below is not empty, ask it plainly and get a clear yes or no:
@@ -199,10 +211,15 @@ How a call runs:
      after 45 seconds of ringing. It answers `{ "status", "message" }`; `status` is `joined`,
      `no-answer`, `busy`, `failed`, `refused`, or `calling`, and `message` tells the agent what to
      say or do.
-   - Empty first message, a long silence timeout, and no `transfer_to_number`. The prompt tells the
-     agent to stay quiet until the callee speaks, to put the callee on hold before calling
-     `bring_owner_in`, to stay silent while the owner talks, and never to end the call while waiting
-     for him.
+   - Empty first message, a long silence timeout, `skip_turn` enabled, and both `end_call` and
+     `transfer_to_number` disabled. Disable the hangup tool itself; telling the agent not to use it
+     does not prevent it from mistaking a hangup for silent waiting.
+     Replace the template's transfer instructions with `bring_owner_in`: navigate IVR menus first
+     and wait for a human before making the business request. Put the callee on hold before calling
+     `bring_owner_in`, use `skip_turn` to wait silently during owner verification, and do not use
+     `end_call` in conference mode. After the return announcement, resume with the callee; the
+     bridge is not task completion. Report only confirmed outcomes, not success inferred from a
+     completed approval Item or handoff.
 5. Publish the sub-paths of the webhook mount: Twilio and ElevenLabs reach
    `/api/command-center/phone/webhook/twilio/…` and `/api/command-center/phone/webhook/elevenlabs/…`
    under the same public prefix as the post-call webhook.
@@ -222,7 +239,8 @@ it again with `pnpm credentials:phone -- set`:
     "inboundNumber": "+15555550111",
     "callerId": { "callee": "+15555550112", "owner": "+15555550113" },
     "publicBaseUrl": "https://cc.example.com/api/command-center/phone/webhook",
-    "toolSecret": "<tool secret>"
+    "toolSecret": "<tool secret>",
+    "sayVoice": "Polly.Joanna-Neural"
   }
 }
 ```
@@ -232,6 +250,17 @@ Twilio signs the exact URL it calls, and Command Center checks every Twilio requ
 builds from this value (never from request headers), so it must match what Twilio is given. `status`
 reports conference mode with masked numbers and never prints the Twilio credentials, the tool
 secret, or the URL. Removing both blocks returns to the default mode.
+
+`conference.sayVoice` is optional: a `Provider.Voice` identifier up to 200 characters, with provider
+`Polly`, `Google`, or `ElevenLabs` and a voice part containing ASCII letters, digits, underscores,
+or hyphens (starting with a letter or digit). It sets Twilio's owner brief and return announcement
+independently of the ElevenLabs conversational agent's voice. Omit it to retain Twilio's default.
+Apply the user's chosen voice to both speech paths and check what is actually heard in the owner
+brief, conversational speech, and return announcement. Local format validation does not establish
+vendor availability; `Polly.Joanna-Neural` is an example, not a real-call verification.
+When upgrading an older server, deploy support for `sayVoice` before adding it to the connection:
+the connection decoder rejects unknown fields. Test the chosen voice and a complete owner
+join/leave/resume cycle on a controlled line before relying on it with a third party.
 
 ### Authentication
 

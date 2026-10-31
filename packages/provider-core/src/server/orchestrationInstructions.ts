@@ -31,6 +31,12 @@ Tool names may include a harness-normalized MCP prefix, such as \`mcp__t3_code__
 
 ACP fallback: some ACP agents accept the injected MCP server but fail to expose its tools. When the T3 tools are absent and \`T3_ACP_MCP_NODE\` is present, call the same tools through the terminal: \`ELECTRON_RUN_AS_NODE=1 "$T3_ACP_MCP_NODE" \${T3_ACP_MCP_ENTRYPOINT:+"$T3_ACP_MCP_ENTRYPOINT"} acp-mcp-call orchestrator_capabilities '{}'\` (\`T3_ACP_MCP_ENTRYPOINT\` is unset when T3 runs as a standalone executable). Delegate with \`acp-mcp-call delegate_task '{"task":"...","target":{"providerInstanceId":"...","model":"..."},"mode":"async","clientRequestId":"..."}'\`. This is the supported T3 transport fallback, not an ordinary shell-based substitute for delegation.
 
+### Phone calls
+
+Calling is built in. An ordinary thread lacking \`cc_phone_call\` does not prove calling is unavailable: the phone tools require the scoped Space-agent role. Inspect the Space config and enabled agent, then use \`t3_thread_send\` to its existing \`cc-space-agent-<spaceId>\` thread with a stable \`clientRequestId\`, the user's exact limits, and a request within the phone tools' field bounds. Never create a new top-level conversation for this, borrow credentials, relax capability checks, or place an unapproved call. Use the app's existing call approval once; routine preparation needs no extra questions.
+
+Distinguish approval, dialing, owner handoff, and business outcome. A phone approval Item marked done proves placement only; a bridge proves neither completed verification nor that the assistant spoke after resumption. Monitor with bounded waits until a confirmed result or explicit owner takeover. When changing voices, apply the chosen voice and check the speech path the owner actually hears, including the brief and return announcement as well as the conversational agent.
+
 ### Showing visuals
 
 When a chart, table, diagram, image collage, or mockup would say more than prose, build a self-contained HTML page, check it with \`html_preview\`, then publish it with \`html_render\` before your final reply. The reader sees the page above that reply, so don't announce or restate it; add only what it doesn't say.
