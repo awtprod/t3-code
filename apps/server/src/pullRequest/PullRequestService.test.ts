@@ -5293,7 +5293,7 @@ it.effect(
 );
 
 it.effect(
-  "keeps explicitly verified reads on their selected account and honors disabled hosts",
+  "verifies routed work on a profile repository as that profile and honors disabled hosts",
   () =>
     Effect.gen(function* () {
       vi.stubEnv(
@@ -5302,15 +5302,35 @@ it.effect(
           acme: { profile: "organization", login: "organization" },
         }),
       );
-      let profileReads = 0;
       let reads = 0;
+      let actions = 0;
+      const verifiedWith: string[] = [];
+      // The host's own account is 101; the profile's is 202. Each answers for its own token.
+      const identity = Effect.map(GitHubApi.PinnedGitHubCredential, (pinned) =>
+        pinned === null
+          ? { accountId: "101", viewer: "host", credentialFingerprint: "host" }
+          : {
+              accountId: "202",
+              viewer: "organization",
+              credentialFingerprint: pinned.credentialFingerprint,
+            },
+      );
       const provider = fakeProvider(SourceControlProviderKind.make("github"), {
+        getRoutingIdentity: () =>
+          Effect.map(identity, ({ accountId, viewer }) => ({ accountId, viewer })),
         withVerifiedCredential: (_, use) =>
-          use({ accountId: "101", viewer: "explicit", credentialFingerprint: "explicit" }),
+          identity.pipe(
+            Effect.tap(({ viewer }) => Effect.sync(() => verifiedWith.push(viewer))),
+            Effect.flatMap(use),
+          ),
         getChangeRequestSummary: () =>
           Effect.sync(() => {
             reads++;
             return hostedChangeRequest("explicit");
+          }),
+        runAction: () =>
+          Effect.sync(() => {
+            actions++;
           }),
       });
       const input = {
@@ -5319,26 +5339,35 @@ it.effect(
         ],
         providers: [provider],
         githubProfile: () =>
-          Effect.sync(() => {
-            profileReads++;
-            return {
-              account: "organization",
-              token: Redacted.make("organization-token"),
-              fingerprint: "organization",
-            };
+          Effect.succeed({
+            account: "organization",
+            token: Redacted.make("organization-token"),
+            fingerprint: "organization",
           }),
       };
       const service = yield* makeService(input);
-      const ref = {
-        projectId: "p1" as ProjectId,
-        host: "github.com",
-        repository: "acme/web",
-        number: 1,
-        expectedAccountId: "101",
-      };
+      const backgroundRef = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+      const route = yield* service.routing(backgroundRef);
+      assert.strictEqual(route.accountId, "202");
+      assert.strictEqual(route.viewer, "organization");
+      const ref = { ...backgroundRef, host: route.host, expectedAccountId: route.accountId };
       yield* service.withRoutingCredential(ref, service.summary(ref));
-      assert.strictEqual(profileReads, 0);
+      assert.deepStrictEqual(verifiedWith, ["organization"]);
       assert.strictEqual(reads, 1);
+      // The host's own account cannot stand in for the profile on its repository.
+      const hostAccount = yield* Effect.flip(
+        service.withRoutingCredential(
+          { ...ref, expectedAccountId: "101" },
+          service.runAction({ ...ref, expectedAccountId: "101", action: "close" }),
+        ),
+      );
+      assert.strictEqual(hostAccount._tag, "PullRequestOperationError");
+      if (hostAccount._tag === "PullRequestOperationError")
+        assert.strictEqual(hostAccount.operation, "routeIdentity");
+      // It was checked against the profile's credential, never the host's.
+      assert.deepStrictEqual(verifiedWith, ["organization", "organization"]);
+      assert.strictEqual(actions, 0);
+
       const disabled = yield* makeService({
         ...input,
         settings: {
@@ -5346,11 +5375,301 @@ it.effect(
           sourceControlHosts: { github: { hosts: { "github.com": { enabled: false } } } },
         },
       });
-      const { expectedAccountId: _expectedAccountId, ...backgroundRef } = ref;
-      const error = yield* disabled.summary(backgroundRef).pipe(Effect.flip);
-      assert.strictEqual(error._tag, "PullRequestOperationError");
+      const readError = yield* disabled.summary(backgroundRef).pipe(Effect.flip);
+      assert.strictEqual(readError._tag, "PullRequestOperationError");
+      const writeError = yield* disabled
+        .runAction({ ...backgroundRef, action: "close" })
+        .pipe(Effect.flip);
+      assert.strictEqual(writeError._tag, "PullRequestOperationError");
+      assert.include(writeError.message, "turned off");
+      const routedError = yield* Effect.flip(
+        disabled.withRoutingCredential(ref, disabled.runAction({ ...ref, action: "close" })),
+      );
+      assert.strictEqual(routedError._tag, "PullRequestOperationError");
+      if (routedError._tag === "PullRequestOperationError")
+        assert.strictEqual(routedError.operation, "routeIdentity");
       assert.strictEqual(reads, 1);
+      assert.strictEqual(actions, 0);
+      // A disabled host refuses before any account is asked about.
+      assert.strictEqual(verifiedWith.length, 2);
     }),
+);
+
+it.effect("runs every pull request write and uncached read as the repository's profile", () =>
+  Effect.gen(function* () {
+    vi.stubEnv(
+      "COMMAND_CENTER_GITHUB_PROFILE_MAP",
+      JSON.stringify({
+        acme: { profile: "organization", login: "organization" },
+      }),
+    );
+    const used: Array<readonly [operation: string, token: string, scope: string]> = [];
+    const record = <A>(operation: string, value: A) =>
+      Effect.gen(function* () {
+        const pinned = yield* GitHubApi.PinnedGitHubCredential;
+        const scope = yield* SourceControlRateLimit.CredentialScope;
+        used.push([operation, pinned === null ? "host" : Redacted.value(pinned.token), scope]);
+        return value;
+      });
+    const base = fakeProvider(SourceControlProviderKind.make("github"));
+    const service = yield* makeService({
+      projects: [
+        project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
+        project({ id: "p2", title: "app", workspaceRoot: "/b", repository: "other/app" }),
+      ],
+      githubProfile: (owner) =>
+        Effect.suspend(() => {
+          assert.strictEqual(owner, "acme");
+          return Effect.succeed({
+            account: "organization",
+            token: Redacted.make("organization-token"),
+            fingerprint: "github.com:organization",
+          });
+        }),
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          capabilities: { ...base.capabilities, labels: true },
+          runAction: (input) => record(`runAction:${input.action}`, undefined),
+          // What a merge reads back to confirm it landed.
+          getChangeRequestSummary: () => record("confirmMerge", changeRequest(1, "2026-07-02")),
+          updateChangeRequest: () => record("update", undefined),
+          comment: () => record("comment", undefined),
+          updateComment: () => record("updateComment", undefined),
+          submitReview: () => record("submitReview", undefined),
+          replyToThread: () => record("replyToThread", undefined),
+          setThreadResolution: () => record("setThreadResolution", undefined),
+          setReaction: () => record("setReaction", undefined),
+          setReviewerRequest: () => record("requestReviewers", undefined),
+          setLabels: () => record("setLabels", undefined),
+          listReviewerCandidates: () =>
+            record("reviewerCandidates", { candidates: [], truncated: false }),
+          listLabelCandidates: () =>
+            record("labelCandidates", { candidates: [], truncated: false }),
+          getReviewThreadComments: () =>
+            record("threadComments", { comments: [], nextCursor: null }),
+          getDiffFileContents: () =>
+            record("diffFileContents", { oldContents: "a", newContents: "b" }),
+        }),
+      ],
+    });
+    const runAll = (ref: { projectId: ProjectId; repository: string; number: number }) =>
+      Effect.gen(function* () {
+        yield* service.runAction({ ...ref, action: "merge" });
+        yield* service.update({ ...ref, title: "Renamed" });
+        yield* service.comment({ ...ref, body: "hello" });
+        yield* service.updateComment({
+          ...ref,
+          commentId: "PRRC_1",
+          kind: "review-comment",
+          body: "Second thoughts",
+        });
+        yield* service.submitReview({ ...ref, verdict: "approve", body: "", comments: [] });
+        yield* service.replyToThread({ ...ref, threadId: "t1", body: "hi" });
+        yield* service.setThreadResolution({ ...ref, threadId: "t1", resolved: true });
+        yield* service.setReaction({ ...ref, subjectId: "IC_1", content: "heart", reacted: true });
+        yield* service.requestReviewers({
+          ...ref,
+          reviewers: [{ id: "octocat", kind: "user" }],
+          requested: true,
+        });
+        yield* service.setLabels({ ...ref, labels: ["bug"], applied: true });
+        yield* service.reviewerCandidates(ref);
+        yield* service.labelCandidates(ref);
+        yield* service.threadComments({ ...ref, threadId: "t1", cursor: "c1" });
+        yield* service.diffFileContents({
+          ...ref,
+          changeType: "change",
+          oldPath: "a.ts",
+          newPath: "a.ts",
+        });
+      });
+    const operations = [
+      "runAction:merge",
+      "confirmMerge",
+      "update",
+      "comment",
+      "updateComment",
+      "submitReview",
+      "replyToThread",
+      "setThreadResolution",
+      "setReaction",
+      "requestReviewers",
+      "setLabels",
+      "reviewerCandidates",
+      "labelCandidates",
+      "threadComments",
+      "diffFileContents",
+    ];
+
+    yield* runAll({ projectId: "p1" as ProjectId, repository: "acme/web", number: 1 });
+    assert.deepStrictEqual(
+      used,
+      operations.map(
+        (operation) => [operation, "organization-token", "github.com:organization"] as const,
+      ),
+    );
+
+    // An owner with no configured profile keeps the host's own credential, unchanged.
+    used.length = 0;
+    yield* runAll({ projectId: "p2" as ProjectId, repository: "other/app", number: 1 });
+    assert.deepStrictEqual(
+      used,
+      operations.map((operation) => [operation, "host", ""] as const),
+    );
+  }),
+);
+
+it.effect("routes, verifies and writes a profile repository with the profile's token", () =>
+  Effect.gen(function* () {
+    vi.stubEnv(
+      "COMMAND_CENTER_GITHUB_PROFILE_MAP",
+      JSON.stringify({
+        acme: { profile: "organization", login: "organization" },
+      }),
+    );
+    const requests: Array<{ operation: string; authorization: string | undefined }> = [];
+    const credentials = Layer.succeed(
+      GitHubCredentials.GitHubCredentials,
+      GitHubCredentials.GitHubCredentials.of({
+        get: (host) =>
+          Effect.succeed({
+            host,
+            token: Redacted.make("host-token"),
+            source: "gh" as const,
+            fingerprint: `${host}:host-token`,
+          }),
+        invalidate: () => Effect.void,
+      }),
+    );
+    const http = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.sync(() => {
+          const authorization = request.headers["authorization"];
+          const operation = request.url.endsWith("/user")
+            ? "user"
+            : request.body._tag === "Uint8Array"
+              ? new TextDecoder().decode(request.body.body)
+              : "";
+          requests.push({ operation, authorization });
+          let body;
+          if (operation === "user") {
+            body =
+              authorization === "Bearer organization-token"
+                ? { id: 202, login: "organization" }
+                : { id: 101, login: "host" };
+          } else if (operation.includes("query PullRequestBranchToDelete")) {
+            body = {
+              data: {
+                repository: {
+                  pullRequest: {
+                    state: "MERGED",
+                    headRefName: "feature",
+                    baseRefName: "main",
+                    headRefOid: "abc123",
+                    headRepository: { id: "FORK_REPO" },
+                  },
+                },
+              },
+            };
+          } else if (operation.includes("query PullRequestSourceBranch")) {
+            body = {
+              data: {
+                node: {
+                  defaultBranchRef: { name: "main" },
+                  ref: { target: { oid: "abc123" } },
+                },
+              },
+            };
+          } else if (operation.includes("updateRefs(")) {
+            body = { data: { updateRefs: {} } };
+          } else {
+            body = {
+              data: {
+                repository: {
+                  mergeCommitAllowed: true,
+                  squashMergeAllowed: true,
+                  rebaseMergeAllowed: true,
+                  viewerPermission: "READ",
+                  pullRequest: {
+                    viewerCanUpdate: false,
+                    viewerDidAuthor: false,
+                    headRepository: { viewerPermission: "WRITE" },
+                  },
+                },
+              },
+            };
+          }
+          return HttpClientResponse.fromWeb(request, new Response(JSON.stringify(body)));
+        }),
+      ),
+    );
+    const provider = yield* GitHubPullRequestProvider.make.pipe(
+      Effect.provide(
+        GitHubPullRequestApi.layer.pipe(
+          Layer.provide(
+            GitHubApi.layer.pipe(
+              Layer.provide(Layer.mergeAll(credentials, http)),
+              Layer.provide(GitHubQuota.layer),
+              Layer.provide(SourceControlRateLimit.layer),
+            ),
+          ),
+          Layer.provide(TestSourceControlHost.layer()),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+    const service = yield* makeService({
+      projects: [
+        project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
+        project({ id: "p2", title: "app", workspaceRoot: "/b", repository: "other/app" }),
+      ],
+      providers: [provider],
+      githubProfile: (owner) =>
+        Effect.suspend(() => {
+          assert.strictEqual(owner, "acme");
+          return Effect.succeed({
+            account: "organization",
+            token: Redacted.make("organization-token"),
+            fingerprint: "github.com:organization",
+          });
+        }),
+    });
+    const updates = () => requests.filter(({ operation }) => operation.includes("updateRefs("));
+    const ref = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+
+    // A press with no account pinned, as a single-environment page sends it.
+    yield* service.runAction({ ...ref, action: "delete-branch" });
+    // A routed press pins the account `routing` named, which must be the profile's.
+    const route = yield* service.routing(ref);
+    assert.strictEqual(route.accountId, "202");
+    assert.strictEqual(route.viewer, "organization");
+    const routed = { ...ref, host: route.host, expectedAccountId: route.accountId };
+    yield* service.withRoutingCredential(
+      routed,
+      service.runAction({ ...routed, action: "delete-branch" }),
+    );
+    assert.strictEqual(updates().length, 2);
+    assert.isAbove(requests.length, 2);
+    assert.deepStrictEqual(
+      [...new Set(requests.map(({ authorization }) => authorization))],
+      ["Bearer organization-token"],
+    );
+
+    // Another owner's repository is still written with the host's own credential.
+    requests.length = 0;
+    yield* service.runAction({
+      projectId: "p2" as ProjectId,
+      repository: "other/app",
+      number: 1,
+      action: "delete-branch",
+    });
+    assert.strictEqual(updates().length, 1);
+    assert.deepStrictEqual(
+      [...new Set(requests.map(({ authorization }) => authorization))],
+      ["Bearer host-token"],
+    );
+  }),
 );
 
 it.effect("rejects mismatched routing credentials before use and preserves action errors", () =>
