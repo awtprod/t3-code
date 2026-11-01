@@ -117,9 +117,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-24.04
-    # Main already runs 8-13 minutes here; upstream v0.1.5 adds the web browser
-    # test project and the built-client boot check.
-    timeout-minutes: 30
+    # Main already ran 8-13 minutes here with web included; web now has its own job.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -175,12 +174,31 @@ jobs:
       - name: Test nightly release checks
         run: node --test .github/scripts/check-nightly-release.test.cjs
 
-      # Upstream v0.1.5's web browser test project and the built-boot check run in headless Chromium.
+      - name: Test
+        run: vp run --parallel --concurrency-limit 4 --filter '!@awtprod/command-center' --filter '!@t3tools/monorepo' --filter '!@t3tools/web' test
+
+  # Web runs alone, as upstream does: its unit and headless-Chromium browser
+  # projects time out when they share a 4 vCPU runner with every other package.
+  test_web:
+    name: Test Web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
       - name: Install Chromium for web browser tests
         run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
 
       - name: Test
-        run: vp run --parallel --concurrency-limit 4 --filter '!@awtprod/command-center' --filter '!@t3tools/monorepo' test
+        run: vp run --filter @t3tools/web test
 
       # Browser tests run source modules; this boots the production chunk graph.
       - name: Boot the built web client
