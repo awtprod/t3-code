@@ -59,14 +59,13 @@ export const removeLinkedWorktree = Effect.fn("WorktreeRemoval.removeLinkedWorkt
       detail: `fatal: ${message}`,
       ...(cause === undefined ? {} : { cause }),
     });
-  const gitOutput = (cwd: string, args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv) =>
+  const gitOutput = (cwd: string, args: ReadonlyArray<string>) =>
     input
       .execute({
         operation: input.operation,
         cwd,
         args,
         maxOutputBytes: INDEX_LIST_MAX_BYTES,
-        ...(env === undefined ? {} : { env }),
       })
       .pipe(Effect.map((result) => result.stdout));
   const samePath = (left: string, right: string) =>
@@ -119,23 +118,26 @@ export const removeLinkedWorktree = Effect.fn("WorktreeRemoval.removeLinkedWorkt
   }
   if (!input.force) {
     // Bound like Git's own check, so `core.worktree` can't point it elsewhere.
-    const boundEnv = { GIT_DIR: gitFile, GIT_WORK_TREE: worktreePath };
+    // Arguments, not GIT_DIR/GIT_WORK_TREE: the hardened Git env drops both.
+    const bound = [`--git-dir=${gitFile}`, `--work-tree=${worktreePath}`];
     const submodules = refuse("working trees containing submodules cannot be moved or removed");
     // An unreadable path counts as present, so a doubt refuses.
     const present = (target: string) =>
       fileSystem.exists(target).pipe(Effect.orElseSucceed(() => true));
     if (yield* present(path.join(adminDir, "modules"))) return yield* submodules;
-    const index = yield* gitOutput(worktreePath, ["ls-files", "--stage", "-z"], boundEnv);
+    const index = yield* gitOutput(worktreePath, [...bound, "ls-files", "--stage", "-z"]);
     for (const entry of index.split("\0")) {
       if (!entry.startsWith("160000 ")) continue;
       const submodule = entry.slice(entry.indexOf("\t") + 1);
       if (yield* present(path.join(worktreePath, submodule, ".git"))) return yield* submodules;
     }
-    const status = yield* gitOutput(
-      worktreePath,
-      [...statusConfig, "status", "--porcelain", "--ignore-submodules=none"],
-      boundEnv,
-    );
+    const status = yield* gitOutput(worktreePath, [
+      ...bound,
+      ...statusConfig,
+      "status",
+      "--porcelain",
+      "--ignore-submodules=none",
+    ]);
     if (status !== "")
       return yield* refuse(
         `'${worktreePath}' contains modified or untracked files, use --force to delete it`,
