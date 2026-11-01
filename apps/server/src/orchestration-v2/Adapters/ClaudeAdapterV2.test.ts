@@ -6010,12 +6010,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     cache_creation_input_tokens: 0,
     cache_read_input_tokens: 0,
   };
-  const reportedContextTokens = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
+  // Live context reports only: the fork re-sends the last one with the reported cost at settlement.
+  const liveTokenUsages = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
     events.flatMap((event) =>
-      event.type === "provider_turn.updated" && event.providerTurn.tokenUsage
-        ? [event.providerTurn.tokenUsage.usedTokens]
+      event.type === "provider_turn.updated" &&
+      event.providerTurn.tokenUsage &&
+      event.providerTurn.tokenUsage.extended?.costKind !== "reported"
+        ? [event.providerTurn.tokenUsage]
         : [],
     );
+  const reportedContextTokens = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
+    liveTokenUsages(events).map((usage) => usage.usedTokens);
 
   it.effect("reports context from final stream usage when the request starts at zero", () =>
     Effect.gen(function* () {
@@ -6138,11 +6143,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       assert.equal(terminal.status, "completed");
       assert.deepEqual(reportedContextTokens(harness.events), [1_211, 1_230, 1_075, 400]);
       assert.deepEqual(
-        harness.events.flatMap((event) =>
-          event.type === "provider_turn.updated" && event.providerTurn.tokenUsage
-            ? [event.providerTurn.tokenUsage.autoCompactThreshold]
-            : [],
-        ),
+        liveTokenUsages(harness.events).map((usage) => usage.autoCompactThreshold),
         [150_000, 150_000, 150_000, 150_000],
       );
     }).pipe(
@@ -6200,11 +6201,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.equal(terminal.status, "completed");
         assert.deepEqual(reportedContextTokens(harness.events), [1_075, 400, 460]);
         assert.deepEqual(
-          harness.events.flatMap((event) =>
-            event.type === "provider_turn.updated" && event.providerTurn.tokenUsage
-              ? [event.providerTurn.tokenUsage.autoCompactThreshold]
-              : [],
-          ),
+          liveTokenUsages(harness.events).map((usage) => usage.autoCompactThreshold),
           [threshold, threshold, threshold],
         );
       }).pipe(

@@ -144,6 +144,9 @@ function makeHarness(
       createWorktree,
       renameBranch: (input) => Effect.succeed({ branch: input.newBranch }),
       fetchRemote: () => Effect.void,
+      fetchWorktreeBaseCommit: () =>
+        Effect.succeed({ commitSha: "remote-main-sha", remoteRefName: "origin/main" }),
+      resolveWorktreeBaseRemote: () => Effect.succeed({ remoteName: "origin", branchName: "main" }),
       hasCommit: () => Effect.succeed(false),
       isRepository: () => Effect.succeed(true),
       remoteExists: () => Effect.succeed(true),
@@ -173,6 +176,7 @@ function makeHarness(
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
       namedProjectsRoot: "/projects",
       folderForThread: () => Effect.succeedNone,
+      isScratchProject: () => Effect.succeed(false),
     }),
   );
   const layerLaunch = ThreadLaunch.layer.pipe(

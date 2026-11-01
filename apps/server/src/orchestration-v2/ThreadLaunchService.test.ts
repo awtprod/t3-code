@@ -1191,7 +1191,8 @@ it.effect(
       assert.isUndefined(projection.turnItems.find((item) => item.type === "error"));
       assert.isNull(projection.thread.worktreePath);
       assert.equal(harness.createWorktree.mock.calls.length, 0);
-      assert.equal(harness.runSetup.mock.calls[0]?.[0]?.worktreePath, project.workspaceRoot);
+      // Upstream never runs setup actions in the main checkout.
+      assert.equal(harness.runSetup.mock.calls.length, 0);
     }).pipe(Effect.provide(harness.layer));
   },
 );
@@ -1226,20 +1227,22 @@ it.effect(
 it.effect(
   "retries a scheduled task's preparation in the project folder when the project is not a repository",
   () => {
-    let setupFailures = 1;
+    // The first attempt still sees a repository and fails to read its base; the retry sees none.
+    let retrying = false;
     const harness = makeHarness({
-      git: { isRepository: () => Effect.succeed(false) },
-      runSetup: (input) =>
-        setupFailures-- > 0
-          ? Effect.fail(
-              new ProjectSetupScriptRunner.ProjectSetupScriptOperationError({
-                threadId: input.threadId,
-                worktreePath: input.worktreePath,
-                operation: "readSettings",
-                cause: new Error("Settings were briefly unreadable."),
-              }),
-            )
-          : Effect.succeed({ status: "no-script" as const }),
+      git: {
+        isRepository: () => Effect.succeed(!retrying),
+        resolveWorktreeBaseRemote: () =>
+          Effect.fail(
+            new GitCommandError({
+              operation: "GitVcsDriver.resolveWorktreeBaseRemote",
+              command: "git",
+              cwd: project.workspaceRoot,
+              detail: "Git could not read a local reference.",
+              exitCode: 1,
+            }),
+          ),
+      },
     });
     return Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
@@ -1255,6 +1258,7 @@ it.effect(
       );
       const failed = yield* preparationSettled(launched.threadId);
       assert.equal(failed.runs[0]?.status, "failed");
+      retrying = true;
       yield* launches.retryPreparation({
         commandId: CommandId.make("command:launch:retry-not-a-repository:1"),
         threadId: launched.threadId,
@@ -1267,8 +1271,7 @@ it.effect(
       // The retry rebuilt its input from the run and still knew it was a scheduled task.
       assert.isNull(retried.thread.worktreePath);
       assert.equal(harness.createWorktree.mock.calls.length, 0);
-      assert.equal(harness.runSetup.mock.calls.length, 2);
-      assert.equal(harness.runSetup.mock.calls[1]?.[0]?.worktreePath, project.workspaceRoot);
+      assert.equal(harness.runSetup.mock.calls.length, 0);
     }).pipe(Effect.provide(harness.layer));
   },
 );

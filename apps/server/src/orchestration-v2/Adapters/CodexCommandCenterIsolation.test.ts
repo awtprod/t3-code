@@ -556,6 +556,7 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
           handleServerNotification: () => Effect.void,
           handleUnknownServerRequest: () => Effect.void,
           handleUnknownServerNotification: () => Effect.void,
+          awaitTermination: Effect.never,
         } as unknown as CodexClient.CodexAppServerClient["Service"];
 
         const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({

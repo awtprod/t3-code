@@ -6,25 +6,31 @@ import { buildCodexInitializeParams } from "../../provider/CodexProvider.ts";
 
 // Upstream records its fixtures as "T3 Code"; Command Center ships its own product name
 // in the runtime info, so recorded prompts are rebranded to it before exact matching.
-const RECORDED_PRODUCT_PHRASE = "you are running in T3 Code through the ";
-const CURRENT_PRODUCT_PHRASE = /you are running in .+? through the /.exec(
-  buildRuntimeInstructions({ harness: "replay" }),
-)![0];
+const CURRENT_RUNTIME_INFO = buildRuntimeInstructions({ harness: "replay" });
+const PRODUCT_PHRASES: ReadonlyArray<readonly [recorded: string, current: string]> = [
+  [
+    "you are running in T3 Code through the ",
+    /you are running in .+? through the /.exec(CURRENT_RUNTIME_INFO)![0],
+  ],
+  [
+    "open it in T3 Code's files viewer",
+    /open it in .+?'s files viewer/.exec(CURRENT_RUNTIME_INFO)![0],
+  ],
+];
 
 function rebrandRecordedRuntimeInfo(
   transcript: ProviderReplayTranscript,
 ): ProviderReplayTranscript {
-  if (RECORDED_PRODUCT_PHRASE === CURRENT_PRODUCT_PHRASE) return transcript;
   return {
     ...transcript,
     entries: transcript.entries.map((entry) => {
       if (entry.type !== "expect_outbound") return entry;
       const serialized = JSON.stringify(entry.frame);
-      if (!serialized.includes(RECORDED_PRODUCT_PHRASE)) return entry;
-      return {
-        ...entry,
-        frame: JSON.parse(serialized.replaceAll(RECORDED_PRODUCT_PHRASE, CURRENT_PRODUCT_PHRASE)),
-      };
+      const rebranded = PRODUCT_PHRASES.reduce(
+        (text, [recorded, current]) => text.replaceAll(recorded, current),
+        serialized,
+      );
+      return rebranded === serialized ? entry : { ...entry, frame: JSON.parse(rebranded) };
     }),
   };
 }

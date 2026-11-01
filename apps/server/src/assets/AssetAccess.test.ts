@@ -416,13 +416,25 @@ describe("AssetAccess", () => {
           }).pipe(Effect.flip);
           expect(error._tag).toBe(tag);
         }
-        for (const name of ["video.mp4", "audio.wav"]) {
-          const error = yield* issueAssetUrl({
-            resource: { _tag: "workspace-file", threadId: ThreadId.make("thread-1"), path: name },
-            workspaceRoot: root,
-          }).pipe(Effect.flip);
-          expect(error._tag).toBe("AssetPreviewTypeValidationError");
-        }
+        const audio = yield* issueAssetUrl({
+          resource: {
+            _tag: "workspace-file",
+            threadId: ThreadId.make("thread-1"),
+            path: "audio.wav",
+          },
+          workspaceRoot: root,
+        }).pipe(Effect.flip);
+        expect(audio._tag).toBe("AssetPreviewTypeValidationError");
+        // Command Center plays agent-rendered workspace videos inline, so only audio stays draft-only.
+        const video = yield* issueAssetUrl({
+          resource: {
+            _tag: "workspace-file",
+            threadId: ThreadId.make("thread-1"),
+            path: "video.mp4",
+          },
+          workspaceRoot: root,
+        });
+        expect(video.relativeUrl.endsWith("/video.mp4")).toBe(true);
       }).pipe(Effect.provide(layerTest)),
   );
 

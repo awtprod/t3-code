@@ -4144,7 +4144,11 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
         const countingSpawner = ChildProcessSpawner.make((command) =>
           Effect.gen(function* () {
-            const args = ChildProcess.isStandardCommand(command) ? command.args : [];
+            const rawArgs = ChildProcess.isStandardCommand(command) ? command.args : [];
+            // Command Center prefixes hardened `-c` options to every Git call; classify the verb.
+            let verbIndex = 0;
+            while (rawArgs[verbIndex] === "-c") verbIndex += 2;
+            const args = rawArgs.slice(verbIndex);
             const writesConfig =
               (args.includes("worktree") && args.includes("add") && args.includes("-b")) ||
               (args[0] === "branch" &&
