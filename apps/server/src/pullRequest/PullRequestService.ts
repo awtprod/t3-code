@@ -1612,6 +1612,89 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  /**
+   * The GitHub profile the host configured for this repository's owner, or null when it has
+   * none and the host's own credential serves it. A repository with a profile is read, written
+   * and verified as that profile alone: the host's account may not even see it. Refused, rather
+   * than skipped, while GitHub is turned off.
+   */
+  const repositoryProfile = (ref: {
+    readonly host: string;
+    readonly repository: string;
+  }): Effect.Effect<GitHubProfileAuth.GitHubProfileCredential | null, PullRequestOperationError> =>
+    Effect.gen(function* () {
+      if (ref.host !== "github.com") return null;
+      const profile = yield* GitHubProfileAuth.forRepository({
+        host: ref.host,
+        repository: ref.repository,
+      }).pipe(
+        Effect.provideService(GitHubProfileAuth.GitHubProfileAuth, githubProfiles),
+        Effect.mapError(
+          (cause) =>
+            new PullRequestOperationError({
+              operation: "readCredential",
+              detail: "The configured GitHub profile for this repository is unavailable.",
+              cause,
+            }),
+        ),
+      );
+      if (profile === null) return null;
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError(
+          (cause) =>
+            new PullRequestOperationError({
+              operation: "readCredential",
+              detail: "GitHub host settings could not be read.",
+              cause,
+            }),
+        ),
+      );
+      if (
+        readSourceControlHostSettings(GitHubClient.settings, settings.sourceControlHosts.github)
+          .hosts[ref.host]?.enabled === false
+      ) {
+        return yield* new PullRequestOperationError({
+          operation: "readCredential",
+          detail: "GitHub is turned off in Settings → Source Control.",
+        });
+      }
+      return profile;
+    });
+
+  /** Every GitHub request `effect` makes goes out with the profile's token, and only to `host`. */
+  const asProfile =
+    (host: string, profile: GitHubProfileAuth.GitHubProfileCredential) =>
+    <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(
+        Effect.provideService(GitHubApi.PinnedGitHubCredential, {
+          host,
+          token: profile.token,
+          credentialFingerprint: profile.fingerprint,
+        }),
+        Effect.provideService(SourceControlRateLimit.CredentialScope, profile.fingerprint),
+        // The profile's name, never its token, so a trace says which account a request used.
+        Effect.withSpan("PullRequestService.asProfile", {
+          attributes: { "github.profile": profile.account },
+        }),
+      );
+
+  /**
+   * Runs a write, or a read that is never cached, as the repository's profile. A verified route
+   * has already pinned its account, which for such a repository is that profile (see
+   * `withRoutingCredential`), so it is left as it is.
+   */
+  const asRepositoryAccount =
+    <I extends PullRequestRef, A, E>(operation: (input: I) => Effect.Effect<A, E>) =>
+    (input: I): Effect.Effect<A, E | PullRequestError> =>
+      Effect.gen(function* () {
+        if ((yield* routingCredential) !== null) return yield* operation(input);
+        const ref = yield* canonicalRef(input);
+        const profile = yield* repositoryProfile(ref);
+        return yield* profile === null
+          ? operation(input)
+          : operation(input).pipe(asProfile(ref.host, profile));
+      });
+
   const routingIdentity: PullRequestService["Service"]["routingIdentity"] = Effect.fn(
     "PullRequestService.routingIdentity",
   )(function* (input) {
@@ -1653,15 +1736,19 @@ export const make = Effect.gen(function* () {
       ) {
         return yield* rejected();
       }
-      const result = yield* api
-        .withVerifiedCredential(
-          { cwd: project.project.workspaceRoot, host: project.host },
-          (identity) =>
-            identity.accountId === input.expectedAccountId
-              ? operation.pipe(Effect.provideService(routingCredential, identity), Effect.result)
-              : Effect.fail(rejected()),
-        )
-        .pipe(Effect.catchTags({ PullRequestProviderError: () => Effect.fail(rejected()) }));
+      // `routing` named the profile's account for a repository with one, so that is the
+      // credential checked here and the one the operation then runs under.
+      const profile = yield* repositoryProfile(project).pipe(Effect.mapError(rejected));
+      const verified = api.withVerifiedCredential(
+        { cwd: project.project.workspaceRoot, host: project.host },
+        (identity) =>
+          identity.accountId === input.expectedAccountId
+            ? operation.pipe(Effect.provideService(routingCredential, identity), Effect.result)
+            : Effect.fail(rejected()),
+      );
+      const result = yield* (
+        profile === null ? verified : verified.pipe(asProfile(project.host, profile))
+      ).pipe(Effect.catchTags({ PullRequestProviderError: () => Effect.fail(rejected()) }));
       return yield* Effect.fromResult(result);
     });
 
@@ -1671,12 +1758,16 @@ export const make = Effect.gen(function* () {
     if (api?.getRoutingIdentity === undefined) {
       return yield* new PullRequestUnavailableError({ reason: "provider-unsupported" });
     }
-    const identity = yield* api
+    const profile = yield* repositoryProfile(project);
+    const lookup = api
       .getRoutingIdentity({
         cwd: project.project.workspaceRoot,
         host: project.host,
       })
       .pipe(Effect.mapError(toPullRequestError("routeIdentity")));
+    const identity = yield* profile === null
+      ? lookup
+      : lookup.pipe(asProfile(project.host, profile));
     if (!identity.viewer.trim() || !identity.accountId.trim()) {
       return yield* new PullRequestOperationError({
         operation: "routeIdentity",
@@ -3574,54 +3665,13 @@ export const make = Effect.gen(function* () {
         const credential = yield* routingCredential;
         // Interactive routes already pin their verified account. Background watches have no
         // such context: select the repository's host-configured profile before any cache read.
-        if (credential === null && ref.host === "github.com") {
-          const profile = yield* GitHubProfileAuth.forRepository({
-            host: ref.host,
-            repository: ref.repository,
-          }).pipe(
-            Effect.provideService(GitHubProfileAuth.GitHubProfileAuth, githubProfiles),
-            Effect.mapError(
-              (cause) =>
-                new PullRequestOperationError({
-                  operation: "readCredential",
-                  detail: "The configured GitHub profile for this repository is unavailable.",
-                  cause,
-                }),
-            ),
-          );
+        if (credential === null) {
+          const profile = yield* repositoryProfile(ref);
           if (profile !== null) {
-            const settings = yield* serverSettings.getSettings.pipe(
-              Effect.mapError(
-                (cause) =>
-                  new PullRequestOperationError({
-                    operation: "readCredential",
-                    detail: "GitHub host settings could not be read.",
-                    cause,
-                  }),
-              ),
-            );
-            if (
-              readSourceControlHostSettings(
-                GitHubClient.settings,
-                settings.sourceControlHosts.github,
-              ).hosts[ref.host]?.enabled === false
-            ) {
-              return yield* new PullRequestOperationError({
-                operation: "readCredential",
-                detail: "GitHub is turned off in Settings → Source Control.",
-              });
-            }
             return yield* read(
               { ...ref, [credentialNamespace]: profile.fingerprint },
               ...args,
-            ).pipe(
-              Effect.provideService(GitHubApi.PinnedGitHubCredential, {
-                host: ref.host,
-                token: profile.token,
-                credentialFingerprint: profile.fingerprint,
-              }),
-              Effect.provideService(SourceControlRateLimit.CredentialScope, profile.fingerprint),
-            );
+            ).pipe(asProfile(ref.host, profile));
           }
         }
         return yield* read(
@@ -3661,24 +3711,24 @@ export const make = Effect.gen(function* () {
     ),
     activity: credentialCached(activity),
     preview: credentialCached(preview),
-    threadComments,
+    threadComments: asRepositoryAccount(threadComments),
     diff: credentialCached(diff),
-    diffFileContents,
+    diffFileContents: asRepositoryAccount(diffFileContents),
     filesViewed: credentialCached(filesViewed),
     setFilesViewed,
-    runAction: runActionAndInvalidate,
-    update: invalidatedByMutation(update),
-    comment: invalidatedByMutation(comment),
-    updateComment: invalidatedByMutation(updateComment),
-    submitReview: invalidatedByMutation(submitReview),
-    replyToThread: invalidatedByMutation(replyToThread),
-    setThreadResolution: invalidatedByMutation(setThreadResolution),
-    setReaction: invalidatedByMutation(setReaction),
+    runAction: asRepositoryAccount(runActionAndInvalidate),
+    update: asRepositoryAccount(invalidatedByMutation(update)),
+    comment: asRepositoryAccount(invalidatedByMutation(comment)),
+    updateComment: asRepositoryAccount(invalidatedByMutation(updateComment)),
+    submitReview: asRepositoryAccount(invalidatedByMutation(submitReview)),
+    replyToThread: asRepositoryAccount(invalidatedByMutation(replyToThread)),
+    setThreadResolution: asRepositoryAccount(invalidatedByMutation(setThreadResolution)),
+    setReaction: asRepositoryAccount(invalidatedByMutation(setReaction)),
     // The candidate list is deliberately read fresh per menu-open, so it stays uncached.
-    reviewerCandidates,
-    requestReviewers: invalidatedByMutation(requestReviewers),
-    labelCandidates,
-    setLabels: invalidatedByMutation(setLabels),
+    reviewerCandidates: asRepositoryAccount(reviewerCandidates),
+    requestReviewers: asRepositoryAccount(invalidatedByMutation(requestReviewers)),
+    labelCandidates: asRepositoryAccount(labelCandidates),
+    setLabels: asRepositoryAccount(invalidatedByMutation(setLabels)),
     invalidate,
   });
 });
