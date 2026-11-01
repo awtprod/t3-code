@@ -82,7 +82,7 @@ const MODE_ARGS = {
 const BUILT_DEV_ARGS = [
   "run",
   "--filter=@t3tools/web",
-  "--filter=t3",
+  "--filter=@awtprod/command-center",
   "--parallel",
   "dev:built",
 ] as const;
