@@ -4,7 +4,8 @@ const PAIRING_TOKEN_PARAM = "token";
 const HOSTED_PAIRING_HOST_PARAM = "host";
 const HOSTED_PAIRING_LABEL_PARAM = "label";
 const PAIRING_APP_LINK_PARAM = "pairingUrl";
-const APP_LINK_PROTOCOL = /^t3code(?:-[a-z]+)?:$/;
+// Mobile scans `t3code*` links; the Command Center desktop registers `commandcenter[-dev]`.
+const APP_LINK_PROTOCOL = /^(?:t3code(?:-[a-z]+)?|commandcenter(?:-dev)?):$/;
 const SUPPORTED_REMOTE_BACKEND_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
 
 export const readHashParams = (url: URL): URLSearchParams =>
