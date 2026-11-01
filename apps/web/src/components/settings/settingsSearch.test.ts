@@ -14,6 +14,7 @@ import {
   isSettingsSearchScopeAvailable,
   movedSettingsPath,
   searchSettings,
+  SETTINGS_NAV_GROUPS,
   SETTINGS_SEARCH_ITEMS,
   sourceControlHostSearchItems,
   sourceControlHostSettingsSearchId,
@@ -174,6 +175,13 @@ describe("searchSettings", () => {
   it("keeps catalog result ids unique", () => {
     const ids = SETTINGS_SEARCH_ITEMS.map((item) => item.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe("settings navigation", () => {
+  it("lists the Databases page in the Connections group", () => {
+    const group = SETTINGS_NAV_GROUPS.find(({ paths }) => paths.includes("/settings/databases"));
+    expect(group?.heading).toBe("Connections");
   });
 });
 
