@@ -23,7 +23,9 @@ permissions:
 jobs:
   cleanup_pr:
     name: Tear down relay preview
+    # Repository-level opt-in (as in deploy-relay.yml): forks never provision previews.
     if: >-
+      vars.ENABLE_RELAY_DEPLOY == 'true' &&
       github.ref == 'refs/heads/main' &&
       github.event_name == 'pull_request_target' &&
       (
@@ -100,7 +102,7 @@ jobs:
 
   list_closed_previews:
     name: List closed relay previews
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request_target'
+    if: vars.ENABLE_RELAY_DEPLOY == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request_target'
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:

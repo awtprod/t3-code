@@ -19,7 +19,9 @@ concurrency:
 jobs:
   deploy_preview:
     name: Deploy relay preview
+    # Repository-level opt-in (as in deploy-relay.yml): forks never provision previews.
     if: >-
+      vars.ENABLE_RELAY_DEPLOY == 'true' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(github.event.pull_request.labels.*.name, 'relay:preview')
     runs-on: blacksmith-8vcpu-ubuntu-2404
