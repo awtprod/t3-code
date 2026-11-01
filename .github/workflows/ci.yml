@@ -20,7 +20,9 @@ jobs:
   public_safety:
     name: Public repository safety
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The boundary scan reads every revision in the PR; upstream sync PRs carry
+    # dozens of large revisions and need well over ten minutes.
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
@@ -343,7 +345,9 @@ jobs:
           github.head_ref == vars.MACOS_CI_BRANCH &&
           vars.MACOS_CI_RUNNER_LABEL != '' &&
           vars.MACOS_CI_RUNNER_LABEL || 'macos-26' }}
-    timeout-minutes: 10
+    # A cold dependency cache (any lockfile change) adds minutes to install and
+    # to the post-job cache save.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
