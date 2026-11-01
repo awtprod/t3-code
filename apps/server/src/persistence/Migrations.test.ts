@@ -203,6 +203,37 @@ describe("stacked Instagram migration manifest", () => {
   });
 });
 
+describe("released migration ids", () => {
+  it("pins the id and name of every migration from orchestration V2 on", () => {
+    // 95-103 shipped under these ids and 104-113 are upstream 063-072 renumbered to follow them.
+    // Live databases record id + name, so renaming or reordering any of these breaks upgrades.
+    assert.deepStrictEqual(
+      migrationManifest.filter(([id]) => id >= 95),
+      [
+        [95, "OrchestrationV2"],
+        [96, "RemoveRedundantProjectionIndexes"],
+        [97, "ScheduledTaskWebhooks"],
+        [98, "WebhookRelayDeliveries"],
+        [99, "McpAppModelContext"],
+        [100, "ThreadSnapshotWindowIndexes"],
+        [101, "PullRequestReviewGuides"],
+        [102, "ThreadFailureLookupIndex"],
+        [103, "EfficiencyRoutingSideChannel"],
+        [104, "DropUnusedV1Projections"],
+        [105, "CanonicalizeThreadPullRequestLinks"],
+        [106, "CodexUsageNativeTurnIndex"],
+        [107, "RepairClientSettlementTimestamps"],
+        [108, "WebhookDedupe"],
+        [109, "ShellStopRequestIndex"],
+        [110, "ThreadMessageSearch"],
+        [111, "PeerLinks"],
+        [112, "PeerLinkFence"],
+        [113, "WaitingLinkRequestIndex"],
+      ],
+    );
+  });
+});
+
 const v2Migrations = migrationManifest.filter(([id]) => id >= 95);
 const newerMigrationId = Math.max(...migrationManifest.map(([id]) => id)) + 1;
 
