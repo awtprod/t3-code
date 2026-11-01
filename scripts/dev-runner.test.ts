@@ -17,13 +17,14 @@ import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
-import { ChildProcessSpawner } from "effect/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
   checkPortAvailabilityOnHosts,
   createDevRunnerEnv,
   findFirstAvailableOffset,
   resolveModePortOffsets,
+  resolveOffset,
   runDevRunnerWithInput,
 } from "./dev-runner.ts";
 
@@ -98,7 +99,32 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
     }),
   );
 
-  describe("getDevRunnerModeArgs", () => {
+  describe("dev mode Vite+ arguments", () => {
+    const spawnedVpArgs = (mode: "dev" | "dev:desktop") =>
+      Effect.gen(function* () {
+        let vpArgs: ReadonlyArray<string> = [];
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make((command) => {
+            if (ChildProcess.isStandardCommand(command) && command.command === "vp") {
+              vpArgs = command.args;
+            }
+            return Effect.succeed(mockProcess(0));
+          }),
+        );
+        yield* runDevRunnerWithInput({
+          ...devServerInput,
+          mode,
+          port: undefined,
+          runArgs: [],
+        }).pipe(
+          Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Environment, {}),
+        );
+        return vpArgs;
+      });
+
     it.effect("keeps the server stable by default and makes watch mode explicit", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -110,13 +136,16 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         const serverPackage = yield* decodeServerPackageJson(raw);
 
         assert.equal(serverPackage.scripts?.dev, "node src/bin.ts");
-        assert.equal(serverPackage.scripts?.["dev:watch"], "node --watch src/bin.ts");
+        assert.equal(
+          serverPackage.scripts?.["dev:watch"],
+          "node --watch --watch-path=src --watch-path=../../packages --watch-path=package.json src/bin.ts",
+        );
       }),
     );
 
     it.effect("lets Vite+ honor the desktop dev task graph", () =>
-      Effect.sync(() => {
-        assert.deepStrictEqual(getDevRunnerModeArgs("dev:desktop"), [
+      Effect.gen(function* () {
+        assert.deepStrictEqual(yield* spawnedVpArgs("dev:desktop"), [
           "run",
           "--filter=@t3tools/desktop",
           "--filter=@t3tools/web",
@@ -126,8 +155,8 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
     );
 
     it.effect("places Vite+ run flags before the task name", () =>
-      Effect.sync(() => {
-        assert.deepStrictEqual(getDevRunnerModeArgs("dev"), [
+      Effect.gen(function* () {
+        assert.deepStrictEqual(yield* spawnedVpArgs("dev"), [
           "run",
           "--filter=@t3tools/contracts",
           "--filter=@t3tools/web",
@@ -907,7 +936,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
             );
             assert.deepStrictEqual(spawned.at(-1), [
               "run",
-              "--filter=t3",
+              "--filter=@awtprod/command-center",
               "dev",
               ...devServerInput.runArgs,
             ]);

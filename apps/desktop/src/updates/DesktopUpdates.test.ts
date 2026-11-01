@@ -553,7 +553,7 @@ describe("DesktopUpdates", () => {
         const result = yield* updates.install;
         assert.equal(result.state.errorContext, "install");
         assert.deepEqual(harness.installSteps, ["quitAndInstall"]);
-        assert.isFalse((yield* (yield* pool.primary).snapshot).desiredRunning);
+        assert.isFalse((yield* Option.getOrThrow(yield* pool.primary).snapshot).desiredRunning);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });

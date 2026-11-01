@@ -7,6 +7,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import serverPackageJson from "../../apps/server/package.json" with { type: "json" };
+
 import { findEsmImportsOfExternalPackages } from "./cli-executable-imports.ts";
 
 import {
@@ -82,14 +84,9 @@ describe("selectCliRuntimeExternalDependencies", () => {
   });
 });
 
-// An external package is loaded from the real filesystem, so its own `require`
-// also resolves from the real filesystem. If one of its dependencies was
-// bundled away instead of left external, that dependency does not follow the
-// selected root into the sidecar.
-//
-// Found the hard way: msgpackr-extract's node-gyp-build-optional-packages
-// required detect-libc, which was bundled. Windows was fine; WSL got
-// MODULE_NOT_FOUND.
+// An external package's own `require` resolves from the real filesystem, so a dependency bundled
+// away instead of left external is missing from the sidecar (detect-libc under msgpackr-extract
+// was fine on Windows and MODULE_NOT_FOUND on WSL).
 it.layer(NodeServices.layer)("external package dependency closure", (it) => {
   // Read the pnpm store directly: isolation hides transitive names and exports maps can block package.json.
   const readInstalledPackages = Effect.gen(function* () {

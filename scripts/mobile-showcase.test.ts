@@ -2,12 +2,42 @@
 import { assert, it } from "@effect/vitest";
 import { PNG } from "pngjs";
 
+import { MOBILE_DEFAULT_THEME_ID } from "@t3tools/shared/themePalettes";
+
+import showcaseConfig, { type ShowcaseStoreAssetSpec } from "./mobile-showcase.config.ts";
+import {
+  SHOWCASE_ENVIRONMENTS,
+  SHOWCASE_PROJECTS,
+  SHOWCASE_THREADS,
+} from "./mobile-showcase-environment.ts";
 import {
   encodeAndroidPairingUrls,
   normalizeStorePng,
   parsePairingCredentialOutput,
   readPngMetadata,
+  selectLanIpv4Address,
+  validateStoreAsset,
+  validateStoreAssetCount,
 } from "./mobile-showcase.ts";
+
+const appleSpec: ShowcaseStoreAssetSpec = {
+  store: "apple",
+  directory: "apple/iphone-test",
+  width: 1284,
+  height: 2778,
+  minimumUploadCount: 1,
+  maximumUploadCount: 10,
+};
+
+const googleSpec: ShowcaseStoreAssetSpec = {
+  store: "google-play",
+  directory: "google-play/phone",
+  width: 1080,
+  height: 1920,
+  minimumUploadCount: 2,
+  maximumUploadCount: 8,
+  maximumFileSizeBytes: 8 * 1024 * 1024,
+};
 
 function rgbaPng(width: number, height: number): Buffer {
   const png = new PNG({ width, height });
@@ -46,9 +76,9 @@ it("enforces store screenshot count limits", () => {
 });
 
 it("defaults every device to the app's own palette", () => {
-  assert.equal(DEFAULT_SHOWCASE_THEME, "t3-code");
+  assert.equal(MOBILE_DEFAULT_THEME_ID, "t3-code");
   assert.equal(
-    showcaseConfig.devices.every((device) => device.theme === DEFAULT_SHOWCASE_THEME),
+    showcaseConfig.devices.every((device) => device.theme === MOBILE_DEFAULT_THEME_ID),
     true,
   );
 });
@@ -65,6 +95,8 @@ it("configures every default device with an exact upload-ready store target", ()
     [
       ["iphone-6.9", "portrait", "apple/iphone-6.9", 1320, 2868],
       ["iphone-6.5", "portrait", "apple/iphone-6.5", 1284, 2778],
+      ["iphone-duo-closed", "portrait", "apple/iphone-duo-closed", 1398, 2034],
+      ["iphone-duo-open", "landscape", "apple/iphone-duo-open", 2853, 2007],
       ["ipad-13", "landscape", "apple/ipad-13", 2752, 2064],
       ["pixel", null, "google-play/phone", 1080, 1920],
       ["android-tablet-7", null, "google-play/tablet-7", 1080, 1920],

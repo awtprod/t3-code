@@ -51,11 +51,8 @@ const decodeRuntimeConnectionCatalogDocumentJson = Schema.decodeEffect(
 );
 
 /**
- * Hides bearer connections that a newer pairing for the same environment and
- * URL superseded but older builds never removed. This only changes what is
- * returned: the file is not rewritten here, so a concurrent renderer save can
- * never be lost. The renderer persists the pruned catalog with its next write.
- * Anything that does not decode, or has nothing to prune, is returned as is.
+ * Hides bearer connections a newer pairing for the same environment and URL superseded. Read-only,
+ * so a concurrent renderer save is never lost; the renderer persists the pruned catalog next write.
  */
 const withoutSupersededBearerConnections = Effect.fn(
   "desktop.connectionCatalogStore.withoutSupersededBearerConnections",
@@ -210,6 +207,7 @@ export class DesktopConnectionCatalogStore extends Context.Service<
       boolean,
       DesktopConnectionCatalogStoreWriteError | DesktopConnectionCatalogStoreProtectionError
     >;
+    readonly clear: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/app/DesktopConnectionCatalogStore") {}
 
@@ -570,6 +568,15 @@ export const make = Effect.gen(function* () {
       yield* writeCatalog(catalog);
       return true;
     }),
+    clear: fileSystem.remove(catalogPath, { force: true }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("Could not clear the desktop connection catalog.", {
+          catalogPath,
+          error,
+        }),
+      ),
+      Effect.withSpan("desktop.connectionCatalogStore.clear"),
+    ),
   });
 });
 

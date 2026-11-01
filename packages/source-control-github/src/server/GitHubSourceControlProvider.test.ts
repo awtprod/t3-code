@@ -525,30 +525,22 @@ describe("GitHubSourceControlProvider writes", () => {
     }),
   );
 
-  it.effect("checks whether an existing repository is empty before resuming publication", () =>
-    Effect.gen(function* () {
-      const requests: Array<{
-        operation: string;
-        variables: Readonly<Record<string, unknown>> | undefined;
-      }> = [];
-      const gh = yield* makeProvider({
-        graphql: (input) =>
-          Effect.sync(() => {
-            requests.push({ operation: input.operation, variables: input.variables });
-            return encodeJson({ data: { repository: { isEmpty: true } } });
-          }),
-      });
+  it.effect("checks whether an existing repository is empty before resuming publication", () => {
+    const { layer, graphqlCalls } = harness({
+      remotes: "",
+      graphql: () => ({ isEmpty: true }),
+    });
+    return Effect.gen(function* () {
+      const gh = yield* GitHubSourceControlProvider.make;
       assert.isTrue(
         yield* gh.getRepositoryIsEmpty!({ cwd: "/repo", repository: "exampleowner/sample" }),
       );
-      assert.deepStrictEqual(requests, [
-        {
-          operation: "getRepositoryIsEmpty",
-          variables: { owner: "exampleowner", name: "sample" },
-        },
-      ]);
-    }),
-  );
+      assert.deepStrictEqual(
+        graphqlCalls.map((call) => [call.operationName, call.lookups]),
+        [["RepositoryEmpty", [{ owner: "exampleowner", name: "sample" }]]],
+      );
+    }).pipe(Effect.provide(layer));
+  });
 });
 
 describe("GitHubSourceControlProvider.checkoutChangeRequest", () => {

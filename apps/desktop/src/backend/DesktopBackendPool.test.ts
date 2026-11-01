@@ -1,4 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -19,7 +20,29 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
-import type { DesktopBackendStartConfig } from "./DesktopBackendManager.ts";
+import type { DesktopBackendSnapshot, DesktopBackendStartConfig } from "./DesktopBackendManager.ts";
+
+function makeStubInstance(
+  id: DesktopBackendPool.BackendInstanceId,
+  label: string,
+): DesktopBackendPool.DesktopBackendInstance {
+  const snapshot: DesktopBackendSnapshot = {
+    desiredRunning: false,
+    ready: false,
+    activePid: Option.none(),
+    restartAttempt: 0,
+    restartScheduled: false,
+  };
+  return {
+    id,
+    label: Effect.succeed(label),
+    start: Effect.void,
+    stop: () => Effect.void,
+    currentConfig: Effect.succeed(Option.none<DesktopBackendStartConfig>()),
+    snapshot: Effect.succeed(snapshot),
+    waitForReady: (_timeout: Duration.Duration) => Effect.succeed(false),
+  };
+}
 
 function layerPool(
   labelRef: Ref.Ref<string>,
@@ -127,7 +150,7 @@ describe("DesktopBackendPool", () => {
     }).pipe(Effect.provide(DesktopBackendPool.layerTest([]))),
   );
 
-  it.effect("resolves the primary label lazily after pool layer construction", () =>
+  it.effect("unregister stops the registered instance", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const id = DesktopBackendPool.BackendInstanceId("wsl:Ubuntu");
@@ -162,6 +185,25 @@ describe("DesktopBackendPool", () => {
         assert.equal((yield* instance.snapshot).restartScheduled, true);
 
         yield* pool.unregister(id);
+
+        const stopped = yield* instance.snapshot;
+        assert.equal(stopped.desiredRunning, false);
+        assert.equal(stopped.restartScheduled, false);
+        assert.equal(Option.isNone(yield* pool.get(id)), true);
+      }).pipe(Effect.provide(layerPool(Ref.makeUnsafe("Windows")))),
+    ),
+  );
+
+  it.effect("resolves the primary label lazily after pool layer construction", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const labelRef = yield* Ref.make("Windows");
+        const pool = yield* DesktopBackendPool.DesktopBackendPool.pipe(
+          Effect.provide(layerPool(labelRef)),
+        );
+        const primary = yield* pool.primary;
+
+        yield* Ref.set(labelRef, "WSL (Ubuntu)");
 
         assert.equal(yield* Option.getOrThrow(primary).label, "WSL (Ubuntu)");
       }),

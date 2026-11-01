@@ -160,18 +160,16 @@ describe("gitHubViewerPermissions", () => {
     // One armed before the switch can still be taken back.
     expect(actions).toContain("disable-auto-merge");
 
-    // Allowed, or not reported, it is offered as before.
-    for (const autoMergeAllowed of [true, undefined]) {
-      expect(
-        gitHubViewerPermissions({
-          canWrite: true,
-          canTriage: true,
-          canUpdate: true,
-          didAuthor: false,
-          ...(autoMergeAllowed === undefined ? {} : { autoMergeAllowed }),
-        }).actions,
-      ).toContain("enable-auto-merge");
-    }
+    // Allowed, it is offered as before.
+    expect(
+      gitHubViewerPermissions({
+        canWrite: true,
+        canTriage: true,
+        canUpdate: true,
+        didAuthor: false,
+        autoMergeAllowed: true,
+      }).actions,
+    ).toContain("enable-auto-merge");
   });
 
   it("leaves a passer-by on a repository they can only read nothing but the review", () => {

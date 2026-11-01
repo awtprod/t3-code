@@ -31,33 +31,34 @@ export class ElectronNotifications extends Context.Service<
 const liveNotifications = new Set<Electron.Notification>();
 
 const make = ElectronNotifications.of({
-  show: (input) =>
-    Effect.sync(() => {
-      if (!Electron.Notification.isSupported()) {
-        return;
-      }
+  show: Effect.fn("ElectronNotifications.show")(
+    (input) =>
+      Effect.sync(() => {
+        if (!Electron.Notification.isSupported()) {
+          return;
+        }
 
-      const notification = new Electron.Notification({
-        title: input.title,
-        body: input.body,
-        silent: input.silent,
-      });
-      liveNotifications.add(notification);
+        const notification = new Electron.Notification({
+          title: input.title,
+          body: input.body,
+          silent: input.silent,
+        });
+        liveNotifications.add(notification);
 
-      notification.on("click", () => {
-        liveNotifications.delete(notification);
-        input.onActivate();
-      });
-      notification.on("close", () => {
-        liveNotifications.delete(notification);
-      });
+        notification.on("click", () => {
+          liveNotifications.delete(notification);
+          input.onActivate();
+        });
+        notification.on("close", () => {
+          liveNotifications.delete(notification);
+        });
 
-      notification.show();
-    }).pipe(
-      Effect.catchCause((cause) =>
-        logNotificationWarning("Failed to show a native notification.", { cause }),
-      ),
+        notification.show();
+      }),
+    Effect.catchCause((cause) =>
+      logNotificationWarning("Failed to show a native notification.", { cause }),
     ),
+  ),
 });
 
 export const layer = Layer.succeed(ElectronNotifications, make);

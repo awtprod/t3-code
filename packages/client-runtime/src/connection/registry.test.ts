@@ -1803,7 +1803,7 @@ describe("EnvironmentRegistry", () => {
         [BEARER_PROFILE],
         [[BEARER_TARGET.connectionId, BEARER_CREDENTIAL]],
       );
-      const permissions = yield* makeGitHubRoutingPermissions({
+      const permissions = yield* makePullRequestRoutingPermissions({
         read: Effect.succeed([]),
         write: () => Effect.void,
       });
@@ -1825,7 +1825,7 @@ describe("EnvironmentRegistry", () => {
         expect(yield* permissions.get(primaryEntry)).toBe("read-write");
       }).pipe(
         Effect.provide(harness.layer),
-        Effect.provideService(GitHubRoutingPermissions, permissions),
+        Effect.provideService(PullRequestRoutingPermissions, permissions),
         Effect.scoped,
       );
 
@@ -1846,7 +1846,7 @@ describe("EnvironmentRegistry", () => {
         expect(yield* permissions.get(primaryEntry)).toBe("read-write");
       }).pipe(
         Effect.provide(harness.layer),
-        Effect.provideService(GitHubRoutingPermissions, permissions),
+        Effect.provideService(PullRequestRoutingPermissions, permissions),
         Effect.scoped,
       );
     }),

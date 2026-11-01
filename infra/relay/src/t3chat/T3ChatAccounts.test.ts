@@ -25,6 +25,11 @@ const relaySettings = (
 ): RelayConfiguration.RelayConfiguration["Service"] => ({
   relayIssuer: "https://relay.example.test",
   apns: null,
+  webPush: {
+    privateKey: Redacted.make("web-push-private-key"),
+    publicKey: "web-push-public-key",
+    subject: "https://relay.example.test",
+  },
   clerkSecretKey: Redacted.make("clerk-secret-key"),
   clerkPublishableKey: "pk_test_test",
   clerkJwtAudience: "t3-code-relay",
