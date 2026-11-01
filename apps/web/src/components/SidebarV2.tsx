@@ -270,7 +270,6 @@ function terminalProcessLabel(count: number): string {
 function SidebarV2ThreadTooltip({
   thread,
   projectTitle,
-  projectCwd,
   projectFavicon,
   environmentLabel,
   driverKind,
@@ -1770,7 +1769,6 @@ export default function SidebarV2() {
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
   const { pinnedThreads, activeThreads, snoozedThreads, settledThreads, snoozeNow } =
     useMemo(() => {
-      const now = `${nowMinute}:00.000Z`;
       // Snooze classification uses a REAL clock, not the quantized minute:
       // wake times are second-precise and a woken thread must not linger on
       // the shelf for the rest of the minute. snoozeWakeTick re-runs this
@@ -1797,8 +1795,6 @@ export default function SidebarV2() {
           true;
         const supportsSnooze =
           serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSnooze === true;
-        const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-        const changeRequestState = changeRequestStateByKey.get(threadKey) ?? null;
         // Snooze outranks everything, including a pin: "hide until Tuesday"
         // temporarily suspends "keep on top". The pin survives underneath —
         // pinned cards are creation-ordered, so on wake the thread reappears

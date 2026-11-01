@@ -26,6 +26,7 @@ import { PreviewEmptyState } from "./PreviewEmptyState";
 
 const environmentId = EnvironmentId.make("env-1");
 const threadRef = { environmentId, threadId: ThreadId.make("thread-1") };
+const NOW = Date.parse("2026-01-04T00:00:00.000Z");
 
 function server(port: number) {
   return {
@@ -55,9 +56,11 @@ function render(recentEntries: Array<{ url: string; lastVisitedAt: number; title
 describe("PreviewEmptyState", () => {
   it("renders a history entry in both groups when its host:port matches a live server", () => {
     mocks.servers = [server(5173)];
+    // Each recent card renders its age against the clock.
+    using _now = vi.spyOn(Date, "now").mockReturnValue(NOW);
     const html = render([
-      { url: "https://myapp.test/admin#users", lastVisitedAt: Date.now(), title: "Admin" },
-      { url: "http://localhost:5173/", lastVisitedAt: Date.now(), title: "Recent Local" },
+      { url: "https://myapp.test/admin#users", lastVisitedAt: NOW, title: "Admin" },
+      { url: "http://localhost:5173/", lastVisitedAt: NOW, title: "Recent Local" },
     ]);
     expect(html).toContain("Recently used");
     expect(html).toContain("Environment servers");

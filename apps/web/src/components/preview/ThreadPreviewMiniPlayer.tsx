@@ -2,12 +2,7 @@ import { FILL_PREVIEW_VIEWPORT, type ScopedThreadRef } from "@t3tools/contracts"
 import { previewPdfAssetUrl } from "@t3tools/shared/preview";
 import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import { GripHorizontalIcon, PanelRightIcon, PictureInPicture2, XIcon } from "lucide-react";
-import {
-  type PointerEvent as ReactPointerEvent,
-  type ReactNode,
-  useRef,
-  useState,
-} from "react";
+import { type PointerEvent as ReactPointerEvent, type ReactNode, useRef } from "react";
 import { create } from "zustand";
 import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";

@@ -1,7 +1,7 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { useParams } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { resolveThreadRouteTarget } from "~/threadRoutes";
@@ -42,13 +42,11 @@ export function useActiveThreadRefFromRoute(): ScopedThreadRef | null {
     routeTarget?.kind === "draft" ? store.getDraftSession(routeTarget.draftId) : null,
   );
 
-  return useMemo(() => {
-    if (routeTarget?.kind === "server") {
-      return routeTarget.threadRef;
-    }
-    if (routeTarget?.kind === "draft" && activeDraftSession) {
-      return scopeThreadRef(activeDraftSession.environmentId, activeDraftSession.threadId);
-    }
-    return null;
-  }, [activeDraftSession, routeTarget]);
+  if (routeTarget?.kind === "server") {
+    return routeTarget.threadRef;
+  }
+  if (routeTarget?.kind === "draft" && activeDraftSession) {
+    return scopeThreadRef(activeDraftSession.environmentId, activeDraftSession.threadId);
+  }
+  return null;
 }

@@ -56,11 +56,9 @@ export function readWebPushRegistration(): WebPushRegistrationRecord | null {
   }
 }
 
-// Two delivery modes share the browser plumbing below. Relay mode (T3 Connect
-// present) registers the subscription with the cloud relay; local mode registers
-// straight with the paired Command Center server over its HTTP API. Which one
-// runs is decided purely by whether the public T3 Connect config is baked in,
-// so a production build with no relay config falls into local mode.
+// Relay mode (T3 Connect) registers with the cloud relay; local mode registers with
+// the paired Command Center server over its HTTP API. Chosen only by whether the
+// public T3 Connect config is baked in, so a build without it uses local mode.
 export function isLocalWebPushMode(): boolean {
   return !hasCloudPublicConfig();
 }
@@ -222,11 +220,6 @@ async function acquireLocalSubscription(vapidPublicKey: string): Promise<PushSub
   });
 }
 
-// ---------------------------------------------------------------------------
-// Relay mode (T3 Connect): registers the subscription with the cloud relay.
-// Behaviourally unchanged from before local mode existed.
-// ---------------------------------------------------------------------------
-
 async function registerWithRelay(
   subscription: PushSubscription,
   deviceId: string,
@@ -295,12 +288,6 @@ async function disableRelayWebPush(record: WebPushRegistrationRecord): Promise<v
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Local mode: registers straight with the paired Command Center server over
-// its authenticated HTTP API (the same primary-environment client used for
-// auth/session calls). The relay and Clerk are never touched.
-// ---------------------------------------------------------------------------
 
 // A Promise-level seam over the four server calls. The live implementation runs
 // them through the primary-environment HTTP client; tests inject a fake that
@@ -475,10 +462,6 @@ export async function sendWebPushTestNotification(): Promise<WebPushTestOutcome>
   };
 }
 
-// ---------------------------------------------------------------------------
-// Mode-dispatching public API used by the UI and startup.
-// ---------------------------------------------------------------------------
-
 export async function enableWebPushNotifications(
   events: WebPushEventPreferences = readWebPushRegistration()?.preferences ??
     defaultWebPushEventPreferences,
@@ -558,10 +541,6 @@ export function listenForWebPushSubscriptionChange(): void {
     }
   });
 }
-
-// ---------------------------------------------------------------------------
-// Local-mode view helpers (pure) — shared by the settings row and its tests.
-// ---------------------------------------------------------------------------
 
 export type LocalWebPushConfigState = "loading" | "configured" | "not-configured" | "unavailable";
 

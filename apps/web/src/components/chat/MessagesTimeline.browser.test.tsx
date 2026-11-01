@@ -1184,7 +1184,7 @@ describe("MessagesTimeline working indicator", () => {
 
   it("claims progress only while connected and receiving activity", async () => {
     setup();
-    using _timers = fakeTimers({ now: NOW, toFake: ["Date"] });
+    using _timers = fakeTimers({ now: NOW });
     await using screen = await renderWorkingRow({
       connectionPhase: "connected",
       lastActivityAt: minutesAgo(0),
@@ -1196,7 +1196,7 @@ describe("MessagesTimeline working indicator", () => {
 
   it("says it is reconnecting instead of claiming progress while the socket is down", async () => {
     setup();
-    using _timers = fakeTimers({ now: NOW, toFake: ["Date"] });
+    using _timers = fakeTimers({ now: NOW });
     await using screen = await renderWorkingRow({
       connectionPhase: "reconnecting",
       lastActivityAt: minutesAgo(0),
@@ -1209,7 +1209,7 @@ describe("MessagesTimeline working indicator", () => {
 
   it("times a silent turn from its last activity, not from the turn start", async () => {
     setup();
-    using _timers = fakeTimers({ now: NOW, toFake: ["Date"] });
+    using _timers = fakeTimers({ now: NOW });
     await using screen = await renderWorkingRow({
       connectionPhase: "connected",
       lastActivityAt: minutesAgo(10),

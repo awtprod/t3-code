@@ -2,13 +2,6 @@ import { useEffect, useRef } from "react";
 
 const MAX_TRACKED_WORKSPACE_RESOURCES = 128;
 
-export function workspaceMutationRefreshToken(
-  resourceKey: string,
-  mutationId: string | null,
-): string | null {
-  return mutationId === null ? null : `${resourceKey}\u0000${mutationId}`;
-}
-
 export function useWorkspaceMutationRefresh(input: {
   readonly enabled?: boolean;
   readonly mutationId: string | null;

@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { act, fakeTimers, render } from "../../test/render";
-import { LIVE_REFRESH_MIN_INTERVAL_MS, useLiveRefresh } from "./useLiveRefresh";
+import {
+  LIVE_REFRESH_IDLE_AFTER_MS,
+  LIVE_REFRESH_MIN_INTERVAL_MS,
+  useLiveRefresh,
+} from "./useLiveRefresh";
 
 function Probe(props: {
   readonly refresh: () => void;
@@ -16,6 +20,11 @@ function Probe(props: {
     ...(props.intervalMs !== undefined ? { intervalMs: props.intervalMs } : {}),
     ...(props.refreshOnShow !== undefined ? { refreshOnShow: props.refreshOnShow } : {}),
   });
+  return null;
+}
+
+function PollingProbe(props: { readonly refresh: (() => void) | null; readonly enabled: boolean }) {
+  useLiveRefresh(props.refresh, { intervalMs: 45_000, enabled: props.enabled });
   return null;
 }
 
@@ -62,4 +71,75 @@ describe("useLiveRefresh", () => {
     expect(periodic).toHaveBeenCalledTimes(5);
     expect(untimed).not.toHaveBeenCalled();
   });
+
+  it("polls every 45 seconds, pauses while hidden or busy, respects disabling, and cleans up", async () => {
+    const refresh = vi.fn();
+    const probe = (pending = false, enabled = true) => (
+      <PollingProbe refresh={pending ? null : refresh} enabled={enabled} />
+    );
+    // The first render reads the clock and the visibility.
+    using _timers = fakeTimers({ now: 0 });
+    using visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    // A bare hook probe; nothing here navigates.
+    await using screen = await render(probe(), { router: false });
+
+    await act(() => vi.advanceTimersByTime(44_999));
+    expect(refresh).not.toHaveBeenCalled();
+    await act(() => vi.advanceTimersByTime(1));
+    expect(refresh).toHaveBeenCalledTimes(1);
+    await act(() => vi.advanceTimersByTime(45_000));
+    expect(refresh).toHaveBeenCalledTimes(2);
+
+    visibility.mockReturnValue("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await act(() => vi.advanceTimersByTime(90_000));
+    expect(refresh).toHaveBeenCalledTimes(2);
+
+    visibility.mockReturnValue("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+    expect(refresh).toHaveBeenCalledTimes(3);
+
+    await screen.rerender(probe(true));
+    await act(() => vi.advanceTimersByTime(45_000));
+    expect(refresh).toHaveBeenCalledTimes(3);
+
+    await screen.rerender(probe());
+    await act(() => vi.advanceTimersByTime(45_000));
+    expect(refresh).toHaveBeenCalledTimes(4);
+
+    await screen.rerender(probe(false, false));
+    await act(() => vi.advanceTimersByTime(90_000));
+    window.dispatchEvent(new Event("focus"));
+    expect(refresh).toHaveBeenCalledTimes(4);
+
+    await screen.unmount();
+    await act(() => vi.advanceTimersByTime(45_000));
+    expect(refresh).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(["focus", "visibilitychange"])(
+    "keeps an idle view paused after %s until input",
+    async (event) => {
+      const refresh = vi.fn();
+      // The first render reads the clock and the visibility.
+      using _timers = fakeTimers({ now: 1_000_000 });
+      using _visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await using _screen = await render(<PollingProbe refresh={refresh} enabled />, {
+        // A bare hook probe; nothing here navigates.
+        router: false,
+      });
+
+      await act(() => vi.advanceTimersByTime(LIVE_REFRESH_IDLE_AFTER_MS));
+      refresh.mockClear();
+      await act(() => (event === "focus" ? window : document).dispatchEvent(new Event(event)));
+      expect(refresh).not.toHaveBeenCalled();
+      await act(() => vi.advanceTimersByTime(90_000));
+      expect(refresh).not.toHaveBeenCalled();
+      await act(() => document.dispatchEvent(new PointerEvent("pointerdown")));
+      expect(refresh).toHaveBeenCalledTimes(1);
+      await act(() => vi.advanceTimersByTime(45_000));
+      expect(refresh).toHaveBeenCalledTimes(2);
+    },
+  );
 });

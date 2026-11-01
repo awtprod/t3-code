@@ -199,7 +199,6 @@ import {
   findNewTaskDraftKeys,
   flushComposerDrafts,
   getComposerDraftSnapshot,
-  mergeComposerDraftContent,
   mergeComposerDraftContentState,
   migrateLegacyNewTaskDraft,
   modelOptionMemoryAtom,

@@ -3440,7 +3440,9 @@ export default function ChatView(props: ChatViewProps) {
                 citationHistory={citationHistory}
                 onCiteAssistantText={citeAssistantTextStable}
                 {...(activeProject ? { onRunShellCommand: runShellCommandStable } : {})}
-                connectionPhase={activeEnvironment === null ? null : activeEnvironment.connection.phase}
+                connectionPhase={
+                  activeEnvironment === null ? null : activeEnvironment.connection.phase
+                }
                 lastActivityAt={isWorking ? activeThread.updatedAt : null}
                 isWorking={isWorking}
                 runlessWorkActive={runlessWorkStartedAt !== null}

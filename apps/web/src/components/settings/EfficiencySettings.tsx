@@ -1,7 +1,7 @@
 "use client";
 
 import { GaugeIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { EfficiencySettings, type EfficiencyTier } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
@@ -48,34 +48,38 @@ const parseNumericInput = (raw: string): number | undefined => {
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 
+const decodeEfficiencySettings = Schema.decodeUnknownSync(EfficiencySettings);
+
 export function EfficiencySettingsPanel() {
   const efficiency = usePrimarySettings((settings) => settings.efficiency);
   const updateSettings = useUpdatePrimarySettings();
   const environment = usePrimaryEnvironment();
-  const [json, setJson] = useState(() => JSON.stringify(efficiency, null, 2));
-  useEffect(() => setJson(JSON.stringify(efficiency, null, 2)), [efficiency]);
+  // The JSON draft reseeds whenever the saved settings change; `seen` is the value it was edited from.
+  const [jsonDraft, setJsonDraft] = useState(() => ({
+    seen: efficiency,
+    text: JSON.stringify(efficiency, null, 2),
+  }));
+  const json = jsonDraft.seen === efficiency ? jsonDraft.text : JSON.stringify(efficiency, null, 2);
+  const setJson = (text: string) => setJsonDraft({ seen: efficiency, text });
   const previewCandidate =
     efficiency.candidates.find(
       (candidate) => candidate.enabled && candidate.tier === efficiency.defaultTier,
     ) ?? efficiency.candidates.find((candidate) => candidate.enabled);
-  const previewInput = useMemo(
-    () =>
-      previewCandidate === undefined
-        ? null
-        : {
-            modelSelection: {
-              instanceId: previewCandidate.instanceId,
-              model: previewCandidate.model,
-              ...(previewCandidate.options === undefined
-                ? {}
-                : { options: previewCandidate.options }),
-            },
-            tier: efficiency.defaultTier,
-            interactionMode: "default" as const,
-            attachmentCount: 0,
+  const previewInput =
+    previewCandidate === undefined
+      ? null
+      : {
+          modelSelection: {
+            instanceId: previewCandidate.instanceId,
+            model: previewCandidate.model,
+            ...(previewCandidate.options === undefined
+              ? {}
+              : { options: previewCandidate.options }),
           },
-    [efficiency.defaultTier, previewCandidate],
-  );
+          tier: efficiency.defaultTier,
+          interactionMode: "default" as const,
+          attachmentCount: 0,
+        };
   const preview = useEnvironmentQuery(
     environment && previewInput
       ? efficiencyPreviewEnvironment({
@@ -111,7 +115,7 @@ export function EfficiencySettingsPanel() {
 
   const importJson = async () => {
     try {
-      const parsed = Schema.decodeUnknownSync(EfficiencySettings)(JSON.parse(json));
+      const parsed = decodeEfficiencySettings(JSON.parse(json));
       if (await persist(parsed)) {
         setJson(JSON.stringify(parsed, null, 2));
         toastManager.add({ title: "Efficiency settings imported", type: "success" });
@@ -349,7 +353,7 @@ export function EfficiencySettingsPanel() {
         />
         <SettingsRow
           title="API key env var"
-          description="The NAME of the environment variable holding the API key — never the key itself."
+          description="The NAME of the environment variable holding the API key, never the key itself."
           control={
             <Input
               className="w-56"
@@ -408,7 +412,7 @@ export function EfficiencySettingsPanel() {
         />
         <SettingsRow
           title="Continuation threshold"
-          description="When the judge rates a message at least this likely (0–1) to continue the thread's current task — a go-ahead, a retry, pasted output — the turn keeps the previous turn's tier and model instead of being routed fresh."
+          description="When the judge rates a message at least this likely (0–1) to continue the thread's current task (a go-ahead, a retry, pasted output), the turn keeps the previous turn's tier and model instead of being routed fresh."
           control={
             <Input
               aria-label="continuation threshold"

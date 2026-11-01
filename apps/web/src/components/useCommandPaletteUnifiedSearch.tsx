@@ -60,7 +60,9 @@ export function useCommandPaletteUnifiedSearch(input: {
   const activeScope = (() => {
     if (activeProjectTarget === null || input.currentProjectId === null) return null;
     const linkedProject = projectEnvironmentProjects(
-      input.projects.filter((project) => project.environmentId === activeProjectTarget.environmentId),
+      input.projects.filter(
+        (project) => project.environmentId === activeProjectTarget.environmentId,
+      ),
       commandCenterBootstrap.data,
     ).find((project) => project.id === input.currentProjectId);
     if (linkedProject?.spaceId === undefined) return null;

@@ -416,9 +416,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                       ) : null}
                       <SidebarMenu role="presentation">
                         {group.paths
-                          .filter(
-                            (to) => !remoteOnlyDisconnected || to === "/settings/connections",
-                          )
+                          .filter((to) => !remoteOnlyDisconnected || to === "/settings/connections")
                           .map((to) => {
                             const Icon = SETTINGS_SECTION_ICONS[to];
                             const isActive = activePath === to || activePath.startsWith(`${to}/`);

@@ -5,7 +5,11 @@ import type {
   ServerPreviewGateway,
 } from "@t3tools/contracts";
 import { isLoopbackHost, normalizePreviewUrl } from "@t3tools/shared/preview";
-import { isLocalLoopbackHost, isPrivateNetworkHost } from "@t3tools/shared/hostClassification";
+import {
+  isLocalLoopbackHost,
+  isPrivateNetworkHost,
+  normalizeHostname,
+} from "@t3tools/shared/hostClassification";
 import { buildPreviewGatewaySelectUrl } from "@t3tools/shared/previewGateway";
 
 import type { ConnectionTarget } from "@t3tools/client-runtime/connection";
@@ -17,23 +21,24 @@ import { readPreparedConnection } from "~/state/session";
 
 export { normalizeHostname, isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
 
+// Command Center: previews also treat `.lan` and `.internal` hosts as same-network.
+const isPreviewPrivateNetworkHost = (host: string): boolean => {
+  const normalized = normalizeHostname(host);
+  return (
+    isPrivateNetworkHost(normalized) ||
+    normalized.endsWith(".lan") ||
+    normalized.endsWith(".internal")
+  );
+};
+
 const readEnvironmentUrl = (environmentId: EnvironmentId): URL => {
   const connection = readPreparedConnection(environmentId);
   if (!connection) throw new Error(`Environment ${environmentId} is not connected.`);
   return new URL(connection.httpBaseUrl);
 };
 
-/**
- * Point a preview at the environment's authenticated preview gateway.
- *
- * The gateway is mounted at the root of its own port, so the URL selects the
- * upstream port once and then lands on the requested path; from there the dev
- * server sees itself at `/` and its absolute URLs and HMR socket work unchanged.
- *
- * The gateway is reached on the same host the client already reached the server
- * on — that address is the one known to work from here, and the server cannot
- * know which of its several addresses that was.
- */
+// The gateway serves at its port root, so the dev server's absolute URLs and HMR work unchanged.
+// It is reached on the host the client already used; the server cannot know which address works.
 const buildGatewayResolution = (input: {
   readonly environmentId: EnvironmentId;
   readonly gateway: ServerPreviewGateway;
@@ -81,16 +86,8 @@ const resolveEnvironmentPortTarget = (
   const fallbackRequestedUrl = requestedUrl ?? `${protocol}://localhost:${target.port}${path}`;
   const isLocalEnvironment = isLocalLoopbackHost(normalizedEnvironmentHost);
 
-  // When the environment is *this* machine the dev server's own port is right
-  // here, so dialling it directly is both correct and certain — no gateway hop,
-  // no cookie. Every other case goes through the gateway when one is advertised.
-  //
-  // The gateway wins over dialling the environment's host directly (rather than
-  // being a fallback for it) because a private-network host is only *routable*,
-  // not reachable on that port: dev servers bind `127.0.0.1`, so `host:5173`
-  // hangs even though `host` answers. The gateway forwards from the server's own
-  // loopback, which is where the dev server actually is. Direct remains the path
-  // for servers that run no gateway, which is how this behaved before.
+  // A local environment dials the port directly. Elsewhere an advertised gateway wins: dev servers
+  // bind 127.0.0.1, so `host:5173` hangs even when `host` answers. Direct is for gateway-less servers.
   if (!isLocalEnvironment) {
     const gateway = readServerConfig(environmentId)?.previewGateway;
     const viaGateway =
@@ -105,7 +102,7 @@ const resolveEnvironmentPortTarget = (
             requestedUrl: fallbackRequestedUrl,
           });
     if (viaGateway) return viaGateway;
-    if (!isPrivateNetworkHost(normalizedEnvironmentHost)) {
+    if (!isPreviewPrivateNetworkHost(normalizedEnvironmentHost)) {
       throw new Error(
         "This environment port needs the authenticated preview gateway, which this server is not running or publishing.",
       );

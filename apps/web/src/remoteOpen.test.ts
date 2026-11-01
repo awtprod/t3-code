@@ -126,7 +126,9 @@ describe("resolveRemoteOpenState", () => {
     if (state.mode !== "remote-links") throw new Error("Expected a remote link");
     expect(
       buildRemoteOpenUrl({ editor: "cursor", ...state.host, absolutePath: "/work/project" }),
-    ).toBe("cursor://vscode-remote/ssh-remote+admin-user%40server.example-tailnet.ts.net/work/project");
+    ).toBe(
+      "cursor://vscode-remote/ssh-remote+admin-user%40server.example-tailnet.ts.net/work/project",
+    );
   });
 
   it("reports unavailable when a remote environment advertises no hosts", () => {
@@ -161,7 +163,6 @@ describe("buildRemoteOpenUrl", () => {
       "cursor://vscode-remote/ssh-remote+sol/tmp/x",
     );
   });
-
 
   it("roots Windows paths", () => {
     expect(

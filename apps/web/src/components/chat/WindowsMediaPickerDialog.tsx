@@ -16,7 +16,7 @@ import {
   HardDriveIcon,
   RefreshCwIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { commandCenterEnvironment } from "~/state/commandCenter";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -80,10 +80,9 @@ function WindowsMediaPickerView(props: WindowsMediaPickerViewProps) {
         : null;
   const active = location.kind === "roots" ? roots : listing;
   const listingValue = listing.status === "ready" ? listing.value : null;
-  const entries = useMemo(
-    () => (listingValue ? visibleWindowsMediaEntries(listingValue.entries, showAllFiles) : []),
-    [listingValue, showAllFiles],
-  );
+  const entries = listingValue
+    ? visibleWindowsMediaEntries(listingValue.entries, showAllFiles)
+    : [];
   const hiddenCount = listingValue ? listingValue.entries.length - entries.length : 0;
   const crumbs = location.kind === "folder" ? windowsPathBreadcrumbs(location.path) : [];
 
@@ -228,6 +227,17 @@ function WindowsMediaPickerView(props: WindowsMediaPickerViewProps) {
   );
 }
 
+// A load result remembers the request it answers; one for an older request reads as loading.
+interface LoadResult<T> {
+  readonly location: WindowsMediaPickerLocation;
+  readonly reloadToken: number;
+  readonly environmentId: EnvironmentId;
+  readonly state: LoadState<T>;
+}
+
+const LOADING = { status: "loading" } as const;
+const IDLE = { status: "idle" } as const;
+
 export interface WindowsMediaPickerDialogProps {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -244,44 +254,60 @@ export function WindowsMediaPickerDialog(props: WindowsMediaPickerDialogProps) {
     reportFailure: false,
   });
   const [location, setLocation] = useState<WindowsMediaPickerLocation>({ kind: "roots" });
-  const [roots, setRoots] = useState<LoadState<CommandCenterWindowsMediaRootsResult>>({
-    status: "idle",
-  });
-  const [listing, setListing] = useState<LoadState<CommandCenterWindowsMediaListResult>>({
-    status: "idle",
-  });
+  const [rootsResult, setRootsResult] =
+    useState<LoadResult<CommandCenterWindowsMediaRootsResult> | null>(null);
+  const [listingResult, setListingResult] =
+    useState<LoadResult<CommandCenterWindowsMediaListResult> | null>(null);
   const [showAllFiles, setShowAllFiles] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
+  const [openSeen, setOpenSeen] = useState(open);
 
   // Each open starts at the drive list.
-  useEffect(() => {
-    if (open) {
-      setLocation({ kind: "roots" });
-    }
-  }, [open]);
+  if (open !== openSeen) {
+    setOpenSeen(open);
+    if (open) setLocation({ kind: "roots" });
+  }
 
+  const answersCurrentRequest = (result: LoadResult<unknown> | null) =>
+    result !== null &&
+    result.location === location &&
+    result.reloadToken === reloadToken &&
+    result.environmentId === environmentId;
+  const roots =
+    location.kind === "roots" && !answersCurrentRequest(rootsResult)
+      ? LOADING
+      : (rootsResult?.state ?? IDLE);
+  const listing =
+    location.kind === "folder" && !answersCurrentRequest(listingResult)
+      ? LOADING
+      : (listingResult?.state ?? IDLE);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- requests the drive list or folder listing from the Windows host for the open dialog, dropping replies to superseded requests.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    const request = { location, reloadToken, environmentId };
     if (location.kind === "roots") {
-      setRoots({ status: "loading" });
       void listRoots({ environmentId, input: {} }).then((result) => {
         if (cancelled || isAtomCommandInterrupted(result)) return;
-        setRoots(
-          result._tag === "Success"
-            ? { status: "ready", value: result.value }
-            : { status: "error", message: failureMessage(result) },
-        );
+        setRootsResult({
+          ...request,
+          state:
+            result._tag === "Success"
+              ? { status: "ready", value: result.value }
+              : { status: "error", message: failureMessage(result) },
+        });
       });
     } else {
-      setListing({ status: "loading" });
       void listFolder({ environmentId, input: { path: location.path } }).then((result) => {
         if (cancelled || isAtomCommandInterrupted(result)) return;
-        setListing(
-          result._tag === "Success"
-            ? { status: "ready", value: result.value }
-            : { status: "error", message: failureMessage(result) },
-        );
+        setListingResult({
+          ...request,
+          state:
+            result._tag === "Success"
+              ? { status: "ready", value: result.value }
+              : { status: "error", message: failureMessage(result) },
+        });
       });
     }
     return () => {
@@ -289,13 +315,10 @@ export function WindowsMediaPickerDialog(props: WindowsMediaPickerDialogProps) {
     };
   }, [open, location, environmentId, listRoots, listFolder, reloadToken]);
 
-  const handlePick = useCallback(
-    (entry: CommandCenterWindowsMediaEntry, host: string) => {
-      onPick(entry, host);
-      onOpenChange(false);
-    },
-    [onOpenChange, onPick],
-  );
+  const handlePick = (entry: CommandCenterWindowsMediaEntry, host: string) => {
+    onPick(entry, host);
+    onOpenChange(false);
+  };
 
   return (
     <Dialog open={open} onOpenChange={(next) => onOpenChange(next)}>

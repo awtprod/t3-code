@@ -6,7 +6,7 @@ import {
   type UsageQueryTokenTotals,
 } from "@t3tools/contracts";
 import { BarChart3Icon, RefreshCwIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { usePrimaryEnvironment } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
@@ -18,6 +18,14 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
 
 const RANGES = [1, 7, 30, 90] as const;
+
+/** Wall-clock ms read once per `key`, so the queried window holds still between renders. */
+function useNowFor(key: string): number {
+  const readNow = () => ({ key, nowMs: Date.now() });
+  const [snapshot, setSnapshot] = useState(readNow);
+  if (snapshot.key !== key) setSnapshot(readNow);
+  return snapshot.nowMs;
+}
 
 function tokenTotal(tokens: UsageQueryTokenTotals): number | null {
   const values = [
@@ -112,19 +120,18 @@ export function UsageSettingsPanel() {
   const [days, setDays] = useState<(typeof RANGES)[number] | "custom">(1);
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
-  const input = useMemo(() => {
-    const custom = days === "custom" && customFrom && customTo;
-    const to = custom ? new Date(`${customTo}T23:59:59.999Z`) : new Date();
-    const from = custom
-      ? new Date(`${customFrom}T00:00:00.000Z`)
-      : new Date(to.getTime() - (days === "custom" ? 30 : days) * 86_400_000);
-    return {
-      from: from.toISOString(),
-      to: to.toISOString(),
-      bucket: days === 1 ? ("hour" as const) : ("day" as const),
-      limit: 50,
-    };
-  }, [customFrom, customTo, days]);
+  const nowMs = useNowFor(`${days}|${customFrom}|${customTo}`);
+  const custom = days === "custom" && customFrom && customTo;
+  const to = custom ? new Date(`${customTo}T23:59:59.999Z`) : new Date(nowMs);
+  const from = custom
+    ? new Date(`${customFrom}T00:00:00.000Z`)
+    : new Date(to.getTime() - (days === "custom" ? 30 : days) * 86_400_000);
+  const input = {
+    from: from.toISOString(),
+    to: to.toISOString(),
+    bucket: days === 1 ? ("hour" as const) : ("day" as const),
+    limit: 50,
+  };
   const query = useEnvironmentQuery(
     environment ? usageEnvironment({ environmentId: environment.environmentId, input }) : null,
   );

@@ -163,6 +163,7 @@ function DesktopPrimaryBackendSettings() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- seeds the form from the desktop bridge's primary-backend state over Electron IPC while mounted.
   useEffect(() => {
     let mounted = true;
     void bridge?.getPrimaryBackendState().then((next) => {
@@ -197,15 +198,15 @@ function DesktopPrimaryBackendSettings() {
   const testConnection = async () => {
     setBusy(true);
     setError(null);
-    try {
-      const next = await bridge.retryRemotePrimary(endpoint.trim());
-      setState(next);
-      if (next.connectivity !== "connected") setError("Remote endpoint is unavailable.");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Remote endpoint is unavailable.");
-    } finally {
-      setBusy(false);
-    }
+    const failure = await bridge.retryRemotePrimary(endpoint.trim()).then(
+      (next) => {
+        setState(next);
+        return next.connectivity === "connected" ? null : "Remote endpoint is unavailable.";
+      },
+      (cause) => (cause instanceof Error ? cause.message : "Remote endpoint is unavailable."),
+    );
+    if (failure) setError(failure);
+    setBusy(false);
   };
 
   return (

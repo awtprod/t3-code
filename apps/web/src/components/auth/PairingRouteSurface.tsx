@@ -70,14 +70,22 @@ export function PairingRouteSurface({
   const reconnectSavedEnvironment = async () => {
     setIsSubmitting(true);
     setErrorMessage("");
-    try {
-      await reconnectSavedDesktopEnvironment();
-      startTransition(() => onAuthenticated());
-    } catch (error) {
-      setErrorMessage(errorMessageFromUnknown(error));
-    } finally {
-      setIsSubmitting(false);
+
+    const reconnectError = await reconnectSavedDesktopEnvironment().then(
+      () => null,
+      (error) => errorMessageFromUnknown(error),
+    );
+
+    setIsSubmitting(false);
+
+    if (reconnectError) {
+      setErrorMessage(reconnectError);
+      return;
     }
+
+    startTransition(() => {
+      onAuthenticated();
+    });
   };
 
   const handleSubmit = async (event?: React.SubmitEvent<HTMLFormElement>) => {

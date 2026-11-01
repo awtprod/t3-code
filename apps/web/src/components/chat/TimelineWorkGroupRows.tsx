@@ -11,16 +11,7 @@ import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/s
 import { observeResize } from "~/lib/observeResize";
 import { tickTextContent } from "~/lib/tickTextContent";
 import { observeVisibleAnimation } from "../../lib/visibleAnimation";
-import {
-  memo,
-  use,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { memo, use, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { workEntryDisplayIndicatesToolFailure } from "../../session-logic";
 import ChatMarkdown from "../ChatMarkdown";
@@ -33,10 +24,12 @@ import {
   resolveWorkGroupScrollIndex,
   resolveWorkingSilenceStart,
   shouldFollowWorkGroupAppend,
+  WORKING_STALE_AFTER_MS,
   workEntryIsVisibleInGroup,
   type MessagesTimelineRow,
   type WorkingIndicatorStatus,
 } from "./MessagesTimeline.logic";
+import { useNowAfter } from "../../hooks/useDeadline";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Spinner } from "../ui/spinner";
 import { WorktreeSetupCard } from "./WorktreeSetupCard";
@@ -304,7 +297,11 @@ export function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
   ) : compacting ? (
     <CompactingLabel createdAt={row.createdAt} />
   ) : (
-    <WorkingRowLabel status={status} createdAt={row.createdAt} silenceStartedAt={silenceStartedAt} />
+    <WorkingRowLabel
+      status={status}
+      createdAt={row.createdAt}
+      silenceStartedAt={silenceStartedAt}
+    />
   );
   return (
     <div className="border-b border-border/60 pb-2 pt-1">
@@ -330,38 +327,17 @@ export function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
   );
 }
 
-/** Coarse: the stall threshold is minutes, and state only changes when the status does. */
-const WORKING_STATUS_POLL_MS = 5_000;
-
 function useWorkingIndicatorStatus(
   connectionPhase: EnvironmentConnectionPhase | null,
   lastActivityAt: string | null,
   workStartedAt: string | null,
 ): WorkingIndicatorStatus {
-  const evaluateStatus = useCallback(
-    () =>
-      deriveWorkingIndicatorStatus({
-        connectionPhase,
-        lastActivityAt,
-        workStartedAt,
-        nowMs: Date.now(),
-      }),
-    [connectionPhase, lastActivityAt, workStartedAt],
+  // Silence crosses the stall threshold with no prop change, so re-read the clock at that deadline.
+  const silenceStartedAt = resolveWorkingSilenceStart(lastActivityAt, workStartedAt);
+  const nowMs = useNowAfter(
+    silenceStartedAt === null ? null : Date.parse(silenceStartedAt) + WORKING_STALE_AFTER_MS,
   );
-  const [status, setStatus] = useState<WorkingIndicatorStatus>(evaluateStatus);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- wall-clock timer: silence crosses the stall threshold with no prop change
-  useEffect(() => {
-    const initial = evaluateStatus();
-    setStatus(initial);
-    if (initial === "stalled") return;
-    const id = setInterval(() => {
-      const next = evaluateStatus();
-      setStatus(next);
-      if (next === "stalled") clearInterval(id);
-    }, WORKING_STATUS_POLL_MS);
-    return () => clearInterval(id);
-  }, [evaluateStatus]);
-  return status;
+  return deriveWorkingIndicatorStatus({ connectionPhase, lastActivityAt, workStartedAt, nowMs });
 }
 
 function WorkingRowLabel({
@@ -380,10 +356,10 @@ function WorkingRowLabel({
     case "stalled":
       return silenceStartedAt ? (
         <>
-          No response for <WorkingTimer createdAt={silenceStartedAt} /> — may be stuck
+          No response for <WorkingTimer createdAt={silenceStartedAt} /> (may be stuck)
         </>
       ) : (
-        <>No response yet — may be stuck</>
+        <>No response yet (may be stuck)</>
       );
     case "working":
       return createdAt ? (

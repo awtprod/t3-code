@@ -1,15 +1,7 @@
 /**
- * The in-app alert chime.
- *
- * This exists because Do Not Disturb suppresses the OS notification *and*
- * its sound, with no API to detect that it happened. Rather than guess, the
- * app plays its own short tone whenever its window is unfocused, audible in
- * a Focus mode, on another desktop, or behind a full-screen app. When the
- * banner does get through, the two land together and read as one alert.
- *
- * Synthesized with WebAudio instead of shipping an audio file: a two-note
- * chime is a few oscillator settings, not a bundled binary plus a fetch and
- * decode.
+ * In-app alert chime, played whenever the window is unfocused: Do Not Disturb
+ * silences the OS notification sound and offers no API to detect that.
+ * Synthesized with WebAudio rather than shipping an audio file.
  */
 
 // A soft major sixth (A5 -> F#6). Pleasant, and distinct from system alerts.

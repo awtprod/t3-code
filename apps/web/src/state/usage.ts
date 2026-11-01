@@ -246,7 +246,6 @@ export function useUsage(
   };
 }
 
-// --- Command Center: per-environment usage query atom (consumed by UsageSettings) ---
 export const usageEnvironment = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
   label: "environment-data:usage:query",
   tag: WS_METHODS.usageQuery,

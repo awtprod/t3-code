@@ -155,13 +155,9 @@ function isSameLoopbackOrigin(left: URL, right: URL): boolean {
   return left.protocol === right.protocol && left.port === right.port;
 }
 
-// Whether this document was served by the vite dev server, which proxies
-// `/api`, `/ws`, `/attachments`, and `/.well-known` to the backend. When it
-// was, routing through the current origin is always correct — including when
-// the dev server is reached over a non-loopback host (a Tailscale name, a LAN
-// IP), where the origin string cannot match the loopback `VITE_DEV_SERVER_URL`.
-// `import.meta.env.DEV` is false in a production build, so this never widens
-// behaviour for the static-served app.
+// Whether the vite dev server (which proxies the backend routes) served this document.
+// Then the current origin is always right, including over a non-loopback host
+// (Tailscale, LAN) that cannot match the loopback `VITE_DEV_SERVER_URL`.
 function isDocumentServedByDevServer(currentUrl: URL, devServerUrl: URL): boolean {
   if (currentUrl.protocol !== "http:" && currentUrl.protocol !== "https:") {
     return false;
@@ -364,12 +360,9 @@ export function readPrimaryEnvironmentTarget(): PrimaryEnvironmentTarget | null 
     ...primaryTarget,
     target: {
       ...primaryTarget.target,
-      // In dev, route HTTP through the same (vite) origin so requests that read
-      // the target directly — notably environment discovery
-      // (`/.well-known/t3/environment`) — go through the vite proxy instead of
-      // hitting the backend origin cross-origin (which the browser blocks,
-      // surfacing as ConnectionTransientError "network"). Kept symmetric with
-      // the wsBaseUrl rewrite below; both are no-ops outside the dev server.
+      // In dev, route HTTP through the vite origin so direct target reads (environment
+      // discovery) use the proxy instead of a blocked cross-origin backend request.
+      // Symmetric with the wsBaseUrl rewrite; both are no-ops outside the dev server.
       httpBaseUrl: resolveHttpRequestBaseUrl(primaryTarget),
       wsBaseUrl: resolvePrimaryEnvironmentWebSocketBaseUrl(primaryTarget),
     },

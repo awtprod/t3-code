@@ -80,14 +80,6 @@ const RESERVED_THEME_IDS: ReadonlySet<string> = new Set([
   VERCEL_DARK_THEME_ID,
 ]);
 
-/**
- * The environment's palettes are not saved: they are republished by the
- * server on every change and would go stale the moment the machine's theme
- * moved on. They ride the custom-theme listeners so every theme consumer
- * already re-reads when they change.
- */
-let environmentThemeDefinitions: ReadonlyArray<ThemeDefinition> = [];
-
 const customThemeListeners = new Set<() => void>();
 type CustomThemeLibrarySnapshot =
   | Readonly<{

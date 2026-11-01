@@ -21,16 +21,9 @@ import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsRow } from "./settingsLayout";
 
-// Per-browser notification opt-in. Agent activity (approvals, input requests,
-// completions, failures) arrives as Web Push. In relay mode (T3 Connect) the
-// relay delivers it; in local mode the paired Command Center server delivers it
-// directly. Renders nothing when the runtime cannot do push at all;
-// iOS-needs-install gets a hint row instead of silence.
-//
-// Clerk is only mounted in relay builds, so the relay row (which reads the
-// sign-in state) and the local row (which never touches Clerk) are separate
-// components — the parent picks one, so useAuth is never called without a
-// provider.
+// Per-browser Web Push opt-in, delivered by the relay (T3 Connect) or the paired server (local mode).
+// Clerk is mounted only in relay builds, so the relay and local rows are separate components and
+// useAuth is never called without a provider.
 export function WebPushNotificationsRow() {
   const support = webPushSupport();
 
@@ -131,6 +124,7 @@ function LocalWebPushRow() {
   const [isTesting, setIsTesting] = useState(false);
   const [configState, setConfigState] = useState<LocalWebPushConfigState>("loading");
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- asks the paired server once per mount whether it has a VAPID key configured.
   useEffect(() => {
     let cancelled = false;
     void fetchLocalWebPushConfig()
