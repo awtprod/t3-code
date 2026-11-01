@@ -3,7 +3,7 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { render } from "../../../test/render";
-import { ChatMarkdownAssetImage } from "./ChatMarkdownMedia";
+import { ChatMarkdownAssetImage, markdownImageCopy } from "./ChatMarkdownMedia";
 
 // Every evaluation of the URL query is one mint: the first read, then one per refresh.
 const assetQuery = vi.hoisted(() => ({ mints: 0 }));
@@ -82,5 +82,13 @@ describe("ChatMarkdownAssetImage", () => {
     await using screen = await render(<ChatMarkdownAssetImage {...image.props} />);
     await expect.element(screen.getByRole("img", { name: "diagram" })).toBeInTheDocument();
     expect(assetQuery.mints).toBe(2);
+  });
+});
+
+describe("markdownImageCopy", () => {
+  it("wraps image paths with spaces and parentheses in an angle destination", () => {
+    expect(markdownImageCopy("Preview", "screenshots/my image (1).png", undefined)).toBe(
+      "![Preview](<screenshots/my image (1).png>)",
+    );
   });
 });

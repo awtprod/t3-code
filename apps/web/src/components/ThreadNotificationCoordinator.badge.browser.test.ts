@@ -109,6 +109,8 @@ const thread = {
   hasPendingUserInput: false,
   session: null as { status: string } | null,
   latestTurn: { turnId: "turn", state: "running", completedAt: null as string | null },
+  createdBy: "user" as "user" | "agent" | "system",
+  lastErrorClass: null as "usage_limit" | null,
 };
 let focused = false;
 let visibility = "visible";
@@ -134,7 +136,7 @@ function toV2ThreadShell(input: typeof thread) {
       relationshipToParent: null,
     },
     forkedFrom: null,
-    createdBy: "user",
+    createdBy: input.createdBy,
     creationSource: "web",
     latestRunId: latestTurn.turnId,
     activeRunId: null,
@@ -144,6 +146,7 @@ function toV2ThreadShell(input: typeof thread) {
         : latestTurn.state === "error" || input.session?.status === "error"
           ? "failed"
           : "running",
+    lastErrorClass: input.lastErrorClass,
     pendingRuntimeRequest: input.hasPendingUserInput
       ? { id: "request-1", kind: "user_input", createdAt: SHELL_NOW }
       : input.hasPendingApprovals
@@ -260,3 +263,36 @@ it("holds a completion through a continuation gap and notifies once it settles",
   await vi.advanceTimersByTimeAsync(1);
   expect(TestNotification.sent.map((sent) => sent.title)).toEqual(["Thread completed"]);
 });
+
+it.each([
+  ["the Space agent", "cc-space-agent-command-center", "system"],
+  ["an agent-launched thread", "thread", "agent"],
+] as const)(
+  "rings an unattended thread (%s) only when it waits on the user",
+  async (_label, id, createdBy) => {
+    await using app = setup();
+    state.mode = "notifications-and-sound";
+    app.start();
+    using _timers = fakeTimers();
+    const unattended = { id, createdBy };
+    state.shells.set(
+      "one",
+      shell({
+        ...unattended,
+        latestTurn: { turnId: "turn", state: "completed", completedAt: "2026-09-13T07:00:01.000Z" },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(WORKING_EXIT_GRACE_MS);
+    state.shells.set("one", shell({ ...unattended, session: { status: "error" } }));
+    state.shells.set(
+      "one",
+      shell({ ...unattended, session: { status: "error" }, lastErrorClass: "usage_limit" }),
+    );
+    expect(state.sound).not.toHaveBeenCalled();
+    expect(TestNotification.sent).toEqual([]);
+
+    state.shells.set("one", shell({ ...unattended, hasPendingApprovals: true }));
+    expect(state.sound).toHaveBeenCalledTimes(1);
+    expect(TestNotification.sent.map((sent) => sent.title)).toEqual(["Approval needed"]);
+  },
+);

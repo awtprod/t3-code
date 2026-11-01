@@ -61,11 +61,11 @@ function Player() {
           preview: { ...miniPlayer, key, source: sourceSize },
         }),
         previewKey: key,
-        reportPreview: noop,
-        clearPreview: noop,
         registerTimeline: noop,
-        reportDetailsCard: noop,
+        measureDetailsCard: noop,
         detailsCardTopInset: 0,
+        preferredDetailsCard: null,
+        detailsCardPlacement: null,
       }}
     >
       <MiniPlayerShell

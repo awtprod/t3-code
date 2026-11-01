@@ -10,7 +10,7 @@ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsL
 import { searchableSetting } from "./settingsSearch";
 import { LegacyFeaturesSection } from "./SettingsPanels";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
-import { useClientSettings, useUpdateClientSettings } from "../../hooks/useSettings";
+import { updateClientSettings, useClientSettings } from "../../hooks/useSettings";
 
 /** Features still settling in, and legacy behavior kept for people who rely on it. */
 export function LabsSettingsPanel() {
@@ -195,7 +195,6 @@ function SimlockHostsRow() {
 
 function SidebarV2Row() {
   const sidebarV2Enabled = useClientSettings((settings) => settings.sidebarV2Enabled);
-  const updateSettings = useUpdateClientSettings();
   return (
     <SettingsRow
       {...searchableSetting("sidebar-v2")}
@@ -206,7 +205,7 @@ function SidebarV2Row() {
           // Touching the switch pins the choice, so a nightly build that
           // defaults v2 on does not flip it back after the user opts out.
           onCheckedChange={(checked) =>
-            updateSettings({
+            updateClientSettings({
               sidebarV2Enabled: Boolean(checked),
               sidebarV2ConfiguredByUser: true,
             })
@@ -220,7 +219,6 @@ function SidebarV2Row() {
 
 function RestorePlanModeRow() {
   const planModeEnabled = useClientSettings((settings) => settings.planModeEnabled);
-  const updateSettings = useUpdateClientSettings();
   return (
     <SettingsRow
       {...searchableSetting("restore-plan-mode")}
@@ -228,7 +226,7 @@ function RestorePlanModeRow() {
       control={
         <Switch
           checked={planModeEnabled}
-          onCheckedChange={(checked) => updateSettings({ planModeEnabled: Boolean(checked) })}
+          onCheckedChange={(checked) => updateClientSettings({ planModeEnabled: Boolean(checked) })}
           aria-label="Restore plan mode (legacy)"
         />
       }

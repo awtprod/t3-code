@@ -36,7 +36,7 @@ import { cn } from "../../lib/utils";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useRelativeTimeTick } from "../settings/settingsLayout";
+import { useNowSecond } from "../../hooks/useNowSecond";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -1036,7 +1036,9 @@ export function ResourcesPane({
   const hostUsage = useEnvironmentQuery(serverEnvironment.hostUsage({ environmentId, input: {} }));
   const refreshHostUsage = hostUsage.refresh;
   useHostUsagePolling(refreshHostUsage, hostUsage.isPending);
-  const localNow = useRelativeTimeTick(RESOURCES_POLL_INTERVAL_MS);
+  // Quantized to the poll interval so the pane view re-renders at the poll cadence, not every second.
+  const localNow =
+    Math.floor(useNowSecond() / RESOURCES_POLL_INTERVAL_MS) * RESOURCES_POLL_INTERVAL_MS;
   const snapshot = hostUsage.data;
   const now =
     snapshot === null

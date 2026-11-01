@@ -431,7 +431,7 @@ export function useBoringSidebarEnabled(): boolean {
  * for hydration first.
  */
 export function useCommandCenterSidebarShortcuts(): ReadonlyArray<CommandCenterSidebarShortcutKey> {
-  return useClientSettingsValue().commandCenterSidebarShortcuts;
+  return useClientSettings((settings) => settings.commandCenterSidebarShortcuts);
 }
 
 /** Hydrate legacy preferences before a mutation can claim either server-owned list. */
@@ -599,14 +599,8 @@ function useSharedSettingsSyncTargetIds(includePending = false): ReadonlyArray<E
 }
 
 /**
- * Returns an updater that routes each key to the correct backing store.
- *
- * Server keys are optimistically patched in atom-backed server state, then
- * persisted via RPC, reporting whether persistence succeeded so optimistic
- * callers can retain or roll back their local value. Shared server keys (see
- * `SHARED_SERVER_SETTING_KEYS`) are written to every eligible sync target, not
- * only the selected target, so a user preference does not silently drift
- * between machines. Client keys go through client persistence.
+ * Routes each key to its store. Resolves whether the server write persisted so optimistic
+ * callers can roll back; shared keys (`SHARED_SERVER_SETTING_KEYS`) go to every sync target.
  */
 function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
   useEnvironmentScope(environmentId, AuthSettingsWriteScope);
@@ -631,128 +625,123 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
     return result;
   };
   const sharedSettingsSyncTargetIds = useSharedSettingsSyncTargetIds(true);
-  const updateSettings = useCallback(
-    async (patch: UnifiedSettingsPatch): Promise<boolean> => {
-      const { serverPatch, clientPatch } = splitPatch(patch);
-      let persisted = true;
+  const updateSettings = async (patch: UnifiedSettingsPatch): Promise<boolean> => {
+    const { serverPatch, clientPatch } = splitPatch(patch);
+    let persisted = true;
 
-      const canWriteServerPatch =
-        environmentId === null ||
-        requiredScopesForServerSettingsPatch(serverPatch).every((scope) =>
-          readEnvironmentScope(environmentId, scope),
-        );
-      if (Object.keys(serverPatch).length > 0 && !canWriteServerPatch) {
+    const canWriteServerPatch =
+      environmentId === null ||
+      requiredScopesForServerSettingsPatch(serverPatch).every((scope) =>
+        readEnvironmentScope(environmentId, scope),
+      );
+    if (Object.keys(serverPatch).length > 0 && !canWriteServerPatch) {
+      toastManager.add({
+        type: "warning",
+        title: "Setting not saved",
+        description: `This connection lacks permission to change settings on ${environments.find((target) => target.environmentId === environmentId)?.label ?? "the selected environment"}.`,
+      });
+    }
+    if (Object.keys(serverPatch).length > 0 && canWriteServerPatch) {
+      const { sharedPatch, localPatch } = splitSharedServerPatch(serverPatch);
+      // Dropping the write silently leaves the control looking saved.
+      const warnUnsaved = (description = PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE) =>
         toastManager.add({
           type: "warning",
           title: "Setting not saved",
-          description: `This connection lacks permission to change settings on ${environments.find((target) => target.environmentId === environmentId)?.label ?? "the selected environment"}.`,
+          description,
         });
-      }
-      if (Object.keys(serverPatch).length > 0 && canWriteServerPatch) {
-        const { sharedPatch, localPatch } = splitSharedServerPatch(serverPatch);
-        // Dropping the write silently leaves the control looking saved.
-        const warnUnsaved = (description = PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE) =>
-          toastManager.add({
-            type: "warning",
-            title: "Setting not saved",
-            description,
+      if (Object.keys(localPatch).length > 0) {
+        if (environmentId) {
+          const result = await persistServerSettings({
+            environmentId,
+            input: { patch: localPatch },
           });
-        if (Object.keys(localPatch).length > 0) {
-          if (environmentId) {
-            const result = await persistServerSettings({
-              environmentId,
-              input: { patch: localPatch },
-            });
-            persisted = isSettingsWritePersisted(result);
-          } else {
-            persisted = false;
-            warnUnsaved();
-          }
-        }
-        if (Object.keys(sharedPatch).length > 0) {
-          const sourceSettings = environments.find(
-            (target) => target.environmentId === environmentId,
-          )?.serverConfig?.settings;
-          const targets = new Set(sharedSettingsSyncTargetIds);
-          if (environmentId) {
-            targets.add(environmentId);
-          }
-          const writes: Array<Parameters<typeof persist>[0]> = [];
-          const deniedLabels: string[] = [];
-          for (const targetId of targets) {
-            const target = environments.find((candidate) => candidate.environmentId === targetId);
-            const targetPatch = filterSharedServerPatch(
-              sharedPatch,
-              target?.serverConfig?.settings,
-              sourceSettings,
-              targetId === environmentId,
-            );
-            if (Object.keys(targetPatch).length === 0) continue;
-            const session = appAtomRegistry.get(environmentSession.sessionStateAtom(targetId));
-            if (
-              session._tag !== "Initial" &&
-              !requiredScopesForServerSettingsPatch(sharedPatch).every((scope) =>
-                readEnvironmentScope(targetId, scope),
-              )
-            ) {
-              deniedLabels.push(target?.label ?? targetId);
-              continue;
-            }
-            writes.push({
-              environmentId: targetId,
-              input: { patch: targetPatch },
-            });
-          }
-          if (writes.length === 0) {
-            warnUnsaved(
-              deniedLabels.length > 0
-                ? `This connection lacks permission to change settings on ${deniedLabels.join(", ")}.`
-                : targets.size > 0
-                  ? "Update older servers to save this setting."
-                  : undefined,
-            );
-          } else {
-            void Promise.all(
-              writes.map(async (request) => ({
-                label:
-                  environments.find((target) => target.environmentId === request.environmentId)
-                    ?.label ?? request.environmentId,
-                result: await persist(request),
-              })),
-            ).then((outcomes) => {
-              const failures = outcomes.flatMap(({ label, result }) => {
-                if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return [];
-                const error = squashAtomCommandFailure(result);
-                return [
-                  `Could not save on ${label}: ${error instanceof Error ? error.message : "The save failed. Try reconnecting and saving again."}`,
-                ];
-              });
-              if (failures.length === 0) return;
-              const saved = outcomes
-                .filter(({ result }) => result._tag === "Success")
-                .map(({ label }) => label);
-              toastManager.add({
-                type: "error",
-                title:
-                  saved.length > 0 ? "Setting saved on some environments" : "Setting not saved",
-                description: [
-                  ...failures,
-                  ...(saved.length > 0 ? [`Saved on ${saved.join(", ")}.`] : []),
-                ].join("\n"),
-              });
-            });
-          }
+          persisted = isSettingsWritePersisted(result);
+        } else {
+          persisted = false;
+          warnUnsaved();
         }
       }
-
-      if (Object.keys(clientPatch).length > 0) {
-        void persistClientSettingsPatch(clientPatch);
+      if (Object.keys(sharedPatch).length > 0) {
+        const sourceSettings = environments.find((target) => target.environmentId === environmentId)
+          ?.serverConfig?.settings;
+        const targets = new Set(sharedSettingsSyncTargetIds);
+        if (environmentId) {
+          targets.add(environmentId);
+        }
+        const writes: Array<Parameters<typeof persist>[0]> = [];
+        const deniedLabels: string[] = [];
+        for (const targetId of targets) {
+          const target = environments.find((candidate) => candidate.environmentId === targetId);
+          const targetPatch = filterSharedServerPatch(
+            sharedPatch,
+            target?.serverConfig?.settings,
+            sourceSettings,
+            targetId === environmentId,
+          );
+          if (Object.keys(targetPatch).length === 0) continue;
+          const session = appAtomRegistry.get(environmentSession.sessionStateAtom(targetId));
+          if (
+            session._tag !== "Initial" &&
+            !requiredScopesForServerSettingsPatch(sharedPatch).every((scope) =>
+              readEnvironmentScope(targetId, scope),
+            )
+          ) {
+            deniedLabels.push(target?.label ?? targetId);
+            continue;
+          }
+          writes.push({
+            environmentId: targetId,
+            input: { patch: targetPatch },
+          });
+        }
+        if (writes.length === 0) {
+          warnUnsaved(
+            deniedLabels.length > 0
+              ? `This connection lacks permission to change settings on ${deniedLabels.join(", ")}.`
+              : targets.size > 0
+                ? "Update older servers to save this setting."
+                : undefined,
+          );
+        } else {
+          void Promise.all(
+            writes.map(async (request) => ({
+              label:
+                environments.find((target) => target.environmentId === request.environmentId)
+                  ?.label ?? request.environmentId,
+              result: await persist(request),
+            })),
+          ).then((outcomes) => {
+            const failures = outcomes.flatMap(({ label, result }) => {
+              if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return [];
+              const error = squashAtomCommandFailure(result);
+              return [
+                `Could not save on ${label}: ${error instanceof Error ? error.message : "The save failed. Try reconnecting and saving again."}`,
+              ];
+            });
+            if (failures.length === 0) return;
+            const saved = outcomes
+              .filter(({ result }) => result._tag === "Success")
+              .map(({ label }) => label);
+            toastManager.add({
+              type: "error",
+              title: saved.length > 0 ? "Setting saved on some environments" : "Setting not saved",
+              description: [
+                ...failures,
+                ...(saved.length > 0 ? [`Saved on ${saved.join(", ")}.`] : []),
+              ].join("\n"),
+            });
+          });
+        }
       }
+    }
 
-      return persisted;
-    },
-    [environmentId, environments, persist, persistServerSettings, sharedSettingsSyncTargetIds],
-  );
+    if (Object.keys(clientPatch).length > 0) {
+      void persistClientSettingsPatch(clientPatch);
+    }
+
+    return persisted;
+  };
 
   return updateSettings;
 }

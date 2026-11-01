@@ -6,7 +6,7 @@ import * as Schema from "effect/Schema";
  * blockers, captured from a disposable dev server (synthetic data only) and
  * decoded through the real contract so it cannot drift from it.
  */
-export const GMAIL_DRAFT_DETAIL = Schema.decodeUnknownSync(CommandCenterInboxDetail)({
+export const GMAIL_DRAFT_DETAIL = Schema.decodeSync(CommandCenterInboxDetail)({
   item: {
     id: "qa-item-gmail",
     spaceId: "qa-space",
@@ -89,10 +89,12 @@ export const GMAIL_DRAFT_DETAIL = Schema.decodeUnknownSync(CommandCenterInboxDet
   revisions: [],
 });
 
+const decodeDraftReceipt = Schema.decodeSync(CommandCenterInboxDraftReceipt);
+
 export const gmailDraftReceipt = (
   status: CommandCenterInboxDraftReceipt["status"],
 ): CommandCenterInboxDraftReceipt =>
-  Schema.decodeUnknownSync(CommandCenterInboxDraftReceipt)({
+  decodeDraftReceipt({
     mutationId: "web:qa-approve",
     itemId: GMAIL_DRAFT_DETAIL.item.id,
     spaceId: GMAIL_DRAFT_DETAIL.state.spaceId,

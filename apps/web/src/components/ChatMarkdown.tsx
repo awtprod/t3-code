@@ -384,13 +384,6 @@ function normalizeMarkdownLinkHrefKey(href: string): string {
     : rewrittenHref;
 }
 
-// These helpers moved to chat/ submodules upstream; re-exported here for the public API and tests.
-export { markdownImageCopy, canUseMarkdownFileShellActions };
-export {
-  hasMarkdownFilePrimaryAction,
-  shouldUseMarkdownFileBrowserPrimaryAction,
-} from "./chat/MarkdownFileLink.logic";
-
 // Heading ids are added after sanitizing, which would prefix them a second time.
 const CHAT_MARKDOWN_RENDER_REHYPE_PLUGINS = [
   ...CHAT_MARKDOWN_REHYPE_PLUGINS,

@@ -5,10 +5,7 @@ import { STATIC_KEYBINDING_COMMANDS, type KeybindingCommand } from "@t3tools/con
 import type { EnvironmentId } from "@t3tools/contracts";
 import type { CommandCenterSidebarShortcutKey } from "@t3tools/contracts/settings";
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
-import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
-import { DEFAULT_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { COMMAND_CENTER_SHORTCUTS } from "../sidebar/commandCenterShortcuts";
-import { commandLabel } from "./KeybindingsSettings.logic";
 import {
   sourceControlClients,
   type SourceControlDefinition,
@@ -150,11 +147,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
   },
   {
     heading: "Code",
-    paths: [
-      "/settings/projects",
-      "/settings/source-control",
-      "/settings/worktrees",
-    ],
+    paths: ["/settings/projects", "/settings/source-control", "/settings/worktrees"],
   },
   {
     heading: "Connections",

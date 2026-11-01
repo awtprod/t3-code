@@ -150,7 +150,9 @@ export interface PullRequestTabStatus {
 
 export type PullRequestTabStatusSeed = Pick<PullRequestTabStatus, "state" | "isDraft">;
 
-function shouldOpenDefaultBrowserProfileFromMenuClick(pointerType: string | undefined): boolean {
+export function shouldOpenDefaultBrowserProfileFromMenuClick(
+  pointerType: string | undefined,
+): boolean {
   return pointerType !== "touch";
 }
 
@@ -217,7 +219,7 @@ function previewTabIdOf(
  * resolve while the preview manager's createTab is still in flight, and muting
  * then fails with a PreviewTabNotFoundError nothing surfaces to the user.
  */
-function tabMuteMenuItem(input: {
+export function tabMuteMenuItem(input: {
   overlay: DesktopPreviewOverlay | null;
   canResolveRuntimeTabId: boolean;
 }): { label: string; disabled: boolean } {

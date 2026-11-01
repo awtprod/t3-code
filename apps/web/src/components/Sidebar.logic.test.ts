@@ -8,11 +8,13 @@ import { AsyncResult } from "effect/reactivity";
 import {
   archiveSelectedThreadEntries,
   deleteSelectedThreadEntries,
+  filterSidebarProjectScopeItems,
   getFallbackThreadIdAfterDelete,
   hasUnseenCompletion,
   resolveSidebarRowThreadId,
   orderItemsByPreferredIds,
   pinOrderKeyBetween,
+  reduceSidebarProjectScopeMenuState,
   resolveProjectStatusIndicator,
   resolveSidebarSweepKeys,
   resolveSidebarThreadStatus,

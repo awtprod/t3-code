@@ -293,9 +293,9 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
       : commandCenterEnvironment.bootstrap({ environmentId, input: {} }),
   );
   const { isMobile, setOpenMobile } = useSidebar();
-  const closeMobileSidebar = useCallback(() => {
+  const closeMobileSidebar = () => {
     if (isMobile) setOpenMobile(false);
-  }, [isMobile, setOpenMobile]);
+  };
   const shortcuts = useCommandCenterSidebarShortcuts();
   const automationsVisible = shortcuts.includes("automations");
   // The Automations shortcut carries the number of enabled recurring tasks whose

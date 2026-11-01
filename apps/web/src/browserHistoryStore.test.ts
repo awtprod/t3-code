@@ -438,8 +438,9 @@ describe("titles before registration", () => {
   });
 
   it("preserves environment host matching while a title is pending", () => {
+    readPreparedConnection.mockReturnValue({ httpBaseUrl: "http://192.0.2.2:3773" });
     recordVisitForThread(threadRef, "http://localhost:5173/app", 1);
-    setTitleForThreadUrl(threadRef, "http://192.0.2.2:5173/app", "Local App", "192.0.2.2");
+    settle("http://192.0.2.2:5173/app", "Local App");
     useBrowserHistoryStore.getState().registerThreadProject(threadRef, "proj-a");
     expect(useBrowserHistoryStore.getState().byProjectKey["proj-a"]?.[0]?.title).toBe("Local App");
   });

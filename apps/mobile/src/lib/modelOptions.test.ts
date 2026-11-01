@@ -11,7 +11,6 @@ import {
 } from "@t3tools/contracts";
 
 import {
-  buildModelMenuActions,
   buildModelOptions,
   describeUnavailableModelSelection,
   groupByProvider,

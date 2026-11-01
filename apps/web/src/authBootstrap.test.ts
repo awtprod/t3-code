@@ -11,7 +11,7 @@ import * as Effect from "effect/Effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { installEnvironmentHttpTest } from "../test/environmentHttpTest";
-import { __setPrimaryHttpRunnerForTests } from "./lib/runtime";
+import { __setPrimaryHttpRunnerForTests, type PrimaryHttpEffectRunner } from "./lib/runtime";
 
 type TestWindow = {
   location: URL;
@@ -143,6 +143,7 @@ describe("resolveInitialServerAuthGateState", () => {
     const testWindow = installTestBrowser("https://remote.example.test/");
     testWindow.desktopBridge = {
       getLocalEnvironmentBootstraps: () => [],
+      getLocalEnvironmentEnabled: () => true,
       recoverRemotePrimarySession,
     } as unknown as DesktopBridge;
     const { reconnectSavedDesktopEnvironment, resolveInitialServerAuthGateState } =
@@ -174,6 +175,7 @@ describe("resolveInitialServerAuthGateState", () => {
       const testWindow = installTestBrowser("https://remote.example.test/");
       testWindow.desktopBridge = {
         getLocalEnvironmentBootstraps: () => [],
+        getLocalEnvironmentEnabled: () => true,
         recoverRemotePrimarySession: recover,
       } as unknown as DesktopBridge;
       const { reconnectSavedDesktopEnvironment, resolveInitialServerAuthGateState } =
@@ -192,6 +194,7 @@ describe("resolveInitialServerAuthGateState", () => {
     const testWindow = installTestBrowser("https://remote.example.test/");
     testWindow.desktopBridge = {
       getLocalEnvironmentBootstraps: () => [],
+      getLocalEnvironmentEnabled: () => true,
     } as unknown as DesktopBridge;
     const { reconnectSavedDesktopEnvironment, resolveInitialServerAuthGateState } =
       await import("./environments/primary");
@@ -220,6 +223,7 @@ describe("resolveInitialServerAuthGateState", () => {
       const testWindow = installTestBrowser("https://remote.example.test/");
       testWindow.desktopBridge = {
         getLocalEnvironmentBootstraps: () => [],
+        getLocalEnvironmentEnabled: () => true,
         ...(failure === "rejected recovery"
           ? {
               recoverRemotePrimarySession: () => Promise.reject(new Error("Saved bearer rejected")),

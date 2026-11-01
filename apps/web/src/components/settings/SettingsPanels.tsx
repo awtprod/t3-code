@@ -31,7 +31,6 @@ import {
   HOSTED_APP_CHANNEL_LABEL,
   HOSTED_APP_CHANNEL_SWITCHING_ENABLED,
 } from "../../branding";
-import { IS_NIGHTLY_BUILD, NightlyMobileBetaRow } from "../NightlyMobileBeta";
 import { CliCommandSettingsRow } from "./CliCommandSettingsRow";
 import { MobileAppSettingsRow } from "./MobileAppSettingsRow";
 import {
@@ -176,9 +175,6 @@ function AboutVersionSection() {
   const selectedUpdateChannel = updateState?.channel ?? "latest";
   const selectedHostedAppChannel =
     hasDesktopBridge || !HOSTED_APP_CHANNEL_SWITCHING_ENABLED ? null : HOSTED_APP_CHANNEL;
-  // Show the beta app links as soon as someone picks Nightly, before the update installs.
-  const showNightlyMobileBeta =
-    IS_NIGHTLY_BUILD || (hasDesktopBridge && selectedUpdateChannel === "nightly");
   // A switch that failed part way leaves this app or a server on the other track.
   // With its updater off, a switch cannot move this app, so it is not counted.
   const appOffTrack =
@@ -409,7 +405,6 @@ function AboutVersionSection() {
           }
         />
       ) : null}
-      {showNightlyMobileBeta ? <NightlyMobileBetaRow /> : null}
       {hasDesktopBridge ? <CliCommandSettingsRow /> : null}
       {switchChannel === null ? null : (
         <UpdateTrackSwitchDialog channel={switchChannel} onClose={() => setSwitchChannel(null)} />
@@ -2074,7 +2069,6 @@ export function AboutSettingsPanel() {
               title={<AboutVersionTitle />}
               description="Current version of the application."
             />
-            {IS_NIGHTLY_BUILD ? <NightlyMobileBetaRow /> : null}
           </>
         )}
         <MobileAppSettingsRow />

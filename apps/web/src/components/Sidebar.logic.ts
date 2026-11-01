@@ -17,12 +17,6 @@ import { foldSearchQuery, rankSearchItems, scoreThreadSearch } from "@t3tools/sh
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/reactivity";
-import {
-  planPinnedReorder,
-  resolveSettledThreadTimestamp,
-  sortActiveThreadsByOrderKey,
-  sortSettledThreads,
-} from "@t3tools/client-runtime/state/thread-sort";
 import type { ThreadRouteTarget } from "../threadRoutes";
 import {
   effectiveSnoozed,
@@ -31,6 +25,9 @@ import {
 import {
   getThreadSortTimestamp,
   planPinnedReorder,
+  resolveSettledThreadTimestamp,
+  sortActiveThreadsByOrderKey,
+  sortSettledThreads,
   sortThreads,
   toSortableTimestamp,
   type ThreadSortInput,
@@ -834,60 +831,9 @@ export function shouldNavigateAfterProjectRemoval(input: {
   );
 }
 
-export function isContextMenuPointerDown(input: {
-  button: number;
-  ctrlKey: boolean;
-  isMac: boolean;
-}): boolean {
-  if (input.button === 2) return true;
-  return input.isMac && input.button === 0 && input.ctrlKey;
-}
-
-export function resolveThreadRowClassName(input: {
-  isActive: boolean;
-  isSelected: boolean;
-}): string {
-  const baseClassName =
-    "h-8 w-full translate-x-0 cursor-pointer justify-start rounded-md px-2 text-left text-sm select-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring";
-
-  if (input.isSelected && input.isActive) {
-    return cn(
-      baseClassName,
-      "bg-sidebar-row-active text-sidebar-foreground font-medium hover:bg-sidebar-row-active hover:text-sidebar-foreground",
-    );
-  }
-
-  if (input.isSelected) {
-    return cn(
-      baseClassName,
-      "bg-sidebar-row-selected text-sidebar-foreground hover:bg-sidebar-row-active hover:text-sidebar-foreground",
-    );
-  }
-
-  if (input.isActive) {
-    return cn(
-      baseClassName,
-      "bg-sidebar-row-active text-sidebar-foreground font-medium hover:bg-sidebar-row-active hover:text-sidebar-foreground",
-    );
-  }
-
-  return cn(
-    baseClassName,
-    "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
-  );
-}
-
-// ── Sidebar v2 status model ─────────────────────────────────────────
-// Six visual states, three colors: color is reserved for "act now"
-// (approval), "in motion" (working), and "broken" (failed). Ready is the
-// unlabeled resting state — the agent stopped and is waiting on the user,
-// whether it finished, asked a question, or proposed a plan. Waiting
-// (runtime status "idle") is the agent stopped with background work that will
-// wake it (subagents, monitors): not the user's turn yet, so it renders grey
-// like working, not as a false Done. Commands it left running, such as a dev
-// server, do not hold the thread; it reads as ready.
-// Unread completion is tracked separately: it describes whether a ready
-// thread needs attention, not what the thread is currently doing.
+// Color is reserved for approval, working and failed; ready is the unlabeled resting state.
+// Waiting (runtime "idle") has background work that will wake the agent, so it renders grey like
+// working; commands left running (a dev server) do not hold the thread.
 export type SidebarThreadStatus =
   | "approval"
   | "input"
