@@ -5,10 +5,11 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL, ProviderInstanceId } from "@t3tools/contracts";
 import type { OpenCodeSettings } from "../settings.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -227,13 +228,14 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
         );
 
         const readsAfterRecovery = modelReads;
+        // Fork rule: a healthy instance keeps refreshing on the managed interval.
         yield* TestClock.adjust("15 minutes");
-        assert.strictEqual(modelReads, readsAfterRecovery);
+        assert.isAbove(modelReads, readsAfterRecovery);
         assert.strictEqual(discoveryLogs.length, 1);
       }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
-  it.effect("does not retry a rejected server password in the background", () =>
+  it.effect("retries a rejected server password only on the managed interval", () =>
     Effect.gen(function* () {
       const releaseResponse = yield* Deferred.make<void>();
       const requested: Array<string> = [];
@@ -260,8 +262,25 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
       assert.strictEqual(snapshot?.auth.status, "unauthenticated");
       const readsAfterRejection = requested.length;
 
-      yield* TestClock.adjust("15 minutes");
+      // Nothing retries before the managed interval elapses, even as the clock approaches it.
+      yield* Effect.yieldNow;
       assert.strictEqual(requested.length, readsAfterRejection);
+      yield* TestClock.adjust(
+        Duration.subtract(DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL, Duration.seconds(1)),
+      );
+      assert.strictEqual(requested.length, readsAfterRejection);
+
+      // Fork rule: the managed interval refreshes every instance, so crossing it retries once.
+      yield* TestClock.adjust("1 second");
+      assert.isAbove(requested.length, readsAfterRejection);
+      const readsAfterFirstRetry = requested.length;
+
+      // Two more intervals add at most one probe request each (15 minutes = 3 intervals).
+      yield* TestClock.adjust(Duration.times(DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL, 2));
+      assert.isAtMost(requested.length - readsAfterFirstRetry, 2);
+      const current = yield* instance.snapshot.getSnapshot;
+      assert.strictEqual(current.status, "error");
+      assert.strictEqual(current.auth.status, "unauthenticated");
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 });
