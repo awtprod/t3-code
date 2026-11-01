@@ -365,6 +365,9 @@ const ACTION_ACCESS_REFUSALS: Record<PullRequestAction, string> = {
     "You need write access on this repository to approve workflows from a fork pull request.",
 };
 
+const AUTO_MERGE_DISALLOWED =
+  "This repository has auto-merge turned off. Merge it once it's ready, or turn on \"Allow auto-merge\" in the repository's settings.";
+
 /**
  * Why asking for a review is refused, and why the menu behind it is too. Write access is what the
  * hosts that state anything about this want; the ones that state nothing grant it, so this
@@ -2192,7 +2195,12 @@ export const make = Effect.gen(function* () {
               return Effect.fail(
                 new PullRequestOperationError({
                   operation: "runAction",
-                  detail: ACTION_ACCESS_REFUSALS[input.action],
+                  // Someone who may merge but not arm one is looking at a repository with
+                  // auto-merge turned off, not at missing access.
+                  detail:
+                    input.action === "enable-auto-merge" && viewer.actions.includes("merge")
+                      ? AUTO_MERGE_DISALLOWED
+                      : ACTION_ACCESS_REFUSALS[input.action],
                 }),
               );
             }

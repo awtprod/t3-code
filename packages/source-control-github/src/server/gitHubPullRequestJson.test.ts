@@ -997,6 +997,31 @@ describe("repository access decoding", () => {
     ).toEqual({ merge: true, squash: false, rebase: true });
   });
 
+  it("reads the auto-merge setting where GitHub reports it, and nothing where it does not", () => {
+    const withSetting = (autoMergeAllowed: boolean) =>
+      JSON.stringify({
+        data: {
+          repository: {
+            pullRequest: null,
+            mergeCommitAllowed: true,
+            squashMergeAllowed: true,
+            rebaseMergeAllowed: true,
+            autoMergeAllowed,
+            viewerPermission: "WRITE",
+          },
+        },
+      });
+    expect(expectSuccess(decodeViewerPermissionsJson(withSetting(false))).autoMergeAllowed).toBe(
+      false,
+    );
+    expect(expectSuccess(decodeViewerPermissionsJson(withSetting(true))).autoMergeAllowed).toBe(
+      true,
+    );
+    expect(expectSuccess(decodeViewerPermissionsJson(repositoryJson("WRITE")))).not.toHaveProperty(
+      "autoMergeAllowed",
+    );
+  });
+
   it("fails rather than defaulting open when a setting is missing", () => {
     const decoded = decodeViewerPermissionsJson(
       JSON.stringify({ data: { repository: { pullRequest: null, mergeCommitAllowed: true } } }),

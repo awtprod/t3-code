@@ -289,6 +289,35 @@ describe("gitHubViewerPermissions", () => {
     });
   });
 
+  it("keeps arming off a repository that switched auto-merge off, and the rest of the merge on", () => {
+    // GitHub answers "Auto merge is not allowed for this repository" to anyone who tries, so
+    // the panel must not make it the button a writer presses while checks run.
+    const actions = gitHubViewerPermissions({
+      canWrite: true,
+      canTriage: true,
+      canUpdate: true,
+      didAuthor: false,
+      autoMergeAllowed: false,
+    }).actions;
+    expect(actions).not.toContain("enable-auto-merge");
+    expect(actions).toContain("merge");
+    // One armed before the switch can still be taken back.
+    expect(actions).toContain("disable-auto-merge");
+
+    // Allowed, or not reported, it is offered as before.
+    for (const autoMergeAllowed of [true, undefined]) {
+      expect(
+        gitHubViewerPermissions({
+          canWrite: true,
+          canTriage: true,
+          canUpdate: true,
+          didAuthor: false,
+          ...(autoMergeAllowed === undefined ? {} : { autoMergeAllowed }),
+        }).actions,
+      ).toContain("enable-auto-merge");
+    }
+  });
+
   it("leaves a passer-by on a repository they can only read nothing but the review", () => {
     // Every open-source pull request somebody else opened: GitHub says no to all five actions
     // and to resolving, and yes to commenting and to every verdict.

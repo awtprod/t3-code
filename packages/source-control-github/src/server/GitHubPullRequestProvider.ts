@@ -68,11 +68,13 @@ export function gitHubViewerPermissions(access: GitHubViewerAccess): PullRequest
     actions: [
       ...(access.canDeleteBranch === true ? (["delete-branch"] as const) : []),
       // Arming a merge and taking the arming back are the merge, deferred: whoever may not
-      // merge here may not leave an instruction to merge later either.
+      // merge here may not leave an instruction to merge later either. A repository with
+      // auto-merge switched off refuses the arming whoever asks, so it is not offered there;
+      // taking back one armed before the switch is still allowed.
       ...(access.canWrite
         ? ([
             "merge",
-            "enable-auto-merge",
+            ...(access.autoMergeAllowed === false ? [] : (["enable-auto-merge"] as const)),
             "disable-auto-merge",
             "revert",
             "approve-workflows",
