@@ -54,7 +54,7 @@ Open Brain starts empty. Seed Andrew-approved lead-review criteria before enabli
 2. Generate an embedding with the profile's Google endpoint and model, requesting
    `output_dimensionality: 768`. Reject any response that is not exactly 768 finite numbers.
 3. Call the fixed Supabase `upsert_thought(content, payload)` RPC with `{ content, payload:
-{ metadata } }`; do not put the embedding in the RPC payload. Validate that the response contains
+   { metadata } }`; do not put the embedding in the RPC payload. Validate that the response contains
    a UUID `id` and a non-empty `fingerprint`.
 4. `PATCH /rest/v1/thoughts?id=eq.<returned UUID>` with an `embedding` containing exactly 768
    finite numbers, and require the update to succeed.
