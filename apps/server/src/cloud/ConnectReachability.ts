@@ -195,7 +195,7 @@ export class ConnectReachability extends Context.Service<
     readonly check: Effect.Effect<EnvironmentConnectReachability>;
     readonly latest: Effect.Effect<Option.Option<EnvironmentConnectReachability>>;
   }
->()("t3/cloud/ConnectReachability") {}
+>()("@awtprod/command-center/cloud/ConnectReachability") {}
 
 const make = Effect.gen(function* () {
   const runtime = yield* ManagedEndpointRuntime.CloudManagedEndpointRuntime;

@@ -168,7 +168,7 @@ export class GitHubProfileAuth extends Context.Service<
 export const layer = Layer.succeed(
   GitHubProfileAuth,
   GitHubProfileAuth.of({
-    get: (owner) =>
+    get: Effect.fn("GitHubProfileAuth.get")((owner: ApprovedGitHubProfile) =>
       Effect.tryPromise({
         try: () => readGitHubProfileCredential(owner),
         catch: () => new GitHubProfileUnavailableError({ account: owner }),
@@ -179,6 +179,7 @@ export const layer = Layer.succeed(
           fingerprint: `github.com:${NodeCrypto.createHash("sha256").update(token).digest("hex")}`,
         })),
       ),
+    ),
   }),
 );
 

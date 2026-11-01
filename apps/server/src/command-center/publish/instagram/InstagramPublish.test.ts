@@ -204,8 +204,9 @@ describe("durable Instagram production executor", () => {
         { concurrency: "unbounded" },
       );
       expect(new Set(admissions.map((r) => r.id)).size).toBe(1);
-      const approvals = yield* Effect.all(
-        admissions.map((r) => f.service.approve(r.id, r.digest, session)),
+      const approvals = yield* Effect.forEach(
+        admissions,
+        (r) => f.service.approve(r.id, r.digest, session),
         { concurrency: "unbounded" },
       );
       expect(new Set(approvals.map((r) => r.approvalId)).size).toBe(1);
@@ -345,10 +346,9 @@ describe("durable Instagram production executor", () => {
       expect(results.filter((r) => r === null)).toHaveLength(6);
       expect(new Set(admitted.map((r) => r.id)).size).toBe(1);
       expect(yield* f.sql`SELECT id FROM command_center_instagram_reels`).toHaveLength(1);
-      yield* Effect.all(
-        admitted.map((r) => f.service.approve(r.id, r.digest, session)),
-        { concurrency: "unbounded" },
-      );
+      yield* Effect.forEach(admitted, (r) => f.service.approve(r.id, r.digest, session), {
+        concurrency: "unbounded",
+      });
       yield* TestClock.setTime(DUE);
       const second = yield* make(f.ports);
       yield* Effect.all([f.service.tick, second.tick], { concurrency: "unbounded" });

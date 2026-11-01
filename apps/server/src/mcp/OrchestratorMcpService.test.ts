@@ -27,7 +27,6 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -2444,15 +2443,14 @@ describe("OrchestratorMcpService provider resolution", () => {
               }),
               Layer.mock(ProjectService.ProjectService)({
                 getById: () =>
-                  Effect.succeed(
-                    Option.some({
-                      id: projectId,
-                      workspaceRoot,
-                      defaultModelSelection: existing.modelSelection,
-                    } as never),
-                  ),
+                  Effect.succeedSome({
+                    id: projectId,
+                    workspaceRoot,
+                    defaultModelSelection: existing.modelSelection,
+                  } as never),
               }),
               Layer.mock(SecretRequests.SecretRequests)({}),
+              Layer.mock(RemoteDelegation.RemoteDelegation)({}),
               Layer.mock(ScheduledTaskService.ScheduledTaskService)({
                 list: () => Effect.succeed({ tasks: [existing] }),
                 upsert: (input) =>

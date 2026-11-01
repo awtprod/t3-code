@@ -10,7 +10,9 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import * as TestClock from "effect/testing/TestClock";
 import type {
   OrchestrationProjectShell,
@@ -31,12 +33,10 @@ import * as SourceControlProviderRegistry from "../sourceControl/SourceControlPr
 import type { SourceControlProvider } from "@t3tools/source-control-core/server/SourceControlProvider";
 import { isSshRemoteUrl } from "@t3tools/shared/sourceControl";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
-import * as GitHubApi from "@t3tools/source-control-github/server/GitHubApi";
+import { driver as gitHubDriver } from "@t3tools/source-control-github/server/driver";
+import * as GitHubRequestPolicy from "@t3tools/source-control-github/server/GitHubRequestPolicy";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as GitHubProfileAuth from "../sourceControl/GitHubProfileAuth.ts";
-import * as GitHubCredentials from "@t3tools/source-control-github/server/GitHubCredentials";
-import * as GitHubPullRequestApi from "@t3tools/source-control-github/server/GitHubPullRequestApi";
-import * as GitHubPullRequestProvider from "@t3tools/source-control-github/server/GitHubPullRequestProvider";
-import * as GitHubQuota from "@t3tools/source-control-github/server/GitHubQuota";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 import { fakePullRequestProvider } from "@t3tools/source-control-testing/fakeSourceControlDriver";
 import {
@@ -260,6 +260,30 @@ const sshAliasHost = {
         )
       : Effect.succeed(null),
 } as SourceControlProvider["Service"];
+
+/** GitHub's driver as the server builds it, over `http`, with `host-token` saved for github.com. */
+const makeGitHubPullRequests = (http: Layer.Layer<HttpClient.HttpClient>) =>
+  gitHubDriver.make.pipe(
+    Effect.map(({ pullRequests }) => {
+      assert.isNotNull(pullRequests);
+      return pullRequests;
+    }),
+    Effect.provide(
+      Layer.mergeAll(
+        http,
+        TestSourceControlHost.layer({
+          settings: {
+            ...DEFAULT_SERVER_SETTINGS,
+            sourceControlHosts: { github: { tokens: { "github.com": "host-token" } } },
+          },
+        }),
+        SourceControlRateLimit.layer,
+        NodeServices.layer,
+      ),
+    ),
+    // No ambient GH_TOKEN or app sign-in, so the saved token is the host's own credential.
+    Effect.provideService(HostProcess.Environment, {}),
+  );
 
 function makeService(input: {
   readonly githubProfile?: GitHubProfileAuth.GitHubProfileAuth["Service"]["get"];
@@ -2807,7 +2831,7 @@ it.effect(
       let unavailable = false;
       const readTokens: string[] = [];
       const read = Effect.gen(function* () {
-        const pinned = yield* GitHubApi.PinnedGitHubCredential;
+        const pinned = yield* GitHubRequestPolicy.PinnedGitHubCredential;
         const selected = pinned === null ? "host-default" : Redacted.value(pinned.token);
         readTokens.push(selected);
         if (selected === "host-default") {
@@ -2890,7 +2914,7 @@ it.effect(
       let actions = 0;
       const verifiedWith: string[] = [];
       // The host's own account is 101; the profile's is 202. Each answers for its own token.
-      const identity = Effect.map(GitHubApi.PinnedGitHubCredential, (pinned) =>
+      const identity = Effect.map(GitHubRequestPolicy.PinnedGitHubCredential, (pinned) =>
         pinned === null
           ? { accountId: "101", viewer: "host", credentialFingerprint: "host" }
           : {
@@ -2990,7 +3014,7 @@ it.effect("runs every pull request write and uncached read as the repository's p
     const used: Array<readonly [operation: string, token: string, scope: string]> = [];
     const record = <A>(operation: string, value: A) =>
       Effect.gen(function* () {
-        const pinned = yield* GitHubApi.PinnedGitHubCredential;
+        const pinned = yield* GitHubRequestPolicy.PinnedGitHubCredential;
         const scope = yield* SourceControlRateLimit.CredentialScope;
         used.push([operation, pinned === null ? "host" : Redacted.value(pinned.token), scope]);
         return value;
@@ -3031,6 +3055,12 @@ it.effect("runs every pull request write and uncached read as the repository's p
             record("labelCandidates", { candidates: [], truncated: false }),
           getReviewThreadComments: () =>
             record("threadComments", { comments: [], nextCursor: null }),
+          // The changed-file check every expansion reads first.
+          getDiffFilePaths: () =>
+            record("diffFilePaths", {
+              files: [{ oldPath: "a.ts", newPath: "a.ts" }],
+              nextCursor: null,
+            }),
           getDiffFileContents: () =>
             record("diffFileContents", { oldContents: "a", newContents: "b" }),
         }),
@@ -3082,6 +3112,7 @@ it.effect("runs every pull request write and uncached read as the repository's p
       "reviewerCandidates",
       "labelCandidates",
       "threadComments",
+      "diffFilePaths",
       "diffFileContents",
     ];
 
@@ -3112,19 +3143,6 @@ it.effect("routes, verifies and writes a profile repository with the profile's t
       }),
     );
     const requests: Array<{ operation: string; authorization: string | undefined }> = [];
-    const credentials = Layer.succeed(
-      GitHubCredentials.GitHubCredentials,
-      GitHubCredentials.GitHubCredentials.of({
-        get: (host) =>
-          Effect.succeed({
-            host,
-            token: Redacted.make("host-token"),
-            source: "gh" as const,
-            fingerprint: `${host}:host-token`,
-          }),
-        invalidate: () => Effect.void,
-      }),
-    );
     const http = Layer.succeed(
       HttpClient.HttpClient,
       HttpClient.make((request) =>
@@ -3160,13 +3178,14 @@ it.effect("routes, verifies and writes a profile repository with the profile's t
             body = {
               data: {
                 node: {
+                  __typename: "Repository",
                   defaultBranchRef: { name: "main" },
-                  ref: { target: { oid: "abc123" } },
+                  ref: { target: { __typename: "Commit", oid: "abc123" } },
                 },
               },
             };
           } else if (operation.includes("updateRefs(")) {
-            body = { data: { updateRefs: {} } };
+            body = { data: { updateRefs: { clientMutationId: null } } };
           } else {
             body = {
               data: {
@@ -3174,6 +3193,7 @@ it.effect("routes, verifies and writes a profile repository with the profile's t
                   mergeCommitAllowed: true,
                   squashMergeAllowed: true,
                   rebaseMergeAllowed: true,
+                  autoMergeAllowed: true,
                   viewerPermission: "READ",
                   pullRequest: {
                     viewerCanUpdate: false,
@@ -3184,25 +3204,16 @@ it.effect("routes, verifies and writes a profile repository with the profile's t
               },
             };
           }
-          return HttpClientResponse.fromWeb(request, new Response(JSON.stringify(body)));
+          return HttpClientResponse.fromWeb(
+            request,
+            new Response(JSON.stringify(body), {
+              headers: { "content-type": "application/json" },
+            }),
+          );
         }),
       ),
     );
-    const provider = yield* GitHubPullRequestProvider.make.pipe(
-      Effect.provide(
-        GitHubPullRequestApi.layer.pipe(
-          Layer.provide(
-            GitHubApi.layer.pipe(
-              Layer.provide(Layer.mergeAll(credentials, http)),
-              Layer.provide(GitHubQuota.layer),
-              Layer.provide(SourceControlRateLimit.layer),
-            ),
-          ),
-          Layer.provide(TestSourceControlHost.layer()),
-          Layer.provide(NodeServices.layer),
-        ),
-      ),
-    );
+    const provider = yield* makeGitHubPullRequests(http);
     const service = yield* makeService({
       projects: [
         project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
@@ -3269,19 +3280,6 @@ it.effect("merges, comments and reviews a profile repository with the profile's 
       }),
     );
     const requests: Array<{ operation: string; authorization: string | undefined }> = [];
-    const credentials = Layer.succeed(
-      GitHubCredentials.GitHubCredentials,
-      GitHubCredentials.GitHubCredentials.of({
-        get: (host) =>
-          Effect.succeed({
-            host,
-            token: Redacted.make("host-token"),
-            source: "gh" as const,
-            fingerprint: `${host}:host-token`,
-          }),
-        invalidate: () => Effect.void,
-      }),
-    );
     const http = Layer.succeed(
       HttpClient.HttpClient,
       HttpClient.make((request) =>
@@ -3299,7 +3297,7 @@ it.effect("merges, comments and reviews a profile repository with the profile's 
                   ? "comment"
                   : text.includes("query PullRequestActionState")
                     ? "actionState"
-                    : text.includes("{ pullRequest(number: $number) { id } }")
+                    : text.includes("query PullRequestNodeId")
                       ? "nodeId"
                       : text.includes("viewerCanUpdate viewerDidAuthor")
                         ? "viewerAccess"
@@ -3339,6 +3337,7 @@ it.effect("merges, comments and reviews a profile repository with the profile's 
                                   mergeCommitAllowed: true,
                                   squashMergeAllowed: true,
                                   rebaseMergeAllowed: true,
+                                  autoMergeAllowed: true,
                                   viewerPermission: "WRITE",
                                   pullRequest: {
                                     viewerCanUpdate: true,
@@ -3349,25 +3348,16 @@ it.effect("merges, comments and reviews a profile repository with the profile's 
                               },
                             }
                           : {};
-          return HttpClientResponse.fromWeb(request, new Response(JSON.stringify(body)));
+          return HttpClientResponse.fromWeb(
+            request,
+            new Response(JSON.stringify(body), {
+              headers: { "content-type": "application/json" },
+            }),
+          );
         }),
       ),
     );
-    const provider = yield* GitHubPullRequestProvider.make.pipe(
-      Effect.provide(
-        GitHubPullRequestApi.layer.pipe(
-          Layer.provide(
-            GitHubApi.layer.pipe(
-              Layer.provide(Layer.mergeAll(credentials, http)),
-              Layer.provide(GitHubQuota.layer),
-              Layer.provide(SourceControlRateLimit.layer),
-            ),
-          ),
-          Layer.provide(TestSourceControlHost.layer()),
-          Layer.provide(NodeServices.layer),
-        ),
-      ),
-    );
+    const provider = yield* makeGitHubPullRequests(http);
     const service = yield* makeService({
       projects: [
         project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),

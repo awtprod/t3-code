@@ -26,6 +26,7 @@ export const layer = Layer.succeed(
     revokeThread: () => Effect.void,
     registerThreadScope: () => Effect.void,
     unregisterThreadScope: () => Effect.void,
+    // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
     scopeForThread: () => Effect.succeed(undefined),
     revokeAll: Effect.void,
   }),

@@ -1753,20 +1753,21 @@ const make = Effect.gen(function* () {
    * repository, and otherwise run in the project folder, where there is
    * nothing to branch from.
    */
-  const scheduledTaskWorkspaceStrategy = (projectId: ProjectId, boundToThread: boolean) =>
-    Effect.gen(function* () {
-      const root: ScheduledTask["workspaceStrategy"] = { type: "root" };
-      if (boundToThread) return root;
-      const project = yield* requireProject(projectId);
-      // A check that cannot answer keeps the worktree default; the run reports
-      // whatever is wrong with the repository.
-      const isRepository = yield* gitWorkflow
-        .isRepository(project.workspaceRoot)
-        .pipe(Effect.orElseSucceed(() => true));
-      return isRepository
-        ? ({ type: "worktree", baseRef: "main", startFromOrigin: true } as const)
-        : root;
-    });
+  const scheduledTaskWorkspaceStrategy = Effect.fn(
+    "OrchestratorMcpService.scheduledTaskWorkspaceStrategy",
+  )(function* (projectId: ProjectId, boundToThread: boolean) {
+    const root: ScheduledTask["workspaceStrategy"] = { type: "root" };
+    if (boundToThread) return root;
+    const project = yield* requireProject(projectId);
+    // A check that cannot answer keeps the worktree default; the run reports
+    // whatever is wrong with the repository.
+    const isRepository = yield* gitWorkflow
+      .isRepository(project.workspaceRoot)
+      .pipe(Effect.orElseSucceed(() => true));
+    return isRepository
+      ? ({ type: "worktree", baseRef: "main", startFromOrigin: true } as const)
+      : root;
+  });
 
   const scheduledTaskRunModes = Effect.fn("OrchestratorMcpService.scheduledTaskRunModes")(
     function* (task: ScheduledTask) {

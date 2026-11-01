@@ -621,8 +621,9 @@ it.effect(
     return Effect.gen(function* () {
       yield* seedAutomation(fixture);
       const runtime = yield* AutomationRuntime;
-      const starts = yield* Effect.all(
-        ["manual-overlap", "schedule-overlap"].map((idempotencyKey) =>
+      const starts = yield* Effect.forEach(
+        ["manual-overlap", "schedule-overlap"],
+        (idempotencyKey) =>
           runtime.start({
             automationId: fixture.id,
             expectedSpaceId: "sample-space",
@@ -630,7 +631,6 @@ it.effect(
             expectedConfigCommitSha: commitSha,
             expectedDefinitionDigest: definitionDigest,
           }),
-        ),
         { concurrency: "unbounded" },
       );
       expect(new Set(starts.map((execution) => execution.id)).size).toBe(1);

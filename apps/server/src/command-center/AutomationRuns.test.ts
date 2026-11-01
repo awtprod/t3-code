@@ -480,8 +480,9 @@ bothClocks(
 
       // Overlapping requests each sweep expired approvals; only one may
       // settle it, and none may fail on its audit events.
-      const errors = yield* Effect.all(
-        [1, 2, 3].map(() =>
+      const errors = yield* Effect.forEach(
+        [1, 2, 3],
+        () =>
           runs
             .decideApproval({
               approvalId: approval!.id,
@@ -489,7 +490,6 @@ bothClocks(
               decision: "approved",
             })
             .pipe(Effect.flip),
-        ),
         { concurrency: "unbounded" },
       );
       for (const error of errors) expect(error).toMatchObject({ reason: "conflict" });

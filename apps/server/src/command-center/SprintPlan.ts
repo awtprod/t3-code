@@ -1542,8 +1542,8 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
     const page = rows.slice(0, limit);
     const entries = yield* Effect.forEach(page, (row) =>
       Effect.all([
-        row.beforeJson === null ? Effect.succeed(undefined) : decodeJson(row.beforeJson),
-        row.afterJson === null ? Effect.succeed(undefined) : decodeJson(row.afterJson),
+        row.beforeJson === null ? Effect.void : decodeJson(row.beforeJson),
+        row.afterJson === null ? Effect.void : decodeJson(row.afterJson),
         decodeJson(row.actorJson).pipe(Effect.flatMap(decodeActor)),
         decodeJson(row.provenanceJson).pipe(Effect.flatMap(decodeMutationProvenance)),
       ]).pipe(

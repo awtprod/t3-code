@@ -34,7 +34,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as GitHubProfileAuth from "./GitHubProfileAuth.ts";
-import * as GitHubApi from "@t3tools/source-control-github/server/GitHubApi";
+import * as GitHubRequestPolicy from "@t3tools/source-control-github/server/GitHubRequestPolicy";
 import { parseGitHubRepositorySelector } from "@t3tools/source-control-github/server/gitHubRepositoryResolution";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { cloneUrlForProtocol, cloneUrlProtocol } from "@t3tools/shared/cloneUrl";
@@ -259,7 +259,7 @@ export const make = Effect.gen(function* () {
       const urls = yield* profile === null
         ? lookup
         : lookup.pipe(
-            Effect.provideService(GitHubApi.PinnedGitHubCredential, {
+            Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, {
               host: "github.com",
               token: profile.token,
               credentialFingerprint: profile.fingerprint,
@@ -580,7 +580,7 @@ export const make = Effect.gen(function* () {
       const urls = yield* profile === null
         ? loadRepository
         : loadRepository.pipe(
-            Effect.provideService(GitHubApi.PinnedGitHubCredential, {
+            Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, {
               host: "github.com",
               token: profile.token,
               credentialFingerprint: profile.fingerprint,

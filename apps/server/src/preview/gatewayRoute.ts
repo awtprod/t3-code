@@ -129,24 +129,23 @@ const emptyOnAbsentBody = (
  * server does. Mirrors `authenticateRawRouteWithScope` in `../http.ts`; the
  * gateway deliberately has no auth path of its own.
  */
-const authenticateGatewayRequest = (
+const authenticateGatewayRequest = Effect.fn("authenticateGatewayRequest")(function* (
   scope: typeof AuthOrchestrationReadScope | typeof AuthOrchestrationOperateScope,
-) =>
-  Effect.gen(function* () {
-    const request = yield* HttpServerRequest.HttpServerRequest;
-    const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
-    const session = yield* serverAuth.authenticateHttpRequest(request).pipe(
-      Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-        failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
-      ),
-      Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-        failEnvironmentInternal("internal_error", error),
-      ),
-    );
-    if (!session.scopes.includes(scope)) {
-      return yield* failEnvironmentScopeRequired(scope);
-    }
-  });
+) {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+  const session = yield* serverAuth.authenticateHttpRequest(request).pipe(
+    Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
+      failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
+    ),
+    Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+      failEnvironmentInternal("internal_error", error),
+    ),
+  );
+  if (!session.scopes.includes(scope)) {
+    return yield* failEnvironmentScopeRequired(scope);
+  }
+});
 
 const environmentErrorResponses = {
   EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,

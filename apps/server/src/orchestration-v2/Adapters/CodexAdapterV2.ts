@@ -1778,29 +1778,30 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
          * Before any model turn: the elevated Windows sandbox must be ready and
          * the live probe must pass through the admitted profile. Fails closed.
          */
-        const verifyCommandCenterIsolation = (launch: CommandCenterCodexLaunch) =>
-          Effect.gen(function* () {
-            const cwd = launch.cwd;
-            if (launch.platform === "win32") {
-              if (launch.windowsSandboxMode === undefined) {
-                return yield* new CodexCommandCenterSessionRefusedError({
-                  issue: "Command Center did not select a native Windows sandbox mode.",
-                });
-              }
-              yield* ensureCommandCenterWindowsSandbox({
-                client: client.raw,
-                cwd,
-                mode: launch.windowsSandboxMode,
-                setupCompleted: Deferred.await(windowsSandboxSetupCompleted),
+        const verifyCommandCenterIsolation = Effect.fn(
+          "CodexAdapterV2.verifyCommandCenterIsolation",
+        )(function* (launch: CommandCenterCodexLaunch) {
+          const cwd = launch.cwd;
+          if (launch.platform === "win32") {
+            if (launch.windowsSandboxMode === undefined) {
+              return yield* new CodexCommandCenterSessionRefusedError({
+                issue: "Command Center did not select a native Windows sandbox mode.",
               });
             }
-            yield* verifyCommandCenterCodexIsolation({
+            yield* ensureCommandCenterWindowsSandbox({
               client: client.raw,
               cwd,
-              permissionProfile: launch.permissionProfile,
-              platform: launch.platform,
+              mode: launch.windowsSandboxMode,
+              setupCompleted: Deferred.await(windowsSandboxSetupCompleted),
             });
+          }
+          yield* verifyCommandCenterCodexIsolation({
+            client: client.raw,
+            cwd,
+            permissionProfile: launch.permissionProfile,
+            platform: launch.platform,
           });
+        });
         const commandCenterProfileFor = (
           launch: CommandCenterCodexLaunch,
           runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"],
@@ -1829,25 +1830,26 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
          * off; caller sandbox and approval overrides are dropped. Sent raw
          * because the generated request schema has no `permissions` field.
          */
-        const startCommandCenterTurn = (
-          launch: CommandCenterCodexLaunch,
-          runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"],
-          params: CodexTurnStartParamsWithCollaborationMode,
-        ) =>
-          Effect.gen(function* () {
+        const startCommandCenterTurn = Effect.fn("CodexAdapterV2.startCommandCenterTurn")(
+          function* (
+            launch: CommandCenterCodexLaunch,
+            runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"],
+            params: CodexTurnStartParamsWithCollaborationMode,
+          ) {
             const permissionProfile = yield* commandCenterProfileFor(launch, runtimeMode);
             const raw = yield* client.raw.request(
               "turn/start",
               commandCenterTurnStartParams(yield* withCommandCenterCwd(params), permissionProfile),
             );
             return yield* decodeCodexTurnStartResponse(raw);
-          });
-        const startCommandCenterThread = (
-          launch: CommandCenterCodexLaunch,
-          runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"],
-          params: ReturnType<typeof codexThreadRuntimeParams>,
-        ) =>
-          Effect.gen(function* () {
+          },
+        );
+        const startCommandCenterThread = Effect.fn("CodexAdapterV2.startCommandCenterThread")(
+          function* (
+            launch: CommandCenterCodexLaunch,
+            runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"],
+            params: ReturnType<typeof codexThreadRuntimeParams>,
+          ) {
             const permissionProfile = yield* commandCenterProfileFor(launch, runtimeMode);
             const raw = yield* client.raw.request(
               "thread/start",
@@ -1859,7 +1861,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const mismatch = commandCenterPermissionProfileMismatch(permissionProfile, raw);
             if (mismatch !== undefined) return yield* mismatch;
             return yield* decodeCodexThreadStartResponse(raw);
-          });
+          },
+        );
         const additionalContextByThread = yield* Ref.make(
           new Map<
             string,

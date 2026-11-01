@@ -34,7 +34,7 @@ import {
   verifyCommandCenterCodexIsolation,
 } from "./CodexCommandCenterIsolation.ts";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
-import { makeReplayServerConfig } from "./CodexAdapterV2.testkit.ts";
+import { makeReplayServerConfig } from "../testkit/ProviderReplayHarness.ts";
 
 const DEFAULT_SETTINGS = Schema.decodeSync(CodexSettings)({});
 

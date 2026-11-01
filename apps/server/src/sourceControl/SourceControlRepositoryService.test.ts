@@ -7,6 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
+import * as Predicate from "effect/Predicate";
 import * as Redacted from "effect/Redacted";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -22,7 +23,7 @@ import type * as SourceControlProvider from "@t3tools/source-control-core/server
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as SourceControlRepositoryService from "./SourceControlRepositoryService.ts";
 import * as GitHubProfileAuth from "./GitHubProfileAuth.ts";
-import * as GitHubApi from "@t3tools/source-control-github/server/GitHubApi";
+import * as GitHubRequestPolicy from "@t3tools/source-control-github/server/GitHubRequestPolicy";
 
 const previousProfileMap = process.env.COMMAND_CENTER_GITHUB_PROFILE_MAP;
 beforeAll(() => {
@@ -164,7 +165,7 @@ it.effect("publishes exampleowner through its selected credential and an HTTPS r
   const provider = makeProvider({
     createRepository: () =>
       Effect.gen(function* () {
-        const pin = yield* GitHubApi.PinnedGitHubCredential;
+        const pin = yield* GitHubRequestPolicy.PinnedGitHubCredential;
         pins.push(pin?.credentialFingerprint ?? null);
         return {
           nameWithOwner: "exampleowner/test-repo",
@@ -220,7 +221,9 @@ it.effect("normalizes a managed GitHub URL before selecting its profile", () => 
     getRepositoryCloneUrls: (input) =>
       Effect.gen(function* () {
         requested.push(input.repository);
-        pins.push((yield* GitHubApi.PinnedGitHubCredential)?.credentialFingerprint ?? null);
+        pins.push(
+          (yield* GitHubRequestPolicy.PinnedGitHubCredential)?.credentialFingerprint ?? null,
+        );
         return {
           nameWithOwner: "exampleowner/sample",
           url: "https://github.com/exampleowner/sample",
@@ -508,18 +511,16 @@ it.effect(
                   setUpstream: true,
                 };
               }).pipe(
-                Effect.flatMap((result) =>
-                  result === null
-                    ? Effect.fail(
-                        new GitCommandError({
-                          operation: "GitVcsDriver.pushCurrentBranch.pushWithRequestedRemote",
-                          command: "git push",
-                          cwd: "/workspace",
-                          detail: "Git command exited with a non-zero status.",
-                          reason: "authentication_failed",
-                        }),
-                      )
-                    : Effect.succeed(result),
+                Effect.filterOrFail(
+                  Predicate.isNotNull,
+                  () =>
+                    new GitCommandError({
+                      operation: "GitVcsDriver.pushCurrentBranch.pushWithRequestedRemote",
+                      command: "git push",
+                      cwd: "/workspace",
+                      detail: "Git command exited with a non-zero status.",
+                      reason: "authentication_failed",
+                    }),
                 ),
               ),
           },
@@ -789,7 +790,6 @@ it.effect(
     );
   },
 );
-
 
 const lookupFailingWith = (cause: unknown, detail: string) =>
   Effect.gen(function* () {

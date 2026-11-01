@@ -144,6 +144,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
 
   const resolveDurableScope = (threadId: ThreadId): Effect.Effect<McpThreadScope | undefined> => {
     const resolver = options.resolveThreadScope ?? activeThreadScopeResolver;
+    // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
     if (resolver === undefined) return Effect.succeed(undefined);
     // Fail closed: a resolver defect grants no scope, it never widens one.
     return resolver(threadId).pipe(

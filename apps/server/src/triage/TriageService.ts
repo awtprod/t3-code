@@ -34,7 +34,7 @@ export class TriageService extends Context.Service<
       input: ServerPrepareTriageInput,
     ) => Effect.Effect<ServerPrepareTriageResult, ServerPrepareTriageError>;
   }
->()("t3/triage/TriageService") {}
+>()("@awtprod/command-center/triage/TriageService") {}
 
 const describeClient = (client: AuthClientPresentationMetadata) =>
   [

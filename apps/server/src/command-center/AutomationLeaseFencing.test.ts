@@ -37,7 +37,7 @@ const commitSha = "1234567890abcdef1234567890abcdef12345678";
 const definitionDigest = `sha256:${"d".repeat(64)}`;
 const spaceId = SpaceId.make("space-a");
 
-const space = Schema.decodeUnknownSync(Space)({
+const space = Schema.decodeSync(Space)({
   id: spaceId,
   slug: "space-a",
   displayName: "Space A",
@@ -200,8 +200,9 @@ const startInput = (target: Automation, key: string) =>
 
       harness.gate = yield* Deferred.make<void>();
       // Three clicks arrive together; the step blocks while they race.
-      const clicks = yield* Effect.all(
-        [1, 2, 3].map(() => runs.decideApproval(decision).pipe(Effect.exit)),
+      const clicks = yield* Effect.forEach(
+        [1, 2, 3],
+        () => runs.decideApproval(decision).pipe(Effect.exit),
         { concurrency: "unbounded" },
       ).pipe(Effect.forkChild);
       yield* awaitInvocations(harness, 1);

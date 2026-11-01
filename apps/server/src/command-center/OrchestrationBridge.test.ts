@@ -33,6 +33,7 @@ import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.t
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -133,10 +134,11 @@ function makeHarness(
         }),
       delete: () => Effect.die("unused"),
       getById: (id) => Effect.succeed(id === projectId ? Option.some(project) : Option.none()),
-      getByWorkspaceRoot: () => Effect.succeed(Option.some(project)),
+      getByWorkspaceRoot: () => Effect.succeedSome(project),
       snapshot: Effect.die("unused"),
       getShell: () => Effect.die("unused"),
       listShells: () => Effect.die("unused"),
+      listPage: () => Effect.die("unused"),
     }),
     Layer.mock(GitWorkflow.GitWorkflowService)({
       createWorktree,
@@ -170,7 +172,7 @@ function makeHarness(
     ]),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
       namedProjectsRoot: "/projects",
-      folderForThread: () => Effect.succeed(Option.none()),
+      folderForThread: () => Effect.succeedNone,
     }),
   );
   const layerLaunch = ThreadLaunch.layer.pipe(
@@ -199,7 +201,7 @@ function makeHarness(
         layerExternalServices,
         layerServerConfig,
         layerDatabase,
-        NodeServices.layer,
+        DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer)),
       ),
     ),
   );

@@ -7,7 +7,18 @@ import * as Layer from "effect/Layer";
 import { McpServer } from "effect/ai";
 
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
+import { AutomationDefinitionConfig } from "../command-center/AutomationDefinitionConfig.ts";
+import { AutomationRuns } from "../command-center/AutomationRuns.ts";
+import { GmailDrafts } from "../command-center/GmailDrafts.ts";
+import { GoogleReadConnector } from "../command-center/GoogleReadConnector.ts";
+import { MemorySearchIndex } from "../command-center/MemorySearchIndex.ts";
+import { PhoneCallProposals } from "../command-center/phone/PhoneCallProposals.ts";
+import { PhoneCalls } from "../command-center/phone/PhoneCalls.ts";
+import * as ReadinessGate from "../command-center/ReadinessGate.ts";
+import { CommandCenterService } from "../command-center/Service.ts";
+import { SpaceActivity } from "../command-center/SpaceActivity.ts";
 import { ServerConfig } from "../config.ts";
+import { SupabaseMcpConnector } from "../database/SupabaseMcpConnector.ts";
 import { DeviceService } from "../device/DeviceService.ts";
 import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
 import { GitWorkflowService } from "../git/GitWorkflowService.ts";
@@ -75,6 +86,18 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(ThreadManagementService)({}),
   Layer.mock(ThreadSearch)({}),
   Layer.mock(VcsStatusBroadcaster)({}),
+  // Command Center toolkits registered by the production MCP layer.
+  Layer.mock(AutomationDefinitionConfig)({}),
+  Layer.mock(AutomationRuns)({}),
+  Layer.mock(CommandCenterService)({}),
+  Layer.mock(GmailDrafts)({}),
+  Layer.mock(GoogleReadConnector)({}),
+  Layer.mock(MemorySearchIndex)({}),
+  Layer.mock(PhoneCallProposals)({}),
+  Layer.mock(PhoneCalls)({}),
+  Layer.mock(SpaceActivity)({}),
+  Layer.mock(SupabaseMcpConnector)({}),
+  ReadinessGate.layer,
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
 const utf8Bytes = (text: string) => Buffer.byteLength(text, "utf8");

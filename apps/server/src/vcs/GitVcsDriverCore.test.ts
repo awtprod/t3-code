@@ -1886,11 +1886,11 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           const locales: Array<string | undefined> = [];
           const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
           const spawner = ChildProcessSpawner.make((command) => {
-            const args = ChildProcess.isStandardCommand(command)
-              ? gitSubcommandArgs(command.args)
-              : [];
-            if (args.includes("worktree") || args[0] === "branch" || args[0] === "checkout") {
-              locales.push(command.options.env?.LC_ALL);
+            if (ChildProcess.isStandardCommand(command)) {
+              const args = gitSubcommandArgs(command.args);
+              if (args.includes("worktree") || args[0] === "branch" || args[0] === "checkout") {
+                locales.push(command.options.env?.LC_ALL);
+              }
             }
             return delegate.spawn(command);
           });

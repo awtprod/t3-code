@@ -15,6 +15,7 @@ import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
+  ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   ChatAttachmentId,
   ComposerContextId,
   type ChatAttachment,
@@ -929,6 +930,17 @@ const preparationSettled = (threadId: ThreadId) =>
     return yield* threads.getThreadProjection(threadId);
   });
 
+/** Settles once `commandId` has stored its events, which also commits its outbox effects. */
+const commandStored = (threadId: ThreadId, commandId: CommandId) =>
+  Effect.gen(function* () {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    yield* threads.streamStoredEventsFrom({ threadId }).pipe(
+      Stream.filter((stored) => stored.commandId === commandId),
+      Stream.runHead,
+    );
+    return yield* threads.getThreadProjection(threadId);
+  });
+
 function scheduledTaskInput(id: string, targetProjectId: ProjectId) {
   return {
     id: ScheduledTaskId.make(id),
@@ -1138,7 +1150,6 @@ it.effect("starts the worktree from the local base branch when origin cannot be 
   });
   return Effect.gen(function* () {
     const launches = yield* ThreadLaunch.ThreadLaunchService;
-    const threads = yield* ThreadManagement.ThreadManagementService;
     const launched = yield* launches.launch(
       launchInput({
         command: "command:launch:fetch-failure",
@@ -1147,12 +1158,7 @@ it.effect("starts the worktree from the local base branch when origin cannot be 
         workspace: { type: "worktree", baseRef: "main", startFromOrigin: true },
       }),
     );
-    yield* waitUntil(() =>
-      threads
-        .getThreadProjection(launched.threadId)
-        .pipe(Effect.map((projection) => projection.thread.worktreePath !== null)),
-    );
-    const projection = yield* threads.getThreadProjection(launched.threadId);
+    const projection = yield* preparationSettled(launched.threadId);
     assert.notEqual(projection.runs[0]?.status, "failed");
     assert.equal(projection.thread.worktreePath, "/repo-worktrees/feature");
     assert.isUndefined(projection.turnItems.find((item) => item.type === "error"));
@@ -1169,7 +1175,6 @@ it.effect(
     return Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       const outbox = yield* EffectOutbox.EffectOutboxV2;
-      const threads = yield* ThreadManagement.ThreadManagementService;
       const launched = yield* launches.launch(
         launchInput({
           command: "command:launch:not-a-repository",
@@ -1179,12 +1184,9 @@ it.effect(
           scheduledTaskId: ScheduledTaskId.make("scheduled-task:not-a-repository"),
         }),
       );
-      yield* waitUntil(() =>
-        outbox
-          .listByCommandId(CommandId.make("command:launch:not-a-repository:release"))
-          .pipe(Effect.map((effects) => effects.length === 1)),
-      );
-      const projection = yield* threads.getThreadProjection(launched.threadId);
+      const release = CommandId.make("command:launch:not-a-repository:release");
+      const projection = yield* commandStored(launched.threadId, release);
+      assert.equal((yield* outbox.listByCommandId(release)).length, 1);
       assert.equal(projection.runs[0]?.status, "starting");
       assert.isUndefined(projection.turnItems.find((item) => item.type === "error"));
       assert.isNull(projection.thread.worktreePath);
@@ -1201,7 +1203,6 @@ it.effect(
     return Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       const outbox = yield* EffectOutbox.EffectOutboxV2;
-      const threads = yield* ThreadManagement.ThreadManagementService;
       const launched = yield* launches.launch(
         launchInput({
           command: "command:launch:explicit-worktree-not-a-repository",
@@ -1210,14 +1211,9 @@ it.effect(
           workspace: { type: "worktree", baseRef: "main", startFromOrigin: true },
         }),
       );
-      yield* waitUntil(() =>
-        outbox
-          .listByCommandId(
-            CommandId.make("command:launch:explicit-worktree-not-a-repository:release"),
-          )
-          .pipe(Effect.map((effects) => effects.length === 1)),
-      );
-      const projection = yield* threads.getThreadProjection(launched.threadId);
+      const release = CommandId.make("command:launch:explicit-worktree-not-a-repository:release");
+      const projection = yield* commandStored(launched.threadId, release);
+      assert.equal((yield* outbox.listByCommandId(release)).length, 1);
       // The user asked for isolation, so the launch still provisions (and would
       // surface a provisioning failure) instead of quietly running in the root.
       assert.equal(harness.createWorktree.mock.calls.length, 1);
@@ -1248,7 +1244,6 @@ it.effect(
     return Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       const outbox = yield* EffectOutbox.EffectOutboxV2;
-      const threads = yield* ThreadManagement.ThreadManagementService;
       const launched = yield* launches.launch(
         launchInput({
           command: "command:launch:retry-not-a-repository",
@@ -1258,23 +1253,16 @@ it.effect(
           scheduledTaskId: ScheduledTaskId.make("scheduled-task:retry-not-a-repository"),
         }),
       );
-      yield* waitUntil(() =>
-        threads
-          .getThreadProjection(launched.threadId)
-          .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
-      );
-      const failed = yield* threads.getThreadProjection(launched.threadId);
+      const failed = yield* preparationSettled(launched.threadId);
+      assert.equal(failed.runs[0]?.status, "failed");
       yield* launches.retryPreparation({
         commandId: CommandId.make("command:launch:retry-not-a-repository:1"),
         threadId: launched.threadId,
         runId: failed.runs[0]!.id,
       });
-      yield* waitUntil(() =>
-        outbox
-          .listByCommandId(CommandId.make("command:launch:retry-not-a-repository:1:release"))
-          .pipe(Effect.map((effects) => effects.length === 1)),
-      );
-      const retried = yield* threads.getThreadProjection(launched.threadId);
+      const release = CommandId.make("command:launch:retry-not-a-repository:1:release");
+      const retried = yield* commandStored(launched.threadId, release);
+      assert.equal((yield* outbox.listByCommandId(release)).length, 1);
       assert.equal(retried.runs[0]?.status, "starting");
       // The retry rebuilt its input from the run and still knew it was a scheduled task.
       assert.isNull(retried.thread.worktreePath);
@@ -1306,7 +1294,6 @@ it.effect("retries a failed workspace preparation on the same run", () => {
   return Effect.gen(function* () {
     const launches = yield* ThreadLaunch.ThreadLaunchService;
     const outbox = yield* EffectOutbox.EffectOutboxV2;
-    const threads = yield* ThreadManagement.ThreadManagementService;
     const launched = yield* launches.launch(
       launchInput({
         command: "command:launch:retry",
@@ -1315,12 +1302,8 @@ it.effect("retries a failed workspace preparation on the same run", () => {
         workspace: { type: "worktree", baseRef: "main", startFromOrigin: true },
       }),
     );
-    yield* waitUntil(() =>
-      threads
-        .getThreadProjection(launched.threadId)
-        .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
-    );
-    const failed = yield* threads.getThreadProjection(launched.threadId);
+    const failed = yield* preparationSettled(launched.threadId);
+    assert.equal(failed.runs[0]?.status, "failed");
     const runId = failed.runs[0]!.id;
     assert.equal(
       failed.turnItems.find((item) => item.type === "error")?.failure.code,
@@ -1333,12 +1316,9 @@ it.effect("retries a failed workspace preparation on the same run", () => {
       runId,
     };
     yield* launches.retryPreparation(retry);
-    yield* waitUntil(() =>
-      outbox
-        .listByCommandId(CommandId.make("command:launch:retry:1:release"))
-        .pipe(Effect.map((effects) => effects.length === 1)),
-    );
-    const retried = yield* threads.getThreadProjection(launched.threadId);
+    const release = CommandId.make("command:launch:retry:1:release");
+    const retried = yield* commandStored(launched.threadId, release);
+    assert.equal((yield* outbox.listByCommandId(release)).length, 1);
     assert.equal(retried.runs.length, 1);
     assert.equal(retried.runs[0]?.status, "starting");
     assert.equal(retried.thread.worktreePath, "/repo-worktrees/feature");

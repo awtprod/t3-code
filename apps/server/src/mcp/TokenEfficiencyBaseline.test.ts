@@ -34,39 +34,12 @@ it("records the committed static-context baseline", () => {
     },
   };
   expect(baseline).toEqual({
-    // 2026-09: +94 bytes to route default-mode questions through
-    // `request_user_input` when the tool is listed (plain-text fallback
-    // remains for the tool-unavailable case).
-    // 2026-10: -2 bytes from upstream v0.0.45 joining the tool blocks with
-    // "\n\n" (tools now ride turn additionalContext; baseline measures both).
-    // 2026-10: +887 bytes from upstream v0.1.0's developer instructions (re-platform
-    // onto orchestration v2); Command Center's own additions are unchanged.
-    // 2026-10: +14 bytes: the collaborative-browser block names Command Center
-    // instead of T3 Code again (two mentions).
-    collaborationInstructions: { defaultBytes: 3_064, planBytes: 11_201 },
-    // 2026-09: +1,938 bytes for the optional `database` selector on the nine
-    // Supabase tools (multi-database projects).
-    // 2026-09: +76 bytes for the `prospect.evaluate`/`prospect.notify`
-    // automation node configs (review-only prospect queue).
-    // 2026-09: +396 bytes for scoped correction evidence, expiry, and
-    // contradiction fields on the existing memory proposal tool.
-    // 2026-09: +40 bytes for the `repository.checks` source-node configuration.
-    // 2026-10: effect rc.112 JSON Schema output plus object-root input schemas
-    // for cc_spaces_list and cc_google_read (upstream catch-up sync); main's
-    // +512 bytes above (prospect, memory correction, repository.checks) on top.
-    // 2026-10: +117 bytes for the read-only `cc_space_brief` Space agent tool.
-    // 2026-10: +271 bytes for the read-only `cc_space_activity` feed tool.
-    // 2026-10: +560 bytes for `cc_items_update` (status/title/description only).
-    // 2026-10: +3 bytes net from the upstream v0.0.45 sync (preview_snapshot
-    // `save` text, effect rc.115 and shared contract schema changes).
-    // 2026-10: upstream v0.1.0 adds five preview tools (14 -> 19); the Space agent
-    // phone tools `cc_phone_call_me` and `cc_phone_call` (approval-gated; only Spaces
-    // that opt in see them) take Command Center from 16 to 18. Supabase (9) unchanged.
-    // 2026-10: -44 bytes: cc_memory_propose confidence advertised as a plain
-    // bounded number (no NaN/Infinity union).
-    // 2026-10: +566 bytes: cc_google_draft_create added (Command Center 18 -> 19 tools;
-    // only credentials holding the Gmail drafts capability see it).
-    mcp: { toolCount: 47, schemaBytes: 36_291, toolkitCounts: [19, 19, 9] },
+    // 2026-11: -2,671 default / -10,808 plan bytes: upstream v0.1.5 moved Codex to its native
+    // collaboration modes, so either mode only sends the tool block from the client.
+    collaborationInstructions: { defaultBytes: 393, planBytes: 393 },
+    // 2026-11: -14,271 bytes: upstream v0.1.5 folds the preview tools into compact action tools
+    // (19 -> 12). Command Center (19) and Supabase (9) are unchanged.
+    mcp: { toolCount: 40, schemaBytes: 22_020, toolkitCounts: [12, 19, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

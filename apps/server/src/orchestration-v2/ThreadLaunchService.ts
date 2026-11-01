@@ -447,10 +447,11 @@ const make = Effect.gen(function* () {
             .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)))) !== null;
         yield* setupTracker.stageStatus(threadId, "fetch", shouldFetch ? "running" : "skipped");
         if (shouldFetch) {
+          const baseRef = input.workspaceStrategy.baseRef;
           const fetched = yield* git
             .fetchWorktreeBaseCommit({
               cwd: project.workspaceRoot,
-              refName: input.workspaceStrategy.baseRef,
+              refName: baseRef,
             })
             .pipe(
               Effect.map((remoteBase) => ({ ok: true as const, remoteBase })),
@@ -459,7 +460,7 @@ const make = Effect.gen(function* () {
                   "Could not fetch the base branch's remote while preparing a worktree; using the local base branch.",
                   {
                     cwd: project.workspaceRoot,
-                    baseRef: input.workspaceStrategy.baseRef,
+                    baseRef,
                     detail: error.message,
                   },
                 ).pipe(Effect.as({ ok: false as const, remoteBase: null })),

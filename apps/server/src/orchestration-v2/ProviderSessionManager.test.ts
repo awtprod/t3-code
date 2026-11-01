@@ -1720,7 +1720,7 @@ function runDatabaseAccessScenario(input: {
     );
     const layerProjectService = Layer.mock(ProjectService.ProjectService)({
       getById: (requestedProjectId) =>
-        Effect.succeed(Option.some(makeBrowserAccessProject(requestedProjectId))),
+        Effect.succeedSome(makeBrowserAccessProject(requestedProjectId)),
     });
     return yield* Effect.gen(function* () {
       const eventSink = yield* EventSink.EventSinkV2;

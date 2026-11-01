@@ -75,62 +75,61 @@ export class StalledRunWatchdog extends Context.Service<
   }
 >()("@awtprod/command-center/orchestration-v2/StalledRunWatchdog") {}
 
-export const make = (
+export const make = Effect.fn("StalledRunWatchdog.make")(function* (
   options: { readonly threshold?: Duration.Input; readonly interval?: Duration.Input } = {},
-) =>
-  Effect.gen(function* () {
-    const engine = yield* Orchestrator.OrchestratorV2;
-    const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const thresholdMs = Duration.toMillis(options.threshold ?? STALLED_RUN_THRESHOLD);
-    const interval = options.interval ?? STALLED_RUN_SWEEP_INTERVAL;
-    const minutes = Math.max(1, Math.round(thresholdMs / 60_000));
+) {
+  const engine = yield* Orchestrator.OrchestratorV2;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const thresholdMs = Duration.toMillis(options.threshold ?? STALLED_RUN_THRESHOLD);
+  const interval = options.interval ?? STALLED_RUN_SWEEP_INTERVAL;
+  const minutes = Math.max(1, Math.round(thresholdMs / 60_000));
 
-    const stop = (run: StalledRun) =>
-      engine
-        .dispatch({
-          type: "run.interrupt",
-          // One command per stall: a repeat sweep of the same silence is a receipt replay.
-          commandId: CommandId.make(`server:stalled-run:${run.runId}:${run.updatedAtMs}`),
-          threadId: run.threadId,
-          runId: run.runId,
-          reason: `No provider activity for ${minutes} minutes. Command Center stopped the turn so the thread can continue.`,
-        })
-        .pipe(
-          Effect.tap(() =>
-            Effect.logWarning("stopped a run with no provider activity", {
-              threadId: run.threadId,
-              runId: run.runId,
-              silentMs: run.silentMs,
-            }),
-          ),
-          Effect.as(true),
-          Effect.catchCause((cause) =>
-            Effect.logWarning("stopping a stalled run failed", {
-              threadId: run.threadId,
-              runId: run.runId,
-              cause,
-            }).pipe(Effect.as(false)),
-          ),
-        );
+  const stop = (run: StalledRun) =>
+    engine
+      .dispatch({
+        type: "run.interrupt",
+        // One command per stall: a repeat sweep of the same silence is a receipt replay.
+        commandId: CommandId.make(`server:stalled-run:${run.runId}:${run.updatedAtMs}`),
+        threadId: run.threadId,
+        runId: run.runId,
+        reason: `No provider activity for ${minutes} minutes. Command Center stopped the turn so the thread can continue.`,
+      })
+      .pipe(
+        Effect.tap(() =>
+          Effect.logWarning("stopped a run with no provider activity", {
+            threadId: run.threadId,
+            runId: run.runId,
+            silentMs: run.silentMs,
+          }),
+        ),
+        Effect.as(true),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("stopping a stalled run failed", {
+            threadId: run.threadId,
+            runId: run.runId,
+            cause,
+          }).pipe(Effect.as(false)),
+        ),
+      );
 
-    const sweep: StalledRunWatchdog["Service"]["sweep"] = Effect.gen(function* () {
-      const snapshot = yield* projections.getShellSnapshot();
-      const candidates = stalledRuns(snapshot.threads, yield* Clock.currentTimeMillis, thresholdMs);
-      const stopped: Array<StalledRun> = [];
-      for (const run of candidates) {
-        if (yield* stop(run)) stopped.push(run);
-      }
-      return stopped;
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("stalled run sweep failed", { cause }).pipe(Effect.as([])),
-      ),
-    );
+  const sweep: StalledRunWatchdog["Service"]["sweep"] = Effect.gen(function* () {
+    const snapshot = yield* projections.getShellSnapshot();
+    const candidates = stalledRuns(snapshot.threads, yield* Clock.currentTimeMillis, thresholdMs);
+    const stopped: Array<StalledRun> = [];
+    for (const run of candidates) {
+      if (yield* stop(run)) stopped.push(run);
+    }
+    return stopped;
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("stalled run sweep failed", { cause }).pipe(Effect.as([])),
+    ),
+  );
 
-    const start: StalledRunWatchdog["Service"]["start"] = () =>
-      forkParked(Effect.repeat(sweep, Schedule.spaced(interval)).pipe(Effect.asVoid));
+  const start: StalledRunWatchdog["Service"]["start"] = () =>
+    forkParked(Effect.repeat(sweep, Schedule.spaced(interval)).pipe(Effect.asVoid));
 
-    return { start, sweep } satisfies StalledRunWatchdog["Service"];
-  });
+  return { start, sweep } satisfies StalledRunWatchdog["Service"];
+});
 
 export const layer = Layer.effect(StalledRunWatchdog, make());

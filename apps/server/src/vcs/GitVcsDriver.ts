@@ -397,7 +397,10 @@ export class GitVcsDriver extends Context.Service<
     /** Fetches the configured upstream, explicit remote ref, or origin; null uses the local base. */
     readonly fetchWorktreeBaseCommit: (
       input: GitFetchWorktreeBaseCommitInput,
-    ) => Effect.Effect<GitResolveRemoteTrackingCommitResult | null, GitCommandError>;
+    ) => Effect.Effect<
+      Pick<GitResolveRemoteTrackingCommitResult, "commitSha" | "remoteRefName"> | null,
+      GitCommandError
+    >;
     readonly fetchRemoteBranch: (
       input: GitFetchRemoteBranchInput,
     ) => Effect.Effect<void, GitCommandError>;

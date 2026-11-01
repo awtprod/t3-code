@@ -249,14 +249,14 @@ const make = Effect.gen(function* () {
 
   const processItem = (item: WorkItem) =>
     (item.kind === "thread" ? processThread(item.event) : processRun(item.event)).pipe(
-      Effect.catchCause((cause) =>
-        Cause.hasInterruptsOnly(cause)
-          ? Effect.failCause(cause)
-          : Effect.logWarning("space activity reactor failed to process event", {
-              kind: item.kind,
-              sequence: item.event.sequence,
-              cause: Cause.pretty(cause),
-            }),
+      Effect.catchCauseIf(
+        (cause) => !Cause.hasInterruptsOnly(cause),
+        (cause) =>
+          Effect.logWarning("space activity reactor failed to process event", {
+            kind: item.kind,
+            sequence: item.event.sequence,
+            cause: Cause.pretty(cause),
+          }),
       ),
     );
 

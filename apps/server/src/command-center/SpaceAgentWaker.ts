@@ -669,10 +669,10 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       yield* Effect.forkScoped(
         tick.pipe(
-          Effect.catchCause((cause) =>
-            Cause.hasInterruptsOnly(cause)
-              ? Effect.failCause(cause)
-              : Effect.logWarning("space agent wake tick failed", { cause: Cause.pretty(cause) }),
+          Effect.catchCauseIf(
+            (cause) => !Cause.hasInterruptsOnly(cause),
+            (cause) =>
+              Effect.logWarning("space agent wake tick failed", { cause: Cause.pretty(cause) }),
           ),
           Effect.repeat(Schedule.spaced(SPACE_AGENT_WAKE_TICK)),
         ),

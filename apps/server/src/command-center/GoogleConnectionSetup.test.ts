@@ -21,7 +21,7 @@ import {
   validateGoogleCallbackAddress,
 } from "./GoogleConnectionSetup.ts";
 
-const space = Schema.decodeUnknownSync(Space)({
+const space = Schema.decodeSync(Space)({
   id: "example-space",
   slug: "example-space",
   displayName: "Example Space",

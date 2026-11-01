@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - cleanup uses Node's retrying rm, which the FileSystem service does not expose.
+import * as ClaudeSdk from "@anthropic-ai/claude-agent-sdk";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ClaudeSettings, type ServerProvider } from "@t3tools/contracts";
 import { vi } from "vite-plus/test";
@@ -8,6 +9,7 @@ import * as Schema from "effect/Schema";
 
 import {
   buildClaudeCapabilitiesProbeQueryOptions,
+  probeClaudeCapabilities,
   probeClaudeWorkspaceSnapshot,
 } from "./ClaudeProvider.ts";
 
@@ -65,7 +67,7 @@ it.effect("reads a malformed account payload as no evidence", () =>
     );
     yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
     const capabilities = yield* probeClaudeCapabilities(
-      decodeClaudeSettings({ binaryPath: "claude" }),
+      yield* decodeClaudeSettings({ binaryPath: "claude" }),
     );
     assert.isDefined(capabilities);
     assert.strictEqual(capabilities?.email, undefined);

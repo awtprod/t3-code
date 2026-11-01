@@ -418,22 +418,23 @@ export class CommandCenterAuditIntegrityError extends Schema.TaggedError<Command
 }
 
 /** Fail closed before starting any worker that can recover or dispatch work. */
-export const startCommandCenterWorkersAfterAuditVerification = <EV, RV, EW, RW>(
+export const startCommandCenterWorkersAfterAuditVerification = Effect.fn(
+  "ServerRuntimeStartup.startCommandCenterWorkersAfterAuditVerification",
+)(function* <EV, RV, EW, RW>(
   verification: Effect.Effect<CommandCenterAuditChainVerification, EV, RV>,
   startWorkers: Effect.Effect<void, EW, RW>,
-) =>
-  Effect.gen(function* () {
-    const result = yield* runStartupPhase("command-center.audit.verify", verification);
-    if (!result.valid) {
-      return yield* new CommandCenterAuditIntegrityError({
-        eventCount: result.eventCount,
-        headSequence: result.headSequence,
-        invalidSequence: result.invalidSequence ?? null,
-        reason: result.reason ?? "chain-head",
-      });
-    }
-    yield* startWorkers;
-  });
+) {
+  const result = yield* runStartupPhase("command-center.audit.verify", verification);
+  if (!result.valid) {
+    return yield* new CommandCenterAuditIntegrityError({
+      eventCount: result.eventCount,
+      headSequence: result.headSequence,
+      invalidSequence: result.invalidSequence ?? null,
+      reason: result.reason ?? "chain-head",
+    });
+  }
+  yield* startWorkers;
+});
 
 export const verifyConfiguredGoogleConnections = (
   commandCenter: Pick<CommandCenterService.CommandCenterService["Service"], "queryConnections">,

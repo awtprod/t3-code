@@ -31,7 +31,7 @@ import * as Stream from "effect/Stream";
 
 import packageJson from "../../../package.json" with { type: "json" };
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
-import { makeReplayServerConfig } from "./CodexAdapterV2.testkit.ts";
+import { makeReplayServerConfig } from "../testkit/ProviderReplayHarness.ts";
 
 /**
  * Codex `item/permissions/requestApproval` is a sandbox escalation request.

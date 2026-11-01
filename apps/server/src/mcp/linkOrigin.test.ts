@@ -19,6 +19,7 @@ import * as Layer from "effect/Layer";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerConfig from "../config.ts";
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -167,6 +168,7 @@ const layerTools = Layer.mergeAll(
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/p" }),
   ),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(Layer.mock(GitWorkflowService.GitWorkflowService)({})),
   Layer.provide(
     Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
       cloneRepository: (input) =>

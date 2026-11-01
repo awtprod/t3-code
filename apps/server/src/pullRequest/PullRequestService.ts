@@ -83,9 +83,9 @@ import * as PullRequestFilesViewed from "../persistence/PullRequestFilesViewed.t
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as GitHubProfileAuth from "../sourceControl/GitHubProfileAuth.ts";
-import * as GitHubApi from "@t3tools/source-control-github/server/GitHubApi";
-import * as GitHubClient from "@t3tools/source-control-github/client/definition";
-import { readSourceControlHostSettings } from "@t3tools/source-control-core/client/definition";
+import * as GitHubRequestPolicy from "@t3tools/source-control-github/server/GitHubRequestPolicy";
+import * as GitHubClient from "@t3tools/source-control-github/shared/definition";
+import { readSourceControlHostSettings } from "@t3tools/source-control-core/shared/definition";
 import type { SourceControlProviderContext } from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import {
@@ -1539,55 +1539,54 @@ export const make = Effect.gen(function* () {
    * and verified as that profile alone: the host's account may not even see it. Refused, rather
    * than skipped, while GitHub is turned off.
    */
-  const repositoryProfile = (ref: {
+  const repositoryProfile = Effect.fn("PullRequestService.repositoryProfile")(function* (ref: {
     readonly host: string;
     readonly repository: string;
-  }): Effect.Effect<GitHubProfileAuth.GitHubProfileCredential | null, PullRequestOperationError> =>
-    Effect.gen(function* () {
-      if (ref.host !== "github.com") return null;
-      const profile = yield* GitHubProfileAuth.forRepository({
-        host: ref.host,
-        repository: ref.repository,
-      }).pipe(
-        Effect.provideService(GitHubProfileAuth.GitHubProfileAuth, githubProfiles),
-        Effect.mapError(
-          (cause) =>
-            new PullRequestOperationError({
-              operation: "readCredential",
-              detail: "The configured GitHub profile for this repository is unavailable.",
-              cause,
-            }),
-        ),
-      );
-      if (profile === null) return null;
-      const settings = yield* serverSettings.getSettings.pipe(
-        Effect.mapError(
-          (cause) =>
-            new PullRequestOperationError({
-              operation: "readCredential",
-              detail: "GitHub host settings could not be read.",
-              cause,
-            }),
-        ),
-      );
-      if (
-        readSourceControlHostSettings(GitHubClient.settings, settings.sourceControlHosts.github)
-          .hosts[ref.host]?.enabled === false
-      ) {
-        return yield* new PullRequestOperationError({
-          operation: "readCredential",
-          detail: "GitHub is turned off in Settings → Source Control.",
-        });
-      }
-      return profile;
-    });
+  }) {
+    if (ref.host !== "github.com") return null;
+    const profile = yield* GitHubProfileAuth.forRepository({
+      host: ref.host,
+      repository: ref.repository,
+    }).pipe(
+      Effect.provideService(GitHubProfileAuth.GitHubProfileAuth, githubProfiles),
+      Effect.mapError(
+        (cause) =>
+          new PullRequestOperationError({
+            operation: "readCredential",
+            detail: "The configured GitHub profile for this repository is unavailable.",
+            cause,
+          }),
+      ),
+    );
+    if (profile === null) return null;
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError(
+        (cause) =>
+          new PullRequestOperationError({
+            operation: "readCredential",
+            detail: "GitHub host settings could not be read.",
+            cause,
+          }),
+      ),
+    );
+    if (
+      readSourceControlHostSettings(GitHubClient.settings, settings.sourceControlHosts.github)
+        .hosts[ref.host]?.enabled === false
+    ) {
+      return yield* new PullRequestOperationError({
+        operation: "readCredential",
+        detail: "GitHub is turned off in Settings → Source Control.",
+      });
+    }
+    return profile;
+  });
 
   /** Every GitHub request `effect` makes goes out with the profile's token, and only to `host`. */
   const asProfile =
     (host: string, profile: GitHubProfileAuth.GitHubProfileCredential) =>
     <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       effect.pipe(
-        Effect.provideService(GitHubApi.PinnedGitHubCredential, {
+        Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, {
           host,
           token: profile.token,
           credentialFingerprint: profile.fingerprint,

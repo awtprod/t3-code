@@ -80,7 +80,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
             identity.canonicalKey.startsWith("ssh.forge.test/")
               ? {
                   ...identity,
-                  provider: "forgejo",
+                  provider: SourceControlProviderKind.make("forgejo"),
                   webUrl: "http://forge.test:3000/git/team/repo",
                 }
               : identity,

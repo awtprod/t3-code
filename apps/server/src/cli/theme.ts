@@ -410,10 +410,10 @@ const themeSetCommand = Command.make("set", {
       const targetIsFile =
         looksLikePath && (yield* fs.exists(target).pipe(Effect.orElseSucceed(() => false)));
       if (looksLikePath && !targetIsFile) {
-        return yield* Effect.fail(new ThemeFileUnreadableError({ filePath: target }));
+        return yield* new ThemeFileUnreadableError({ filePath: target });
       }
       if (!targetIsFile && !isEnvironmentThemeId(target)) {
-        return yield* Effect.fail(new ThemeIdInvalidError({ themeId: target }));
+        return yield* new ThemeIdInvalidError({ themeId: target });
       }
 
       const themeId = yield* withServerSettingsFileLock(
@@ -435,7 +435,7 @@ const themeSetCommand = Command.make("set", {
           } else {
             const known = yield* resolvableThemeIds(paths.themesDir);
             if (!known.includes(target)) {
-              return yield* Effect.fail(new ThemeIdUnknownError({ themeId: target, known }));
+              return yield* new ThemeIdUnknownError({ themeId: target, known });
             }
             selectedThemeId = target;
           }

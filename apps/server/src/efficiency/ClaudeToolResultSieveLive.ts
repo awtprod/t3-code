@@ -28,7 +28,7 @@ export const layer = Layer.effect(
           holder.efficiency = settings.efficiency;
         }),
       ),
-      Effect.catchCause(() => Effect.void),
+      Effect.ignoreCause,
       Effect.forkScoped,
     );
     const sdkHooks = makeClaudeToolResultSieveHooks({
@@ -43,6 +43,7 @@ export const layer = Layer.effect(
           LIMIT 1
         `.pipe(
           Effect.map((rows) => rows[0]?.text ?? undefined),
+          // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
           Effect.catchCause(() => Effect.succeed(undefined)),
         ),
       onOutcome: (outcome) =>

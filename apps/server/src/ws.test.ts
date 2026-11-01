@@ -120,6 +120,7 @@ import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
+import { ProjectionTurnUsageRepository } from "./persistence/Services/ProjectionTurnUsage.ts";
 import * as SqlitePersistence from "./persistence/Sqlite.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ProjectEnrichment from "./project/ProjectEnrichmentService.ts";
@@ -541,6 +542,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(HostResources.HostResources)({}),
   // Fork services the RPC layer acquires: Resources pane usage and efficiency routing.
   Layer.mock(HostUsage.HostUsage)({}),
+  Layer.mock(ProjectionTurnUsageRepository)({}),
   Layer.mock(ClientTurnRouting.ClientTurnRouter)({}),
   Layer.mock(ThreadRouting.ThreadRoutingService)({}),
   Layer.mock(McpAppRequests.McpAppRequests)({}),

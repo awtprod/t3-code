@@ -18,7 +18,7 @@ import { CommandCenterService, layer as serviceLayer } from "./Service.ts";
 // rejected, and history written with the older per-state identity is kept.
 
 const fixtureTime = "2026-09-28T00:00:00.000Z";
-const space = Schema.decodeUnknownSync(Space)({
+const space = Schema.decodeSync(Space)({
   id: "space-a",
   slug: "space-a",
   displayName: "Space A",

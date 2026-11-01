@@ -99,7 +99,7 @@ const makeConnectionRepositoryHarness = (connectionFailure?: PersistenceSqlError
       createIfAbsent: () => Effect.void,
       createRenewal: () => Effect.succeed(false),
       listLineage: () => readRecord.pipe(Effect.map((record) => [record])),
-      getById: () => readRecord.pipe(Effect.map(Option.some)),
+      getById: () => readRecord.pipe(Effect.asSome),
       listActive: () => readRecord.pipe(Effect.map((record) => [record])),
       revoke: () => Effect.succeed([]),
       revokeAllExcept: () => Effect.succeed([]),
