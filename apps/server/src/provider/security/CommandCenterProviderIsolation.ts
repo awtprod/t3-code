@@ -607,16 +607,10 @@ export const prepareCommandCenterCodexHome = Effect.fn(
               ),
       }),
     );
-  // Fail closed only on `config.toml`: Codex never writes one itself, so its
-  // presence in a reused isolated home is a genuine ambient-config injection
-  // signal. `plugins`/`marketplaces` are NOT tripwires — Codex 0.144.x syncs a
-  // curated-plugin cache into CODEX_HOME on startup even with
-  // `features.remote_plugin=false` / `plugins={}` set, so a reused home always
-  // contains `plugins/` after its first session. Plugin/marketplace *loading* is
-  // already disabled by the isolation appServerArgs and constrained by the
-  // sandbox permission profile (verified live by verifyCommandCenterCodexIsolation
-  // before every turn), so the on-disk cache is inert. (`skills/`, also created
-  // by Codex, has always been tolerated here for the same reason.)
+  // Fail closed only on `config.toml`: Codex never writes one, so its presence
+  // in a reused isolated home signals ambient-config injection. `plugins/`,
+  // `marketplaces` and `skills/` are Codex-written caches and inert (loading is
+  // disabled by the isolation args and the sandbox, verified before every turn).
   for (const forbiddenEntry of ["config.toml"] as const) {
     if (Option.isSome(yield* optionalStat(path.join(layout.homePath, forbiddenEntry)))) {
       return yield* codexHomeError(
@@ -874,12 +868,10 @@ export const prepareCommandCenterCodexHome = Effect.fn(
 });
 
 /**
- * Resolve the one extra filesystem grant needed by a linked Git worktree.
- *
- * Command Center only trusts worktrees under its runtime base directory and only
- * when their canonical Git metadata belongs to a managed checkout with the exact
- * shape `<baseDir>/repositories/<digest>/.git`. Any linked worktree outside this
- * topology is rejected instead of inheriting ambient repository access.
+ * Resolve the one extra filesystem grant a linked Git worktree needs. Only
+ * worktrees under the runtime base directory whose canonical Git metadata is a
+ * managed checkout `<baseDir>/repositories/<digest>/.git` are trusted; any
+ * other topology is rejected, never inheriting ambient repository access.
  */
 export const resolveCommandCenterManagedGitMetadata = Effect.fn(
   "CommandCenterProviderIsolation.resolveManagedGitMetadata",

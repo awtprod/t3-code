@@ -1320,12 +1320,10 @@ export interface CodexAppServerClientFactoryShape {
     readonly settings: CodexSettings;
     readonly environment: NodeJS.ProcessEnv;
     /**
-     * Set for Command Center threads. `environment` is then the complete
-     * allowlisted environment (never extended with the server's own), the
-     * user's launch arguments are not applied, and these locked isolation
-     * arguments are appended. The app-server is spawned in `cwd`, the thread's
-     * absolute workspace: Codex builds the sandbox's workspace roots from its
-     * own working directory, not from a request's `cwd`.
+     * Set for Command Center threads: `environment` is then the complete allowlisted environment
+     * (never extended with the server's own), the user's launch arguments are not applied, and the
+     * locked isolation arguments are appended. Spawn the app-server in `cwd` (the thread's absolute
+     * workspace): Codex derives the sandbox's workspace roots from its own cwd, not a request's.
      */
     readonly commandCenterIsolation?: {
       readonly appServerArgs: ReadonlyArray<string>;

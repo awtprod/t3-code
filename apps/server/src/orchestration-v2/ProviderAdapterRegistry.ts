@@ -23,12 +23,10 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 const isProviderSetupError = Schema.is(ProviderSetupError);
 
 /**
- * The authoritative Command Center admission gate. Every orchestration session
- * opens through a registry `get`, so wrapping `openSession` here refuses a
- * `cc:` thread on a provider without an isolation profile (anything but Codex)
- * or in full-access mode before the adapter spawns anything. The `cc:`
- * identity comes from the server-assigned thread id in the open request.
- * Adapter errors pass through unchanged.
+ * The authoritative Command Center admission gate: every orchestration session opens through a
+ * registry `get`, so wrapping `openSession` refuses a `cc:` thread on a provider without an
+ * isolation profile (anything but Codex) or in full-access mode before the adapter spawns anything.
+ * The `cc:` identity comes from the server-assigned thread id; adapter errors pass through.
  */
 function withCommandCenterAdmission(
   adapter: ProviderAdapter.ProviderAdapterV2["Service"],
@@ -72,12 +70,10 @@ function commandCenterSessionMismatch(owner: ThreadId, threadId: ThreadId): bool
 }
 
 /**
- * Isolation is decided when a session opens, from the thread that opens it. A
- * `cc:` thread that joined a session another thread opened would run in that
- * session's unisolated launch, and a thread joining a `cc:` session would run
- * inside the Command Center sandbox. The Orchestrator gives every `cc:` thread
- * its own session; this refuses any path that does not, before the adapter
- * touches the thread.
+ * Isolation is decided when a session opens, from the opening thread. A `cc:` thread joining a
+ * session another thread opened would run in its unisolated launch, and a thread joining a `cc:`
+ * session would run inside the Command Center sandbox. The Orchestrator gives every `cc:` thread
+ * its own session; this refuses any path that does not, before the adapter touches the thread.
  */
 function bindSessionToOpeningThread(
   driver: ProviderDriverKind,

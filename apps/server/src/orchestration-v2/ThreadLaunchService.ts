@@ -300,12 +300,10 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * A scheduled task's stored `worktree` strategy can meet a project that is
-   * not a Git repository, such as the system project. Nobody is there to pick
-   * another strategy, so its run uses the project folder instead of failing in
-   * provisioning. An explicit worktree request (UI, t3_thread_launch) keeps the
-   * provisioning failure: the caller asked for isolation and should hear that
-   * it is not available.
+   * A scheduled task's stored `worktree` strategy can meet a project that is not a Git repository
+   * (e.g. the system project). Nobody is there to pick another strategy, so its run uses the project
+   * folder instead of failing in provisioning. An explicit worktree request (UI, t3_thread_launch)
+   * keeps the provisioning failure: the caller asked for isolation and should hear it is unavailable.
    */
   const rootOutsideRepository = Effect.fn("ThreadLaunchService.rootOutsideRepository")(function* (
     input: PreparationInput,

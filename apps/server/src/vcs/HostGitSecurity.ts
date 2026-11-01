@@ -366,9 +366,8 @@ function readEnvironment(source: NodeJS.ProcessEnv, key: string): string | undef
 /**
  * The only `GIT_CONFIG_*` entries an inherited environment may carry into
  * hardened Git: exact key/value pairs that pin byte-exact, unsigned behaviour
- * (the test suite sets them in `testUtils/gitConfig.setup.ts`). Each pair only
- * makes Git more predictable, so honouring them in production is harmless; an
- * inherited set containing anything else is dropped whole.
+ * (set by `testUtils/gitConfig.setup.ts`), each only making Git more predictable.
+ * An inherited set containing anything else is dropped whole.
  */
 const INHERITABLE_GIT_CONFIG_PINS: ReadonlyMap<string, string> = new Map([
   ["core.autocrlf", "false"],
@@ -641,10 +640,9 @@ export function unsafeHostGitConfigName(name: string): string | undefined {
 
 /**
  * One trusted Git config entry a caller may add to a single `git` command: the
- * HTTP authorization header for the exact https remote that command talks to.
- * Nothing else is accepted, because an open `GIT_CONFIG_*` passthrough would
- * let a caller set `url.*.insteadOf`, `http.proxy`, `http.sslVerify` or
- * `credential.helper` and route around every other hardening rule here.
+ * HTTP authorization header for the exact https remote it talks to. Nothing else
+ * is accepted: an open `GIT_CONFIG_*` passthrough could set `url.*.insteadOf`,
+ * `http.proxy`, `http.sslVerify` or `credential.helper` and bypass every hardening rule.
  */
 export interface TrustedGitConfig {
   /** Exact https URL of the remote in use: no credentials, query or fragment. */

@@ -2,14 +2,10 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 /**
- * Space agent reply loop.
- *
- * - `command_center_space_agent_replies`: the user's comments, change
- *   requests, dismissals, and status decisions on Items a Space agent created.
- *   A row stays pending (`delivered_at IS NULL`) until a wake turn carries it,
- *   so a busy agent, a pause, or quiet hours never lose a reply.
- * - `command_center_space_agent_state` is rebuilt so `last_wake_reason` also
- *   accepts `reply` (SQLite cannot alter a CHECK constraint in place).
+ * Space agent reply loop: `command_center_space_agent_replies` holds user
+ * feedback on Items a Space agent created, pending (`delivered_at IS NULL`)
+ * until a wake turn carries it. `command_center_space_agent_state` is rebuilt
+ * because SQLite cannot alter its CHECK to accept `last_wake_reason` `reply`.
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;

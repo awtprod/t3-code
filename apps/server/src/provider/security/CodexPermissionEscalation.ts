@@ -1,32 +1,16 @@
 /**
- * Classification for Codex `item/permissions/requestApproval` — the sandbox
- * escalation request.
- *
- * This request is not "may I run this tool". It is "may I widen my sandbox",
- * carrying an arbitrary list of filesystem paths (each read/write/deny) plus a
- * flag that can re-enable network access. The requesting side is the untrusted
- * one, so the decision has to be made on the *requested permissions*, never on
- * which tool happened to trigger them.
- *
- * Two things are derived here:
- *   - `classifyCodexPermissionRequest` — is this escalation read-only, and
- *     which `ProviderRequestKind` should carry it to the client.
- *   - `describeCodexPermissionRequest` — a human-readable summary, because the
- *     persisted approval activity keeps only a `detail` string (the raw params
- *     in `args` are dropped at ingestion), and an approval prompt that cannot
- *     say which paths are being requested is not reviewable.
+ * Codex `item/permissions/requestApproval` asks to widen the sandbox (arbitrary
+ * filesystem paths, optionally network). The requester is untrusted, so decide
+ * on the requested permissions, never on which tool triggered them.
  */
 
 import type * as EffectCodexSchema from "effect-codex-app-server/schema";
 import type { ProviderRequestKind } from "@t3tools/contracts";
 
 /**
- * Kind carried to the client for a prompted sandbox escalation.
- *
- * `file-change` is the conservative choice for anything beyond plain reads —
- * any escalation that reaches a prompt can grant writes — and both web and
- * mobile already render it, so the prompt stays answerable. The v2 Codex
- * adapter uses `file-read` only for requests that ask for reads alone.
+ * Kind carried to the client for a prompted sandbox escalation. `file-change`
+ * is the conservative choice beyond plain reads (any prompted escalation can
+ * grant writes); the v2 adapter uses `file-read` only for read-only requests.
  */
 export const CODEX_PERMISSION_REQUEST_KIND: ProviderRequestKind = "file-change";
 
@@ -111,8 +95,9 @@ function summarizePaths(paths: ReadonlyArray<string>): string | undefined {
 }
 
 /**
- * Build the `detail` string shown on the approval prompt. Always names what is
- * being requested; the reason Codex supplied is appended when present.
+ * Build the `detail` string shown on the approval prompt. Persisted approval
+ * activity keeps only this string (raw params are dropped), so it must name
+ * every requested permission to stay reviewable; Codex's reason is appended.
  */
 export function describeCodexPermissionRequest(params: PermissionParams): string {
   const fileSystem = params.permissions.fileSystem ?? undefined;
@@ -144,5 +129,5 @@ export function describeCodexPermissionRequest(params: PermissionParams): string
 
   const requested = parts.length > 0 ? parts.join("; ") : "no additional permissions";
   const reason = params.reason?.trim();
-  return reason ? `${requested} — ${reason}` : requested;
+  return reason ? `${requested} (${reason})` : requested;
 }

@@ -10,12 +10,10 @@ import { windowsFileAttachmentPathLine } from "./command-center/WindowsMediaConf
 const isWindowsFileAttachment = Schema.is(ChatWindowsFileAttachment);
 
 /**
- * Appends one prompt line per `windows-file` reference attachment to the text
- * a provider receives. These references carry no local bytes, so the stored
- * attachment path that adapters append for images and files resolves to
- * nothing for them; the agent instead gets the Windows path, its host and the
- * exact scp pull command. A line that would push the prompt past the provider
- * input limit is skipped, like any other attachment context.
+ * Appends one prompt line per `windows-file` reference attachment to the provider-bound text. These
+ * carry no local bytes, so the stored attachment path adapters append resolves to nothing; the agent
+ * gets the Windows path, its host and the exact scp pull command. A line that would push the prompt
+ * past the provider input limit is skipped, like any other attachment context.
  */
 export function appendWindowsFileAttachmentLines(input: {
   readonly text: string;

@@ -390,15 +390,6 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
         stream: Stream.Stream<A, E, R>,
         _traceAttributes?: Readonly<Record<string, unknown>>,
       ) => gateCommandCenterStream(method, stream);
-      const observeRpcStreamEffect = <A, StreamError, StreamContext, EffectError, EffectContext>(
-        method: string,
-        effect: Effect.Effect<
-          Stream.Stream<A, StreamError, StreamContext>,
-          EffectError,
-          EffectContext
-        >,
-        traceAttributes?: Readonly<Record<string, unknown>>,
-      ) => observeRpcEffect(method, effect, traceAttributes);
       const dispatchCommandCenterRun = (runId: CommandCenterRunId) =>
         RunDispatcher.dispatchActiveRun({
           runId,

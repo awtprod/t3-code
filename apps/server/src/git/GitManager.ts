@@ -196,13 +196,10 @@ function isNotGitRepositoryError(error: GitCommandError): boolean {
 }
 
 /**
- * No status is obtainable for this workspace: it is not a repository, or Git
- * could not enter it (missing, unreadable, or not a directory).
- *
- * The driver already absorbs both cases where it can see stderr; this guards
- * the paths that only see a surfaced `GitCommandError`, whose message carries
- * the driver's `detail` rather than Git's own text. Kept in step with
- * `isUnavailableRepositoryGitStderr` in GitVcsDriverCore.
+ * No status is obtainable for this workspace: it is not a repository, or Git could not enter it
+ * (missing, unreadable, or not a directory). The driver absorbs both where it sees stderr; this
+ * guards paths that only see a surfaced `GitCommandError`, whose message carries the driver's
+ * `detail`, not Git's text. Keep in step with `isUnavailableRepositoryGitStderr` in GitVcsDriverCore.
  */
 function isRepositoryUnavailableError(error: GitCommandError): boolean {
   if (isNotGitRepositoryError(error)) {

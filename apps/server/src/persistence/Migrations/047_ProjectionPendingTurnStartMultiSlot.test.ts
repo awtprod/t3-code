@@ -11,12 +11,9 @@ const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
 layer("047_ProjectionPendingTurnStartMultiSlot", (it) => {
   // Two queued messages, each with its own request sequence. Coexistence alone
-  // proves nothing about THIS migration — at 046 there is no index at all, so
-  // an insert-both-and-assert-both test passes identically with the migration
-  // absent. What 047 actually establishes is that `request_sequence` becomes
-  // the placeholder's identity, so the discriminating assertion is the pair:
-  // distinct sequences coexist AND a duplicate sequence is rejected. Only the
-  // second half fails at 046, which is why both live here.
+  // passes even at 046 (no index), so the discriminating assertion is the pair:
+  // distinct sequences coexist AND a duplicate sequence is rejected; only the
+  // second half fails without 047.
   it.effect("allows several pending placeholders per thread, one per request sequence", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -81,11 +78,9 @@ layer("047_ProjectionPendingTurnStartMultiSlot", (it) => {
   it.effect("upgrades a database already populated by the pre-047 write path", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      // Stop one short of 047 so the rows below are written exactly as the old
-      // single-slot write path left them, then run 047 over that live data.
-      // Creating a UNIQUE index is not an unconditional no-op: it fails outright
-      // if the existing rows already violate it, which would abort startup on a
-      // real user's database rather than on a fresh test one.
+      // Stop one short of 047 so rows are written as the old single-slot path left
+      // them, then run 047 over that live data: a UNIQUE index fails outright if
+      // existing rows already violate it, aborting startup on a real database.
       yield* runMigrations({ toMigrationInclusive: 46 });
 
       // The old path kept at most one placeholder per thread but said nothing

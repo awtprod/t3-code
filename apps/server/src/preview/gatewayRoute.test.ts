@@ -627,11 +627,9 @@ it.layer(NodeServices.layer)("preview gateway", (it) => {
 
       const response = yield* gatewayRequest("/", { cookie });
 
-      // Read from the raw wire, not Effect's parsed view: the failure this
-      // guards against is two Set-Cookie headers collapsing into one.
-      // `response.cookies` is built from the raw multi-value `Set-Cookie`
-      // headers, so it is the channel that proves nothing collapsed. The header
-      // map cannot: it is a Record, and only ever holds the last value.
+      // Read from the raw wire, not Effect's parsed view: the failure guarded
+      // against is two Set-Cookie headers collapsing into one. `response.cookies`
+      // keeps every raw value; the header map is a Record and holds only the last.
       const relayed = Cookies.toSetCookieHeaders(response.cookies);
       assert.deepEqual([...relayed], ["first=1; Path=/", "second=2; Path=/"]);
       // Counted on the raw wire, because a duplicate would be invisible in any
@@ -645,12 +643,9 @@ it.layer(NodeServices.layer)("preview gateway", (it) => {
   );
 
   /**
-   * These two characterise the wire behaviour of a bodyless upstream reply —
-   * status and headers relayed, body empty. They do NOT cover `emptyOnAbsentBody`
-   * itself: removing that guard leaves these passing, because the Node server has
-   * already written the head by the time the empty stream fails. The guard stays
-   * as defence (it is what Effect's own `fromClientResponse` does), not because a
-   * test pins it.
+   * These two characterise a bodyless upstream reply (head relayed, body empty).
+   * They do NOT pin `emptyOnAbsentBody`: removing it leaves them passing, since the
+   * Node server has already written the head. The guard stays as defence.
    */
   it.effect("relays a bodyless upstream response without failing on the empty body", () =>
     Effect.gen(function* () {

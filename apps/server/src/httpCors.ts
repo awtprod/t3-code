@@ -11,13 +11,9 @@ export const browserApiCorsAllowedHeaders = [
 ] as const;
 
 /**
- * Origins the Electron renderer loads from.
- *
- * The renderer is served from a custom scheme rather than over HTTP, so its
- * origin matches no `Host` header the server could ever see and has to be named
- * explicitly. Shared by the CORS layer (`./http.ts`) and the WebSocket origin
- * check (`./ws.ts`) so the two cannot drift into disagreeing about which
- * clients are legitimate.
+ * Origins the Electron renderer loads from: a custom scheme, so its origin
+ * matches no `Host` header and must be named explicitly. Shared by the CORS
+ * layer and the WebSocket origin check so they cannot disagree on legitimate clients.
  */
 export const DESKTOP_RENDERER_ORIGINS = [
   "commandcenter://app",

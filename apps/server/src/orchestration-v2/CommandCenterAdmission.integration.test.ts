@@ -114,11 +114,9 @@ it.effect("still opens an ordinary client thread on the same path", () =>
   }),
 );
 
-// Isolation is chosen at session open from the thread that opens the session.
-// Codex can host many provider threads per session, so the Orchestrator would
-// otherwise hand every thread of an instance one shared session: a cc: thread
-// would then run in whatever launch opened it first (seen live: a Space agent
-// thread opened the shared, unisolated session and a later cc: Run joined it).
+// Isolation is chosen at session open from the opening thread. Codex can host many provider
+// threads per session, so without a session per thread a `cc:` thread would run in whatever launch
+// opened the shared one first (seen live: a Space agent's unisolated session joined by a `cc:` Run).
 const providerSessionsOpenedFor = (threadIds: ReadonlyArray<string>) =>
   Effect.scoped(
     Effect.gen(function* () {

@@ -611,23 +611,14 @@ function isNonRepositoryGitStderr(stderr: string): boolean {
 }
 
 /**
- * Git could not use `cwd` as a workspace at all — the directory is missing,
- * unreadable, or not a directory — so it failed before reaching any repository.
- *
- * Treated like "not a repository" rather than like a Git error. The distinction
- * that matters to callers is not *why* the workspace is unusable but whether a
- * status is knowable: in both cases it is not, and in neither case does
- * retrying or failing the caller's operation produce one. Escalating instead
- * aborted whole provider turns for a thread pointed at a directory the server
- * user cannot traverse (e.g. a repo under another user's `$HOME`), because the
- * status read sits upstream of the send and its error propagated out.
- *
- * Deliberately narrow: only failures to enter the workspace are absorbed.
- * A real Git fault inside a readable repository — a corrupt index, a bad
- * object, a config error — still surfaces, because those are actionable and
- * reporting them as "no repository here" would hide real damage.
+ * Git could not use `cwd` as a workspace (missing, unreadable, or not a directory), so it failed
+ * before reaching any repository. Treated like "not a repository", not a Git error: no status is
+ * knowable and retrying won't produce one, while escalating aborted whole provider turns (the status
+ * read sits upstream of the send) for a thread pointed at a directory the server user cannot traverse.
  */
 function isUnusableGitCwdStderr(stderr: string): boolean {
+  // Deliberately narrow: a real fault in a readable repository (corrupt index, bad object, config
+  // error) must still surface; reporting it as "no repository here" would hide actionable damage.
   const normalized = stderr.toLowerCase();
   return (
     normalized.includes("cannot change to") ||
@@ -1413,8 +1404,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       return yield* Effect.fail("Authenticated Git cannot use command configuration overrides.");
     const explicitRemote = input.args.slice(verbIndex + 1).find((arg) => !arg.startsWith("-"));
     const remoteName =
-      explicitRemote ??
-      (yield* resolveCurrentUpstream(input.cwd, undefined, globals))?.remoteName;
+      explicitRemote ?? (yield* resolveCurrentUpstream(input.cwd, undefined, globals))?.remoteName;
     if (!remoteName || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(remoteName)) return null;
     const rawUrl = (yield* runGitStdout(
       "GitVcsDriver.scopedAuth.rawUrl",

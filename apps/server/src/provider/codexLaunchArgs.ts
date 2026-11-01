@@ -5,14 +5,10 @@ const T3CODE_CODEX_LAUNCH_ARGS_ENV = "T3CODE_CODEX_LAUNCH_ARGS";
 export const CODEX_REQUEST_USER_INPUT_FEATURE = "default_mode_request_user_input";
 
 /**
- * Command Center implements the `item/tool/requestUserInput` protocol end to
- * end (adapter, orchestrator, and the input-required composer panel), so the
- * tool just needs to exist in Codex's default mode. Codex still ships the
- * feature off by default; without it, default-mode threads have no way to
- * surface questions and the model falls back to plain-text questions the
- * input-required screen never sees while the turn keeps running. An explicit
- * launch-args mention of the feature (`--enable`, `--disable`, or
- * `features.<name>`) wins over this default.
+ * Command Center implements the `item/tool/requestUserInput` protocol end to end, but Codex ships
+ * the feature off by default; without it, default-mode threads cannot surface questions and the
+ * model falls back to plain-text ones the input-required screen never sees while the turn runs on.
+ * An explicit launch-args mention (`--enable`, `--disable`, `features.<name>`) wins over this.
  */
 export const codexRequestUserInputFeatureArgs = (launchArgs?: string): ReadonlyArray<string> =>
   launchArgs?.includes(CODEX_REQUEST_USER_INPUT_FEATURE)

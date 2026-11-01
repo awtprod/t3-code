@@ -2,14 +2,10 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 /**
- * Direct Web Push subscriptions for this environment's PWA clients.
- *
- * A push service hands each browser one opaque endpoint URL plus the RFC 8291
- * client keys; the endpoint is the natural primary key because the push service
- * addresses delivery by it and a 404/410 response identifies exactly the row to
- * delete. A device may re-subscribe and receive a fresh endpoint, so `device_id`
- * is unique and upserts key on it: the client's own device identity is stable
- * while its endpoint rotates.
+ * Direct Web Push subscriptions for this environment's PWA clients. The push
+ * service's opaque endpoint URL is the primary key (it addresses delivery, and a
+ * 404/410 names the row to delete); `device_id` is unique and upserts key on it
+ * because a device that re-subscribes gets a fresh endpoint.
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;

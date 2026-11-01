@@ -2,90 +2,18 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 /**
- * Durable claim + cancel barrier that closes the reactor's check-to-send race.
- *
- * The provider-command reactor decides whether to send a turn by reading the
- * append-only event log, then calls the provider adapter. Those are two separate
- * operations, so a `thread.turn-interrupt-requested` (or an auto-resume re-issue
- * of the same message) committed between them is invisible to the decision that
- * already passed: the reactor sends work the user stopped, or drives the same
- * prompt twice. Moving the read closer to the send shrank the window but could
- * not remove it — a read followed by a write is not atomic no matter how little
- * sits between them.
- *
- * The claim and barrier tables turn the decision into a single-statement
- * compare-and-set, so there is nothing left to interleave with.
- *
- * `provider_turn_send_claims` is keyed by (thread_id, message_id), which is the
- * identity of the work rather than of the request. At most one request per
- * message holds the claim at a time, so an original and its auto-resume re-issue
- * contend for one row and only the holder reaches the adapter.
- * `request_sequence` both records WHICH request holds it — a loser can tell "a
- * newer request superseded me" from "I was canceled" and log accordingly — and
- * orders the contenders: the row is taken by the HIGHEST sequence, never a lower
- * one. That direction is load-bearing rather than arbitrary. First-wins would
- * hand the claim to the stale original and permanently lock out the
- * session-exit auto-resume that re-issues the same message at a higher
- * sequence, which is the recovery this table is meant to make safe, not
- * prevent.
- *
- * `provider_turn_send_barriers` is the cancel side, one row per thread holding
- * the highest interrupt sequence seen. A claim write is gated on
- * `canceled_through_sequence >= request_sequence` inside the same statement, so
- * SQLite serializes the two writes: either the barrier lands first and the claim
- * writes zero rows, or the claim lands first and the barrier arrives to find the
- * turn already sent — which is the normal running-turn interrupt path, not a lost
- * stop.
- *
- * What this does NOT close: the send itself is not inside that statement. A stop
- * committed after the claim is granted but before the adapter call returns finds
- * a claim already taken, so the barrier alone cannot stop it — the turn is
- * running by then and has to be interrupted rather than prevented. That case is
- * the reason `fenceSendAgainstLateStop` exists in the reactor: it re-reads the
- * claim after the send and interrupts the turn it just started when the barrier
- * has since risen above it. So these tables remove the ambiguity from the
- * DECISION (was this send authorized?), not from the delivery; the post-send
- * fence, not this migration, is what makes a late stop take effect.
- *
- * Claim ownership is likewise not proof that a superseding request DELIVERED
- * anything. A newer request can take the row and then fail its provider RPC; if
- * the older request's successful RPC were interrupted merely because it lost
- * ownership, the claim would turn one healthy turn into no turn at all.
- * `provider_turn_send_deliveries` is the second phase of the protocol. It keeps
- * one durable row for EVERY concrete turn whose `sendTurn` succeeded instead of
- * one overwriteable "superseded" slot on the claim. That distinction is
- * load-bearing both for chains and equal-sequence replay: if A, B, and C
- * overlap, B returning must not erase A's delivery before C can reconcile both;
- * and if replayed sequence 90 returns turn A and then turn B, both concrete
- * turns must remain interruptible.
- *
- * Reconciliation is ordered by successful DELIVERY, not current ownership. The
- * total order is ascending (request_sequence, delivery_id), where delivery_id
- * is SQLite's integer insertion order. The final unreconciled row survives;
- * every earlier row naming a distinct turn is stale. Thus if C owns but fails,
- * B remains the survivor and only A is interrupted. For two concrete turns
- * returned by equal-sequence replay, the later inserted turn survives. Equal
- * turn ids are shared steers rather than duplicate turns and must never be
- * interrupted.
- *
- * A reconciled_at stamp durably retires stale evidence after its interrupt
- * succeeds or after a widened session-stop command is durably dispatched.
- * teardown_dispatched_at also remembers every concrete delivery the widened
- * teardown covered, including the then-current survivor that the survivor guard
- * correctly forbids retiring. If redrive later inserts a newer delivery, that
- * durable coverage lets reconciliation retire the old survivor without trying
- * to interrupt an already-destroyed session and starting another stop cycle.
- * Rows are retained for auditability, but only unreconciled rows participate in
- * later reconciliation.
- *
- * Growth: one claim row per user message ever sent, one delivery row per
- * distinct successful (request, concrete turn) pair, and one barrier row per
- * thread. These are bounded by the corresponding durable messages/requests and
- * provider results that the surrounding event tables already keep.
+ * Durable claim + cancel barrier closing the reactor's check-to-send race: a
+ * `thread.turn-interrupt-requested` or auto-resume re-issue committed between
+ * the event-log read and the adapter call must not send stopped work or drive
+ * the same prompt twice. The decision becomes a single-statement compare-and-set.
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
+  // Keyed by (thread_id, message_id): the identity of the work, not the request.
+  // The HIGHEST request_sequence takes the row; first-wins would lock out the
+  // higher-sequence session-exit auto-resume this table exists to make safe.
+  // request_sequence also tells a loser "superseded" apart from "canceled".
   yield* sql`
     CREATE TABLE IF NOT EXISTS provider_turn_send_claims (
       thread_id TEXT NOT NULL,
@@ -96,6 +24,15 @@ export default Effect.gen(function* () {
     )
   `;
 
+  // One row per concrete turn whose `sendTurn` succeeded; claim ownership is no
+  // proof of delivery. Order by (request_sequence, delivery_id): the last
+  // unreconciled row survives, earlier rows naming a distinct turn are stale,
+  // and equal turn ids are shared steers that must never be interrupted.
+
+  // `reconciled_at` retires stale rows once their interrupt succeeds or a widened
+  // stop is dispatched. `teardown_dispatched_at` records every delivery that stop
+  // covered, even the survivor, so redrive can retire it without re-stopping a
+  // destroyed session.
   yield* sql`
     CREATE TABLE IF NOT EXISTS provider_turn_send_deliveries (
       delivery_id INTEGER PRIMARY KEY,
@@ -109,6 +46,10 @@ export default Effect.gen(function* () {
     )
   `;
 
+  // One row per thread holding the highest interrupt sequence. A claim write is
+  // gated on `canceled_through_sequence >= request_sequence` in the same
+  // statement, so SQLite serializes it with the barrier. A stop landing after
+  // the claim is granted is not closed here; `fenceSendAgainstLateStop` does it.
   yield* sql`
     CREATE TABLE IF NOT EXISTS provider_turn_send_barriers (
       thread_id TEXT PRIMARY KEY,

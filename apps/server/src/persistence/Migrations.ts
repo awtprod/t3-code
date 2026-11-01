@@ -301,13 +301,10 @@ const run = Migrator.make({});
 export const RETIRED_MIGRATION_IDS: ReadonlyArray<number> = [57, 58, 59, 60];
 
 /**
- * Problems with the order of registered migration IDs.
- *
- * The Migrator runs only IDs above the highest applied one, so the registry
- * must be strictly increasing and gap-free apart from retired IDs. A gap means
- * a lower-numbered migration from another branch has not landed yet: merging
- * the higher one first would skip the lower one forever on every database that
- * upgrades in between (see `assertNoSkippedMigrations`).
+ * Problems with the order of registered migration IDs. The Migrator runs only
+ * IDs above the highest applied one, so the registry must be strictly increasing
+ * and gap-free apart from retired IDs: merging a higher migration before a
+ * missing lower one skips the lower forever (see `assertNoSkippedMigrations`).
  */
 const missingRange = (start: number, end: number, before: number): string =>
   start === end
@@ -359,14 +356,10 @@ export const findMigrationSequenceViolations = (
 export const MIGRATIONS_TABLE = "effect_sql_migrations";
 
 /**
- * Registered migration IDs that the Migrator would silently never run.
- *
- * The Migrator only runs registered migrations whose ID is greater than the
- * highest applied ID. A migration registered with a lower ID after a higher
- * one was already applied (e.g. two branches numbered ahead of each other and
- * merged/deployed out of order) is therefore skipped forever. Gaps in the
- * registry are irrelevant: only registered-but-unapplied IDs below the highest
- * applied ID are returned.
+ * Registered migration IDs that the Migrator would silently never run. It only
+ * runs IDs above the highest applied one, so a lower ID registered after a
+ * higher one was applied (branches merged or deployed out of order) is skipped
+ * forever. Gaps don't matter; only unapplied IDs below the highest applied count.
  */
 export const findSkippedMigrationIds = (
   registeredIds: ReadonlyArray<number>,

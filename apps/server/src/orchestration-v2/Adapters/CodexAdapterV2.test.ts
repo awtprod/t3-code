@@ -250,7 +250,7 @@ describe("CodexAdapterV2 runtime policy", () => {
   );
 });
 
-// Fork: Command Center launch behavior (upstream pruned the surrounding spawn tests in #22557).
+// Fork: Command Center launch behavior (upstream pruned the surrounding spawn tests).
 describe("CodexAdapterV2 Command Center launch", () => {
   it("points subagents of a manager-model (Astra) thread at the worker model", () => {
     const params = (model: string) =>

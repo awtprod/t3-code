@@ -868,7 +868,10 @@ export const layer = Layer.effect(
                       scheduledTaskId: active.id,
                       text: prompt,
                       attachments: [],
-                      author: { createdBy: active.createdBy, creationSource: active.creationSource },
+                      author: {
+                        createdBy: active.createdBy,
+                        creationSource: active.creationSource,
+                      },
                     },
                     // Nobody watches a server-opened run thread: it notifies only when it needs the user.
                     createdBy: "system",

@@ -67,13 +67,13 @@ const telemetryOperation = {
   generateAutomationSchedule: "schedule",
 } as const;
 
-function instrumentInternalGeneration<A>(
-  operation: keyof typeof telemetryOperation,
-  input: { readonly modelSelection: ModelSelection },
-  effect: Effect.Effect<A, TextGenerationError>,
-  record: (usage: InternalGenerationUsage) => Effect.Effect<void>,
-): Effect.Effect<A, TextGenerationError> {
-  return Effect.gen(function* () {
+const instrumentInternalGeneration = Effect.fn("TextGeneration.instrumentInternalGeneration")(
+  function* <A>(
+    operation: keyof typeof telemetryOperation,
+    input: { readonly modelSelection: ModelSelection },
+    effect: Effect.Effect<A, TextGenerationError>,
+    record: (usage: InternalGenerationUsage) => Effect.Effect<void>,
+  ) {
     const operationId = `internal-${Math.floor((yield* Random.next) * Number.MAX_SAFE_INTEGER).toString(36)}`;
     const startedAt = yield* DateTime.now;
     return yield* effect.pipe(
@@ -111,8 +111,8 @@ function instrumentInternalGeneration<A>(
         },
       }),
     );
-  });
-}
+  },
+);
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],

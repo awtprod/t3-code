@@ -2,21 +2,10 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 /**
- * Records that a user interrupt landed on a pending turn-start placeholder
- * before the provider reported `turn.started`.
- *
- * A `thread.turn.interrupt` that arrives before the provider's `turn.started`
- * has been projected cannot name a turn id (the aggregate mints none at
- * `turn.start`; the id only exists once the provider reports it). The decider
- * therefore emits an id-less `thread.turn-interrupt-requested`, which the
- * projection cannot attribute to a turn row — so the still-to-be-born turn was
- * created `running`, and the ensuing session exit would auto-resume the very
- * work the user just stopped. This column lets the id-less interrupt flag the
- * pending-start placeholder (the only row spanning the
- * turn-start-requested -> session-set(running) window); when that placeholder
- * is consumed the turn is born `interrupted` instead of `running`, so the
- * auto-resume path sees a deliberate user interrupt. Defaults to 0 (not
- * interrupted) for every existing and freshly-inserted pending row.
+ * Records a user interrupt that landed on a pending turn-start placeholder
+ * before `turn.started`, when no turn id exists yet to attribute it to. When the
+ * placeholder is consumed the turn is born `interrupted`, so auto-resume does
+ * not restart stopped work. Defaults to 0 (not interrupted).
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;

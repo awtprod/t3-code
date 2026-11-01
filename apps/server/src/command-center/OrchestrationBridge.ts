@@ -319,7 +319,6 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectStoreV2;
   const projections = yield* ProjectionStoreV2;
   const threads = yield* ThreadManagementService;
-  const launches = yield* ThreadLaunchService;
   const projectService = yield* ProjectService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const sql = yield* SqlClient.SqlClient;

@@ -1,19 +1,8 @@
 /**
- * Command Center usage analytics (`usage.query`) over orchestration v2.
- *
- * Every completed v2 provider turn with main-agent token usage is one
- * analytics row: tokens from the turn's `turnTokenUsage`, model and instance
- * from its run, project from its thread, duration from its timestamps, and
- * cost priced at read time with the same rates as the Usage page (the
- * `usagePriceOverrides` setting, then LiteLLM). The fork's
- * `projection_turn_usage` writer, its second pricing path and its table reads
- * are gone; the table stays on disk unread.
- *
- * Not available from v2 turn usage (reported as null or a fixed bucket): tool
- * use counts, provider-reported cost and per-subagent components. The
- * efficiency tier / rule / source / fallback / experiment columns come from
- * the fork's per-run routing decision (`efficiency_run_decisions`, migration
- * 103) and stay null for unrouted runs.
+ * Command Center usage analytics (`usage.query`) over orchestration v2: each
+ * completed provider turn with main-agent token usage is one row, priced at
+ * read time like the Usage page. Tool-use counts, provider cost and subagent
+ * parts are null; efficiency columns need an `efficiency_run_decisions` row.
  */
 import {
   NonNegativeInt,

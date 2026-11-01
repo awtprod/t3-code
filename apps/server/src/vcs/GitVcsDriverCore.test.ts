@@ -1009,11 +1009,9 @@ const makeStubbedDriverLayer = (handle: () => ChildProcessSpawner.ChildProcessHa
   );
 };
 
-// A thread pointed at a directory the server user cannot traverse (a repo under
-// another user's $HOME) used to abort the whole provider turn: the status read
-// runs upstream of the send, and its error propagated out of turn start. An
-// unusable workspace is indistinguishable from a missing one as far as status
-// is concerned, so it degrades to an empty status instead.
+// A directory the server user cannot traverse is indistinguishable from a missing
+// one for status, so it degrades to an empty status instead of aborting the turn
+// (the status read runs upstream of the send, and its error used to propagate out).
 it.effect("reports an empty status when Git cannot enter the workspace", () =>
   Effect.gen(function* () {
     const driver = yield* GitVcsDriver.GitVcsDriver;
@@ -4314,11 +4312,9 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const fileSystem = yield* FileSystem.FileSystem;
         const pathService = yield* Path.Path;
 
-        // Git refuses `file:` submodule transports by default (CVE-2022-39253).
-        // Command Center's driver scrubs the environment it hands git, so the
-        // usual `GIT_ALLOW_PROTOCOL` escape never reaches the child; pass the
+        // Git refuses `file:` submodule transports by default (CVE-2022-39253), and the
+        // driver scrubs `GIT_ALLOW_PROTOCOL` from the child environment, so pass the
         // allowance as command-line config on the one call that needs it.
-        // Real submodules are https/ssh and need none of this.
         const allowFileTransport = ["-c", "protocol.file.allow=always"] as const;
 
         const submoduleRepo = yield* makeTmpDir("git-submodule-");
@@ -4426,11 +4422,9 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       Effect.gen(function* () {
         const pathService = yield* Path.Path;
 
-        // Command Center: the hardened host Git scrubs `GIT_ALLOW_PROTOCOL`, so
-        // local `file:` submodules are never cloned into a worktree (see "does
-        // not fetch repository-controlled submodule URLs"). Seed them with
-        // command-line config and assert the `submodule update` each mode runs
-        // instead of the populated paths upstream checks.
+        // The hardened host Git scrubs `GIT_ALLOW_PROTOCOL`, so local `file:` submodules
+        // are never cloned into a worktree. Seed them with command-line config and assert
+        // the `submodule update` each mode runs instead of the populated paths.
         const allowFileTransport = ["-c", "protocol.file.allow=always"] as const;
         const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
         const submoduleUpdates = yield* Ref.make<Array<ReadonlyArray<string>>>([]);

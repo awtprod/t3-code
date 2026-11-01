@@ -1,9 +1,6 @@
 import {
   authScopeRequiredResponse,
   AuthAccessWriteScope,
-  AuthCommandCenterApproveScope,
-  AuthCommandCenterOperateScope,
-  AuthCommandCenterReadScope,
   AuthStandardClientScopes,
   AuthGrantScope,
   EnvironmentAuthInvalidError,

@@ -1039,7 +1039,10 @@ const make = Effect.gen(function* () {
               return materializedExit.value;
             }),
           );
-          yield* Cache.set(settingsCache, cacheKey, { settings: next, parseFailure: Option.none() });
+          yield* Cache.set(settingsCache, cacheKey, {
+            settings: next,
+            parseFailure: Option.none(),
+          });
           yield* emitChange(next);
           return resolveTextGenerationProvider(materialized);
         }),

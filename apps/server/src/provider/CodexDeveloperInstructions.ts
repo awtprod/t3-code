@@ -38,9 +38,9 @@ export interface CodexRuntimeInfo {
 }
 
 /**
- * Static client-sent Codex context for the token-efficiency baseline. Mode text
- * is Codex-native since upstream #24737 (no client `developer_instructions`), so
- * both modes measure the tool block that turns send through `additionalContext`.
+ * Static client-sent Codex context for the token-efficiency baseline. Mode text is Codex-native
+ * (no client `developer_instructions`), so both modes measure the tool block that turns send
+ * through `additionalContext`.
  */
 export const codexPlanModeDeveloperInstructions = (
   toolsAvailable: boolean | T3CodeToolAvailability = true,

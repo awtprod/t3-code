@@ -286,11 +286,10 @@ export class WorktreeCleanup extends Context.Service<
     readonly runNow: Effect.Effect<void>;
     readonly notices: Effect.Effect<ReadonlyArray<WorktreeCleanupNotice>>;
     readonly noticeChanges: Stream.Stream<ReadonlyArray<WorktreeCleanupNotice>>;
-    // Recovery path for a worktree this service removed: recreates it from
-    // the thread's branch and re-runs the project setup script. Exposed for
-    // whichever turn-start path decides a thread's worktree needs to exist;
-    // not wired to one in this pass — see the notice/settings toggle for the
-    // interim way to keep a worktree from being retired in the first place.
+    // Recovery path for a worktree this service removed: recreates it from the thread's branch and
+    // re-runs the project setup script. Exposed for whichever turn-start path decides the worktree
+    // must exist; not wired to one yet, so the notice/settings toggle is the interim way to keep a
+    // worktree from being retired.
     readonly prepareForTurn: (input: {
       readonly threadId: string;
       readonly projectId: string;

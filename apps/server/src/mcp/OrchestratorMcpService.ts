@@ -1747,11 +1747,10 @@ const make = Effect.gen(function* () {
   );
 
   /**
-   * Workspace strategy for a scheduled task created/updated over MCP: bound
-   * runs post into the existing thread (the strategy is unused, keep root);
-   * unbound runs launch a fresh worktree per run when the project is a Git
-   * repository, and otherwise run in the project folder, where there is
-   * nothing to branch from.
+   * Workspace strategy for a scheduled task created/updated over MCP: bound runs post into the
+   * existing thread (strategy unused, keep root); unbound runs launch a fresh worktree per run when
+   * the project is a Git repository, else run in the project folder, where there is nothing to
+   * branch from.
    */
   const scheduledTaskWorkspaceStrategy = Effect.fn(
     "OrchestratorMcpService.scheduledTaskWorkspaceStrategy",

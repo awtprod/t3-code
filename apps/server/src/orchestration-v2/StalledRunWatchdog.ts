@@ -18,18 +18,10 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
 /**
- * Stops a run wedged behind a live but silent provider session.
- *
- * A provider process that exits ends its run within seconds, but a live session
- * that simply stops streaming produces no signal at all, so without this sweep
- * the thread spins forever. The heartbeat is the thread shell's `updatedAt`,
- * which every streamed run, node and turn-item event bumps.
- *
- * The threshold comes from the fork's measurements of healthy turns: the
- * longest silence inside a turn was 7.2 minutes (p95 68 s), so 10 minutes leaves
- * headroom while bounding how long a user watches a false spinner. Worst case
- * to recovery is threshold + sweep interval. A run parked on an approval or a
- * question is never stopped: the user may legitimately be away.
+ * Stops a run wedged behind a live but silent provider session; the heartbeat is the thread shell's
+ * `updatedAt`, bumped by every streamed run, node and turn-item event. Threshold: the longest
+ * healthy silence measured 7.2 min (p95 68 s), so 10 min; worst case to recovery is threshold +
+ * sweep interval. A run parked on an approval or question is never stopped (the user may be away).
  */
 const STALLED_RUN_THRESHOLD = Duration.minutes(10);
 const STALLED_RUN_SWEEP_INTERVAL = Duration.seconds(60);

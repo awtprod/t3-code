@@ -2559,8 +2559,8 @@ export const layerWsRpc = (
           }),
         [EFFICIENCY_WS_METHODS.threadRoutingSubscribe]: (input) =>
           threadRouting.subscribe(input.threadId),
-        [WS_METHODS.efficiencyPreviewDecision]: (input) =>
-          Effect.gen(function* () {
+        [WS_METHODS.efficiencyPreviewDecision]: Effect.fn("ws.efficiencyPreviewDecision")(
+          function* (input) {
             const threadId = ThreadId.make(input.threadId ?? "efficiency-preview-thread");
             const shell = input.threadId
               ? yield* threadManagement
@@ -2605,7 +2605,8 @@ export const layerWsRpc = (
               modelSelection: resolution.command.modelSelection ?? input.modelSelection,
               decision: resolution.decision ?? null,
             };
-          }),
+          },
+        ),
         [WS_METHODS.serverGetProcessResourceHistory]: (input) =>
           processResourceMonitor.readHistory(input),
         [WS_METHODS.serverGetResourceTelemetryHistory]: (input) =>
@@ -3393,12 +3394,10 @@ export const layer = Layer.unwrap(
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
         const sessions = yield* SessionStore.SessionStore;
 
-        // Checked before authentication, not after: the session cookie is
-        // ambient, so a hostile page reaching this route arrives *already*
-        // authenticated. Rejecting on origin first also keeps a cross-origin
-        // probe from learning whether a valid session exists.
-        // `request.headers` is already lowercase-keyed by the platform's header
-        // parsing, so these lookups need no case folding of their own.
+        // Checked before authentication: the session cookie is ambient, so a hostile page reaching
+        // this route arrives *already* authenticated, and rejecting on origin first keeps a
+        // cross-origin probe from learning whether a valid session exists. `request.headers` is
+        // already lowercase-keyed by the platform, so these lookups need no case folding.
         const originDecision = decideWebSocketOrigin({
           origin: request.headers.origin,
           host: request.headers.host,

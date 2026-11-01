@@ -401,12 +401,10 @@ const layerHttpServer = Layer.unwrap(
 );
 
 /**
- * The preview gateway's own listener.
- *
- * It cannot share the main server: the gateway is mounted at `/` (dev servers
- * emit absolute URLs that would 404 under a path prefix), and `/` on the main
- * server is already claimed by the static/dev catch-all route. Always loopback —
- * reachability from another machine is Tailscale Serve's job, not the socket's.
+ * The preview gateway's own listener. It cannot share the main server: the gateway mounts at `/`
+ * (dev servers emit absolute URLs that would 404 under a path prefix) and `/` on the main server is
+ * already claimed by the static/dev catch-all route. Always loopback; reachability from another
+ * machine is Tailscale Serve's job, not the socket's.
  */
 const layerPreviewGatewayHttpServer = Layer.unwrap(
   Effect.gen(function* () {
@@ -420,16 +418,10 @@ const layerPreviewGatewayHttpServer = Layer.unwrap(
 );
 
 /**
- * Serve the preview gateway's routes on their own listener.
- *
- * `Layer.fresh` is the load-bearing part. `HttpRouter.serve` builds its router
- * from the module-level `HttpRouter.layer`, and layers are memoized by identity
- * within a single build — so without it the gateway registers its routes into
- * the *main app's* router. Both mount a catch-all at `/`, and startup dies with
- * `Method 'GET' already declared for route '/*'`.
- *
- * The listener is a parameter so a test can supply an ephemeral one and still
- * exercise this exact composition rather than a copy of it.
+ * Serve the preview gateway's routes on their own listener. `Layer.fresh` is load-bearing:
+ * `HttpRouter.serve` builds its router from the memoized module-level `HttpRouter.layer`, so without
+ * it the gateway registers into the *main app's* router and startup dies with `Method 'GET' already
+ * declared for route '/*'`. The listener is a parameter so a test can supply an ephemeral one.
  */
 export const makePreviewGatewayServedLayer = <A extends HttpServer.HttpServer, E, R>(
   httpServerLayer: Layer.Layer<A, E, R>,
@@ -689,13 +681,10 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
   }),
 );
 
-// ---------------------------------------------------------------------------
-// Command Center (fork). The layer graph below is the fork's, re-hosted on the
-// orchestration V2 runtime. Workers that drive orchestration (RunDispatcher,
-// RunLifecycle, RunRecoveryCoordinator, SpaceAgent, SpaceAgentWaker, the Space
-// activity feed, Instagram publishing) reach it only through
+// Command Center (fork): the layer graph below is the fork's, re-hosted on the orchestration V2
+// runtime. Workers that drive orchestration (RunDispatcher, RunLifecycle, RunRecoveryCoordinator,
+// SpaceAgent, SpaceAgentWaker, the Space activity feed, Instagram publishing) reach it only through
 // `OrchestrationBridge`.
-// ---------------------------------------------------------------------------
 
 const layerCommandCenterOrchestrationBridge = OrchestrationBridge.layer.pipe(
   Layer.provide(ProjectStore.layer),

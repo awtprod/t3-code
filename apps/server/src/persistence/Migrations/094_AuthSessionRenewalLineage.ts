@@ -2,10 +2,9 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 // Bearer session renewal lineage. `renewed_from_session_id` links a renewed
-// session to the one it replaced; `renewed_at` marks a session as already
-// renewed so it can mint at most one successor. The partial unique index backs
-// that rule at the storage layer and serves the lineage walks used when a
-// session is revoked.
+// session to its predecessor; `renewed_at` marks it renewed so it mints at most
+// one successor. The partial unique index enforces that and serves revocation
+// lineage walks.
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const columns = yield* sql<{ readonly name: string }>`
