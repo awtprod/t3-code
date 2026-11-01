@@ -9,6 +9,7 @@ import {
   flattenTemporaryWorktreeBranchName,
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
+  parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
   parseOriginUrlFromGitConfig,
   resolveAutoFeatureBranchName,
   sanitizeFeatureBranchName,
@@ -124,6 +125,20 @@ describe("parseOriginUrlFromGitConfig", () => {
       "\turl = https://github.com/me/repo.git",
     ].join("\n");
     expect(parseOriginUrlFromGitConfig(config)).toBe("https://github.com/acme/repo.git");
+  });
+});
+
+describe("parseGitHubRepositoryNameWithOwnerFromRemoteUrl", () => {
+  it("extracts the owner and repository from common GitHub remote shapes", () => {
+    expect(
+      parseGitHubRepositoryNameWithOwnerFromRemoteUrl("git@github.com:T3Tools/T3Code.git"),
+    ).toBe("T3Tools/T3Code");
+    expect(
+      parseGitHubRepositoryNameWithOwnerFromRemoteUrl("https://github.com/T3Tools/T3Code.git"),
+    ).toBe("T3Tools/T3Code");
+    expect(
+      parseGitHubRepositoryNameWithOwnerFromRemoteUrl("ssh://github.com/T3Tools/T3Code.git"),
+    ).toBe("T3Tools/T3Code");
   });
 });
 
