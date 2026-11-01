@@ -174,8 +174,8 @@ interface LoadedSource extends LoadedCommittedSource {
 }
 
 interface AuthoredTargetIdentity {
-  readonly dev: number;
-  readonly ino: number | undefined;
+  readonly dev: bigint;
+  readonly ino: bigint | undefined;
   readonly size: string;
   readonly contents: string;
 }

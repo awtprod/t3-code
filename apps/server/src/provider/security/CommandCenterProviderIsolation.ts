@@ -40,10 +40,10 @@ const MAX_LOCAL_GIT_CONFIG_BYTES = ByteSize.bytes(1024 * 1024);
 
 interface SecureControlFileIdentity {
   readonly type: FileSystem.File.Type;
-  readonly dev: number;
-  readonly ino: number | undefined;
+  readonly dev: bigint;
+  readonly ino: bigint | undefined;
   readonly mode: number;
-  readonly nlink: number | undefined;
+  readonly nlink: bigint | undefined;
   readonly uid: number | undefined;
   readonly size: string;
   readonly mtimeMs: number | undefined;
@@ -597,11 +597,11 @@ export const prepareCommandCenterCodexHome = Effect.fn(
 
   const optionalStat = (target: string) =>
     fileSystem.stat(target).pipe(
-      Effect.map(Option.some),
+      Effect.asSome,
       Effect.catchTags({
         PlatformError: (cause) =>
           isNotFound(cause)
-            ? Effect.succeed(Option.none())
+            ? Effect.succeedNone
             : Effect.fail(
                 codexHomeError("Command Center could not inspect its isolated Codex home.", cause),
               ),
@@ -846,11 +846,11 @@ export const prepareCommandCenterCodexHome = Effect.fn(
     );
   }
   const linkState = yield* fileSystem.readLink(targetAuthPath).pipe(
-    Effect.map(Option.some),
+    Effect.asSome,
     Effect.catchTags({
       PlatformError: (cause) =>
         isNotSymlink(cause)
-          ? Effect.succeed(Option.none())
+          ? Effect.succeedNone
           : Effect.fail(
               codexHomeError(
                 "Command Center could not verify isolated Codex authentication.",
@@ -895,11 +895,11 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
       .pipe(Effect.mapError((cause) => managedWorktreeError(issue, cause)));
   const statOptional = (target: string) =>
     fileSystem.stat(target).pipe(
-      Effect.map(Option.some),
+      Effect.asSome,
       Effect.catchTags({
         PlatformError: (cause) =>
           isNotFound(cause)
-            ? Effect.succeed(Option.none())
+            ? Effect.succeedNone
             : Effect.fail(
                 managedWorktreeError(
                   "Command Center could not inspect the workspace Git metadata.",
@@ -917,7 +917,7 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
     ]).pipe(Effect.mapError((cause) => managedWorktreeError(issue, cause)));
     if (
       info.type !== "File" ||
-      Option.getOrUndefined(info.nlink) !== 1 ||
+      Option.getOrUndefined(info.nlink) !== 1n ||
       !isSameResolvedPath(path, canonical, target)
     ) {
       return yield* managedWorktreeError(issue);
@@ -930,11 +930,11 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
       readonly required: boolean;
     }) {
       const canonical = yield* fileSystem.realPath(config.target).pipe(
-        Effect.map(Option.some),
+        Effect.asSome,
         Effect.catchTags({
           PlatformError: (cause) =>
             isNotFound(cause)
-              ? Effect.succeed(Option.none())
+              ? Effect.succeedNone
               : Effect.fail(
                   managedWorktreeError(
                     `Command Center could not canonicalize its ${config.description}.`,
@@ -966,7 +966,7 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
         );
       if (
         before.type !== "File" ||
-        Option.getOrUndefined(before.nlink) !== 1 ||
+        Option.getOrUndefined(before.nlink) !== 1n ||
         before.size > MAX_LOCAL_GIT_CONFIG_BYTES
       ) {
         return yield* managedWorktreeError(
