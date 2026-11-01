@@ -18,22 +18,19 @@ import { Route as ChatRouteImport } from './routes/_chat'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
 import { Route as ChatUsageRouteImport } from './routes/_chat.usage'
-import { Route as ChatSettingsRouteImport } from './routes/_chat.settings'
-import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
-import { Route as ChatAutomationsRouteImport } from './routes/_chat.automations'
-import { Route as ChatCommandRouteImport } from './routes/_chat.command'
-import { Route as ChatInboxRouteImport } from './routes/_chat.inbox'
-import { Route as ChatLessonsRouteImport } from './routes/_chat.lessons'
-import { Route as ChatObservationsRouteImport } from './routes/_chat.observations'
-import { Route as ChatProspectsRouteImport } from './routes/_chat.prospects'
-import { Route as ChatResourcesRouteImport } from './routes/_chat.resources'
-import { Route as ChatResponsibilitiesRouteImport } from './routes/_chat.responsibilities'
 import { Route as ChatSprintPlanRouteImport } from './routes/_chat.sprint-plan'
+import { Route as ChatSettingsRouteImport } from './routes/_chat.settings'
+import { Route as ChatResponsibilitiesRouteImport } from './routes/_chat.responsibilities'
+import { Route as ChatResourcesRouteImport } from './routes/_chat.resources'
+import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
+import { Route as ChatProspectsRouteImport } from './routes/_chat.prospects'
+import { Route as ChatObservationsRouteImport } from './routes/_chat.observations'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
+import { Route as ChatLessonsRouteImport } from './routes/_chat.lessons'
+import { Route as ChatInboxRouteImport } from './routes/_chat.inbox'
+import { Route as ChatCommandRouteImport } from './routes/_chat.command'
+import { Route as ChatAutomationsRouteImport } from './routes/_chat.automations'
 import { Route as ChatSettingsWorktreesRouteImport } from './routes/_chat.settings.worktrees'
-import { Route as ChatSettingsDatabasesRouteImport } from './routes/_chat.settings.databases'
-import { Route as ChatSettingsEfficiencyRouteImport } from './routes/_chat.settings.efficiency'
-import { Route as ChatSettingsNotificationsRouteImport } from './routes/_chat.settings.notifications'
 import { Route as ChatSettingsUsageRouteImport } from './routes/_chat.settings.usage'
 import { Route as ChatSettingsThreadsRouteImport } from './routes/_chat.settings.threads'
 import { Route as ChatSettingsStorageRouteImport } from './routes/_chat.settings.storage'
@@ -43,14 +40,17 @@ import { Route as ChatSettingsScheduledTasksRouteImport } from './routes/_chat.s
 import { Route as ChatSettingsProvidersRouteImport } from './routes/_chat.settings.providers'
 import { Route as ChatSettingsProjectsRouteImport } from './routes/_chat.settings.projects'
 import { Route as ChatSettingsOpenSourceLicensesRouteImport } from './routes/_chat.settings.open-source-licenses'
+import { Route as ChatSettingsNotificationsRouteImport } from './routes/_chat.settings.notifications'
 import { Route as ChatSettingsMaintenanceRouteImport } from './routes/_chat.settings.maintenance'
 import { Route as ChatSettingsLabsRouteImport } from './routes/_chat.settings.labs'
 import { Route as ChatSettingsKeybindingsRouteImport } from './routes/_chat.settings.keybindings'
 import { Route as ChatSettingsIntegrationsRouteImport } from './routes/_chat.settings.integrations'
 import { Route as ChatSettingsGeneralRouteImport } from './routes/_chat.settings.general'
+import { Route as ChatSettingsEfficiencyRouteImport } from './routes/_chat.settings.efficiency'
 import { Route as ChatSettingsDiffsRouteImport } from './routes/_chat.settings.diffs'
 import { Route as ChatSettingsDiagnosticsRouteImport } from './routes/_chat.settings.diagnostics'
 import { Route as ChatSettingsDevicesRouteImport } from './routes/_chat.settings.devices'
+import { Route as ChatSettingsDatabasesRouteImport } from './routes/_chat.settings.databases'
 import { Route as ChatSettingsConnectionsRouteImport } from './routes/_chat.settings.connections'
 import { Route as ChatSettingsChatRouteImport } from './routes/_chat.settings.chat'
 import { Route as ChatSettingsBrowserRouteImport } from './routes/_chat.settings.browser'
@@ -106,49 +106,14 @@ const ChatUsageRoute = ChatUsageRouteImport.update({
   path: '/usage',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatSprintPlanRoute = ChatSprintPlanRouteImport.update({
+  id: '/sprint-plan',
+  path: '/sprint-plan',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatSettingsRoute = ChatSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
-  getParentRoute: () => ChatRoute,
-} as any)
-const ChatPullRequestsRoute = ChatPullRequestsRouteImport.update({
-  id: '/pull-requests',
-  path: '/pull-requests',
-  getParentRoute: () => ChatRoute,
-} as any)
-const ChatAutomationsRoute = ChatAutomationsRouteImport.update({
-  id: '/automations',
-  path: '/automations',
-  getParentRoute: () => ChatRoute,
-} as any)
-const ChatCommandRoute = ChatCommandRouteImport.update({
-  id: '/command',
-  path: '/command',
-  getParentRoute: () => ChatRoute,
-} as any)
-const ChatInboxRoute = ChatInboxRouteImport.update({
-  id: '/inbox',
-  path: '/inbox',
-  getParentRoute: () => ChatRoute,
-} as any)
-const ChatLessonsRoute = ChatLessonsRouteImport.update({
-  id: '/lessons',
-  path: '/lessons',
-  getParentRoute: () => ChatRoute,
-} as any)
-const ChatObservationsRoute = ChatObservationsRouteImport.update({
-  id: '/observations',
-  path: '/observations',
-  getParentRoute: () => ChatRoute,
-} as any)
-const ChatProspectsRoute = ChatProspectsRouteImport.update({
-  id: '/prospects',
-  path: '/prospects',
-  getParentRoute: () => ChatRoute,
-} as any)
-const ChatResourcesRoute = ChatResourcesRouteImport.update({
-  id: '/resources',
-  path: '/resources',
   getParentRoute: () => ChatRoute,
 } as any)
 const ChatResponsibilitiesRoute = ChatResponsibilitiesRouteImport.update({
@@ -156,9 +121,24 @@ const ChatResponsibilitiesRoute = ChatResponsibilitiesRouteImport.update({
   path: '/responsibilities',
   getParentRoute: () => ChatRoute,
 } as any)
-const ChatSprintPlanRoute = ChatSprintPlanRouteImport.update({
-  id: '/sprint-plan',
-  path: '/sprint-plan',
+const ChatResourcesRoute = ChatResourcesRouteImport.update({
+  id: '/resources',
+  path: '/resources',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatPullRequestsRoute = ChatPullRequestsRouteImport.update({
+  id: '/pull-requests',
+  path: '/pull-requests',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatProspectsRoute = ChatProspectsRouteImport.update({
+  id: '/prospects',
+  path: '/prospects',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatObservationsRoute = ChatObservationsRouteImport.update({
+  id: '/observations',
+  path: '/observations',
   getParentRoute: () => ChatRoute,
 } as any)
 const ChatNewRoute = ChatNewRouteImport.update({
@@ -166,24 +146,29 @@ const ChatNewRoute = ChatNewRouteImport.update({
   path: '/new',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatLessonsRoute = ChatLessonsRouteImport.update({
+  id: '/lessons',
+  path: '/lessons',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatInboxRoute = ChatInboxRouteImport.update({
+  id: '/inbox',
+  path: '/inbox',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatCommandRoute = ChatCommandRouteImport.update({
+  id: '/command',
+  path: '/command',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatAutomationsRoute = ChatAutomationsRouteImport.update({
+  id: '/automations',
+  path: '/automations',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatSettingsWorktreesRoute = ChatSettingsWorktreesRouteImport.update({
   id: '/worktrees',
   path: '/worktrees',
-  getParentRoute: () => ChatSettingsRoute,
-} as any)
-const ChatSettingsDatabasesRoute = ChatSettingsDatabasesRouteImport.update({
-  id: '/databases',
-  path: '/databases',
-  getParentRoute: () => ChatSettingsRoute,
-} as any)
-const ChatSettingsEfficiencyRoute = ChatSettingsEfficiencyRouteImport.update({
-  id: '/efficiency',
-  path: '/efficiency',
-  getParentRoute: () => ChatSettingsRoute,
-} as any)
-const ChatSettingsNotificationsRoute = ChatSettingsNotificationsRouteImport.update({
-  id: '/notifications',
-  path: '/notifications',
   getParentRoute: () => ChatSettingsRoute,
 } as any)
 const ChatSettingsUsageRoute = ChatSettingsUsageRouteImport.update({
@@ -234,6 +219,12 @@ const ChatSettingsOpenSourceLicensesRoute =
     path: '/open-source-licenses',
     getParentRoute: () => ChatSettingsRoute,
   } as any)
+const ChatSettingsNotificationsRoute =
+  ChatSettingsNotificationsRouteImport.update({
+    id: '/notifications',
+    path: '/notifications',
+    getParentRoute: () => ChatSettingsRoute,
+  } as any)
 const ChatSettingsMaintenanceRoute = ChatSettingsMaintenanceRouteImport.update({
   id: '/maintenance',
   path: '/maintenance',
@@ -260,6 +251,11 @@ const ChatSettingsGeneralRoute = ChatSettingsGeneralRouteImport.update({
   path: '/general',
   getParentRoute: () => ChatSettingsRoute,
 } as any)
+const ChatSettingsEfficiencyRoute = ChatSettingsEfficiencyRouteImport.update({
+  id: '/efficiency',
+  path: '/efficiency',
+  getParentRoute: () => ChatSettingsRoute,
+} as any)
 const ChatSettingsDiffsRoute = ChatSettingsDiffsRouteImport.update({
   id: '/diffs',
   path: '/diffs',
@@ -273,6 +269,11 @@ const ChatSettingsDiagnosticsRoute = ChatSettingsDiagnosticsRouteImport.update({
 const ChatSettingsDevicesRoute = ChatSettingsDevicesRouteImport.update({
   id: '/devices',
   path: '/devices',
+  getParentRoute: () => ChatSettingsRoute,
+} as any)
+const ChatSettingsDatabasesRoute = ChatSettingsDatabasesRouteImport.update({
+  id: '/databases',
+  path: '/databases',
   getParentRoute: () => ChatSettingsRoute,
 } as any)
 const ChatSettingsConnectionsRoute = ChatSettingsConnectionsRouteImport.update({
@@ -334,18 +335,18 @@ export interface FileRoutesByFullPath {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
-  '/new': typeof ChatNewRoute
-  '/pull-requests': typeof ChatPullRequestsRoute
   '/automations': typeof ChatAutomationsRoute
   '/command': typeof ChatCommandRoute
   '/inbox': typeof ChatInboxRoute
   '/lessons': typeof ChatLessonsRoute
+  '/new': typeof ChatNewRoute
   '/observations': typeof ChatObservationsRoute
   '/prospects': typeof ChatProspectsRoute
+  '/pull-requests': typeof ChatPullRequestsRoute
   '/resources': typeof ChatResourcesRoute
   '/responsibilities': typeof ChatResponsibilitiesRoute
-  '/sprint-plan': typeof ChatSprintPlanRoute
   '/settings': typeof ChatSettingsRouteWithChildren
+  '/sprint-plan': typeof ChatSprintPlanRoute
   '/usage': typeof ChatUsageRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -358,14 +359,17 @@ export interface FileRoutesByFullPath {
   '/settings/browser': typeof ChatSettingsBrowserRoute
   '/settings/chat': typeof ChatSettingsChatRoute
   '/settings/connections': typeof ChatSettingsConnectionsRoute
+  '/settings/databases': typeof ChatSettingsDatabasesRoute
   '/settings/devices': typeof ChatSettingsDevicesRoute
   '/settings/diagnostics': typeof ChatSettingsDiagnosticsRoute
   '/settings/diffs': typeof ChatSettingsDiffsRoute
+  '/settings/efficiency': typeof ChatSettingsEfficiencyRoute
   '/settings/general': typeof ChatSettingsGeneralRoute
   '/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/settings/keybindings': typeof ChatSettingsKeybindingsRoute
   '/settings/labs': typeof ChatSettingsLabsRoute
   '/settings/maintenance': typeof ChatSettingsMaintenanceRoute
+  '/settings/notifications': typeof ChatSettingsNotificationsRoute
   '/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/settings/projects': typeof ChatSettingsProjectsRoute
   '/settings/providers': typeof ChatSettingsProvidersRoute
@@ -374,11 +378,8 @@ export interface FileRoutesByFullPath {
   '/settings/source-control': typeof ChatSettingsSourceControlRoute
   '/settings/storage': typeof ChatSettingsStorageRoute
   '/settings/threads': typeof ChatSettingsThreadsRoute
-  '/settings/worktrees': typeof ChatSettingsWorktreesRoute
-  '/settings/databases': typeof ChatSettingsDatabasesRoute
-  '/settings/efficiency': typeof ChatSettingsEfficiencyRoute
-  '/settings/notifications': typeof ChatSettingsNotificationsRoute
   '/settings/usage': typeof ChatSettingsUsageRoute
+  '/settings/worktrees': typeof ChatSettingsWorktreesRoute
 }
 export interface FileRoutesByTo {
   '/connect': typeof ConnectRoute
@@ -386,18 +387,18 @@ export interface FileRoutesByTo {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
-  '/new': typeof ChatNewRoute
-  '/pull-requests': typeof ChatPullRequestsRoute
   '/automations': typeof ChatAutomationsRoute
   '/command': typeof ChatCommandRoute
   '/inbox': typeof ChatInboxRoute
   '/lessons': typeof ChatLessonsRoute
+  '/new': typeof ChatNewRoute
   '/observations': typeof ChatObservationsRoute
   '/prospects': typeof ChatProspectsRoute
+  '/pull-requests': typeof ChatPullRequestsRoute
   '/resources': typeof ChatResourcesRoute
   '/responsibilities': typeof ChatResponsibilitiesRoute
-  '/sprint-plan': typeof ChatSprintPlanRoute
   '/settings': typeof ChatSettingsRouteWithChildren
+  '/sprint-plan': typeof ChatSprintPlanRoute
   '/usage': typeof ChatUsageRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/': typeof ChatIndexRoute
@@ -411,14 +412,17 @@ export interface FileRoutesByTo {
   '/settings/browser': typeof ChatSettingsBrowserRoute
   '/settings/chat': typeof ChatSettingsChatRoute
   '/settings/connections': typeof ChatSettingsConnectionsRoute
+  '/settings/databases': typeof ChatSettingsDatabasesRoute
   '/settings/devices': typeof ChatSettingsDevicesRoute
   '/settings/diagnostics': typeof ChatSettingsDiagnosticsRoute
   '/settings/diffs': typeof ChatSettingsDiffsRoute
+  '/settings/efficiency': typeof ChatSettingsEfficiencyRoute
   '/settings/general': typeof ChatSettingsGeneralRoute
   '/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/settings/keybindings': typeof ChatSettingsKeybindingsRoute
   '/settings/labs': typeof ChatSettingsLabsRoute
   '/settings/maintenance': typeof ChatSettingsMaintenanceRoute
+  '/settings/notifications': typeof ChatSettingsNotificationsRoute
   '/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/settings/projects': typeof ChatSettingsProjectsRoute
   '/settings/providers': typeof ChatSettingsProvidersRoute
@@ -427,11 +431,8 @@ export interface FileRoutesByTo {
   '/settings/source-control': typeof ChatSettingsSourceControlRoute
   '/settings/storage': typeof ChatSettingsStorageRoute
   '/settings/threads': typeof ChatSettingsThreadsRoute
-  '/settings/worktrees': typeof ChatSettingsWorktreesRoute
-  '/settings/databases': typeof ChatSettingsDatabasesRoute
-  '/settings/efficiency': typeof ChatSettingsEfficiencyRoute
-  '/settings/notifications': typeof ChatSettingsNotificationsRoute
   '/settings/usage': typeof ChatSettingsUsageRoute
+  '/settings/worktrees': typeof ChatSettingsWorktreesRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -441,18 +442,18 @@ export interface FileRoutesById {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
-  '/_chat/new': typeof ChatNewRoute
-  '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/_chat/automations': typeof ChatAutomationsRoute
   '/_chat/command': typeof ChatCommandRoute
   '/_chat/inbox': typeof ChatInboxRoute
   '/_chat/lessons': typeof ChatLessonsRoute
+  '/_chat/new': typeof ChatNewRoute
   '/_chat/observations': typeof ChatObservationsRoute
   '/_chat/prospects': typeof ChatProspectsRoute
+  '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/_chat/resources': typeof ChatResourcesRoute
   '/_chat/responsibilities': typeof ChatResponsibilitiesRoute
-  '/_chat/sprint-plan': typeof ChatSprintPlanRoute
   '/_chat/settings': typeof ChatSettingsRouteWithChildren
+  '/_chat/sprint-plan': typeof ChatSprintPlanRoute
   '/_chat/usage': typeof ChatUsageRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/_chat/': typeof ChatIndexRoute
@@ -466,14 +467,17 @@ export interface FileRoutesById {
   '/_chat/settings/browser': typeof ChatSettingsBrowserRoute
   '/_chat/settings/chat': typeof ChatSettingsChatRoute
   '/_chat/settings/connections': typeof ChatSettingsConnectionsRoute
+  '/_chat/settings/databases': typeof ChatSettingsDatabasesRoute
   '/_chat/settings/devices': typeof ChatSettingsDevicesRoute
   '/_chat/settings/diagnostics': typeof ChatSettingsDiagnosticsRoute
   '/_chat/settings/diffs': typeof ChatSettingsDiffsRoute
+  '/_chat/settings/efficiency': typeof ChatSettingsEfficiencyRoute
   '/_chat/settings/general': typeof ChatSettingsGeneralRoute
   '/_chat/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/_chat/settings/keybindings': typeof ChatSettingsKeybindingsRoute
   '/_chat/settings/labs': typeof ChatSettingsLabsRoute
   '/_chat/settings/maintenance': typeof ChatSettingsMaintenanceRoute
+  '/_chat/settings/notifications': typeof ChatSettingsNotificationsRoute
   '/_chat/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/_chat/settings/projects': typeof ChatSettingsProjectsRoute
   '/_chat/settings/providers': typeof ChatSettingsProvidersRoute
@@ -482,11 +486,8 @@ export interface FileRoutesById {
   '/_chat/settings/source-control': typeof ChatSettingsSourceControlRoute
   '/_chat/settings/storage': typeof ChatSettingsStorageRoute
   '/_chat/settings/threads': typeof ChatSettingsThreadsRoute
-  '/_chat/settings/worktrees': typeof ChatSettingsWorktreesRoute
-  '/_chat/settings/databases': typeof ChatSettingsDatabasesRoute
-  '/_chat/settings/efficiency': typeof ChatSettingsEfficiencyRoute
-  '/_chat/settings/notifications': typeof ChatSettingsNotificationsRoute
   '/_chat/settings/usage': typeof ChatSettingsUsageRoute
+  '/_chat/settings/worktrees': typeof ChatSettingsWorktreesRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -497,18 +498,18 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
-    | '/new'
-    | '/pull-requests'
     | '/automations'
     | '/command'
     | '/inbox'
     | '/lessons'
+    | '/new'
     | '/observations'
     | '/prospects'
+    | '/pull-requests'
     | '/resources'
     | '/responsibilities'
-    | '/sprint-plan'
     | '/settings'
+    | '/sprint-plan'
     | '/usage'
     | '/projects/$projectKey'
     | '/$environmentId/$threadId'
@@ -521,14 +522,17 @@ export interface FileRouteTypes {
     | '/settings/browser'
     | '/settings/chat'
     | '/settings/connections'
+    | '/settings/databases'
     | '/settings/devices'
     | '/settings/diagnostics'
     | '/settings/diffs'
+    | '/settings/efficiency'
     | '/settings/general'
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/labs'
     | '/settings/maintenance'
+    | '/settings/notifications'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -537,11 +541,8 @@ export interface FileRouteTypes {
     | '/settings/source-control'
     | '/settings/storage'
     | '/settings/threads'
-    | '/settings/worktrees'
-    | '/settings/databases'
-    | '/settings/efficiency'
-    | '/settings/notifications'
     | '/settings/usage'
+    | '/settings/worktrees'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/connect'
@@ -549,18 +550,18 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
-    | '/new'
-    | '/pull-requests'
     | '/automations'
     | '/command'
     | '/inbox'
     | '/lessons'
+    | '/new'
     | '/observations'
     | '/prospects'
+    | '/pull-requests'
     | '/resources'
     | '/responsibilities'
-    | '/sprint-plan'
     | '/settings'
+    | '/sprint-plan'
     | '/usage'
     | '/projects/$projectKey'
     | '/'
@@ -574,14 +575,17 @@ export interface FileRouteTypes {
     | '/settings/browser'
     | '/settings/chat'
     | '/settings/connections'
+    | '/settings/databases'
     | '/settings/devices'
     | '/settings/diagnostics'
     | '/settings/diffs'
+    | '/settings/efficiency'
     | '/settings/general'
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/labs'
     | '/settings/maintenance'
+    | '/settings/notifications'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -590,11 +594,8 @@ export interface FileRouteTypes {
     | '/settings/source-control'
     | '/settings/storage'
     | '/settings/threads'
-    | '/settings/worktrees'
-    | '/settings/databases'
-    | '/settings/efficiency'
-    | '/settings/notifications'
     | '/settings/usage'
+    | '/settings/worktrees'
   id:
     | '__root__'
     | '/_chat'
@@ -603,18 +604,18 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
-    | '/_chat/new'
-    | '/_chat/pull-requests'
     | '/_chat/automations'
     | '/_chat/command'
     | '/_chat/inbox'
     | '/_chat/lessons'
+    | '/_chat/new'
     | '/_chat/observations'
     | '/_chat/prospects'
+    | '/_chat/pull-requests'
     | '/_chat/resources'
     | '/_chat/responsibilities'
-    | '/_chat/sprint-plan'
     | '/_chat/settings'
+    | '/_chat/sprint-plan'
     | '/_chat/usage'
     | '/projects/$projectKey'
     | '/_chat/'
@@ -628,14 +629,17 @@ export interface FileRouteTypes {
     | '/_chat/settings/browser'
     | '/_chat/settings/chat'
     | '/_chat/settings/connections'
+    | '/_chat/settings/databases'
     | '/_chat/settings/devices'
     | '/_chat/settings/diagnostics'
     | '/_chat/settings/diffs'
+    | '/_chat/settings/efficiency'
     | '/_chat/settings/general'
     | '/_chat/settings/integrations'
     | '/_chat/settings/keybindings'
     | '/_chat/settings/labs'
     | '/_chat/settings/maintenance'
+    | '/_chat/settings/notifications'
     | '/_chat/settings/open-source-licenses'
     | '/_chat/settings/projects'
     | '/_chat/settings/providers'
@@ -644,11 +648,8 @@ export interface FileRouteTypes {
     | '/_chat/settings/source-control'
     | '/_chat/settings/storage'
     | '/_chat/settings/threads'
-    | '/_chat/settings/worktrees'
-    | '/_chat/settings/databases'
-    | '/_chat/settings/efficiency'
-    | '/_chat/settings/notifications'
     | '/_chat/settings/usage'
+    | '/_chat/settings/worktrees'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -726,67 +727,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatUsageRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/sprint-plan': {
+      id: '/_chat/sprint-plan'
+      path: '/sprint-plan'
+      fullPath: '/sprint-plan'
+      preLoaderRoute: typeof ChatSprintPlanRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/settings': {
       id: '/_chat/settings'
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof ChatSettingsRouteImport
-      parentRoute: typeof ChatRoute
-    }
-    '/_chat/pull-requests': {
-      id: '/_chat/pull-requests'
-      path: '/pull-requests'
-      fullPath: '/pull-requests'
-      preLoaderRoute: typeof ChatPullRequestsRouteImport
-      parentRoute: typeof ChatRoute
-    }
-    '/_chat/automations': {
-      id: '/_chat/automations'
-      path: '/automations'
-      fullPath: '/automations'
-      preLoaderRoute: typeof ChatAutomationsRouteImport
-      parentRoute: typeof ChatRoute
-    }
-    '/_chat/command': {
-      id: '/_chat/command'
-      path: '/command'
-      fullPath: '/command'
-      preLoaderRoute: typeof ChatCommandRouteImport
-      parentRoute: typeof ChatRoute
-    }
-    '/_chat/inbox': {
-      id: '/_chat/inbox'
-      path: '/inbox'
-      fullPath: '/inbox'
-      preLoaderRoute: typeof ChatInboxRouteImport
-      parentRoute: typeof ChatRoute
-    }
-    '/_chat/lessons': {
-      id: '/_chat/lessons'
-      path: '/lessons'
-      fullPath: '/lessons'
-      preLoaderRoute: typeof ChatLessonsRouteImport
-      parentRoute: typeof ChatRoute
-    }
-    '/_chat/observations': {
-      id: '/_chat/observations'
-      path: '/observations'
-      fullPath: '/observations'
-      preLoaderRoute: typeof ChatObservationsRouteImport
-      parentRoute: typeof ChatRoute
-    }
-    '/_chat/prospects': {
-      id: '/_chat/prospects'
-      path: '/prospects'
-      fullPath: '/prospects'
-      preLoaderRoute: typeof ChatProspectsRouteImport
-      parentRoute: typeof ChatRoute
-    }
-    '/_chat/resources': {
-      id: '/_chat/resources'
-      path: '/resources'
-      fullPath: '/resources'
-      preLoaderRoute: typeof ChatResourcesRouteImport
       parentRoute: typeof ChatRoute
     }
     '/_chat/responsibilities': {
@@ -796,11 +748,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatResponsibilitiesRouteImport
       parentRoute: typeof ChatRoute
     }
-    '/_chat/sprint-plan': {
-      id: '/_chat/sprint-plan'
-      path: '/sprint-plan'
-      fullPath: '/sprint-plan'
-      preLoaderRoute: typeof ChatSprintPlanRouteImport
+    '/_chat/resources': {
+      id: '/_chat/resources'
+      path: '/resources'
+      fullPath: '/resources'
+      preLoaderRoute: typeof ChatResourcesRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/pull-requests': {
+      id: '/_chat/pull-requests'
+      path: '/pull-requests'
+      fullPath: '/pull-requests'
+      preLoaderRoute: typeof ChatPullRequestsRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/prospects': {
+      id: '/_chat/prospects'
+      path: '/prospects'
+      fullPath: '/prospects'
+      preLoaderRoute: typeof ChatProspectsRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/observations': {
+      id: '/_chat/observations'
+      path: '/observations'
+      fullPath: '/observations'
+      preLoaderRoute: typeof ChatObservationsRouteImport
       parentRoute: typeof ChatRoute
     }
     '/_chat/new': {
@@ -810,32 +783,39 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatNewRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/lessons': {
+      id: '/_chat/lessons'
+      path: '/lessons'
+      fullPath: '/lessons'
+      preLoaderRoute: typeof ChatLessonsRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/inbox': {
+      id: '/_chat/inbox'
+      path: '/inbox'
+      fullPath: '/inbox'
+      preLoaderRoute: typeof ChatInboxRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/command': {
+      id: '/_chat/command'
+      path: '/command'
+      fullPath: '/command'
+      preLoaderRoute: typeof ChatCommandRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/automations': {
+      id: '/_chat/automations'
+      path: '/automations'
+      fullPath: '/automations'
+      preLoaderRoute: typeof ChatAutomationsRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/settings/worktrees': {
       id: '/_chat/settings/worktrees'
       path: '/worktrees'
       fullPath: '/settings/worktrees'
       preLoaderRoute: typeof ChatSettingsWorktreesRouteImport
-      parentRoute: typeof ChatSettingsRoute
-    }
-    '/_chat/settings/databases': {
-      id: '/_chat/settings/databases'
-      path: '/databases'
-      fullPath: '/settings/databases'
-      preLoaderRoute: typeof ChatSettingsDatabasesRouteImport
-      parentRoute: typeof ChatSettingsRoute
-    }
-    '/_chat/settings/efficiency': {
-      id: '/_chat/settings/efficiency'
-      path: '/efficiency'
-      fullPath: '/settings/efficiency'
-      preLoaderRoute: typeof ChatSettingsEfficiencyRouteImport
-      parentRoute: typeof ChatSettingsRoute
-    }
-    '/_chat/settings/notifications': {
-      id: '/_chat/settings/notifications'
-      path: '/notifications'
-      fullPath: '/settings/notifications'
-      preLoaderRoute: typeof ChatSettingsNotificationsRouteImport
       parentRoute: typeof ChatSettingsRoute
     }
     '/_chat/settings/usage': {
@@ -901,6 +881,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatSettingsOpenSourceLicensesRouteImport
       parentRoute: typeof ChatSettingsRoute
     }
+    '/_chat/settings/notifications': {
+      id: '/_chat/settings/notifications'
+      path: '/notifications'
+      fullPath: '/settings/notifications'
+      preLoaderRoute: typeof ChatSettingsNotificationsRouteImport
+      parentRoute: typeof ChatSettingsRoute
+    }
     '/_chat/settings/maintenance': {
       id: '/_chat/settings/maintenance'
       path: '/maintenance'
@@ -936,6 +923,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatSettingsGeneralRouteImport
       parentRoute: typeof ChatSettingsRoute
     }
+    '/_chat/settings/efficiency': {
+      id: '/_chat/settings/efficiency'
+      path: '/efficiency'
+      fullPath: '/settings/efficiency'
+      preLoaderRoute: typeof ChatSettingsEfficiencyRouteImport
+      parentRoute: typeof ChatSettingsRoute
+    }
     '/_chat/settings/diffs': {
       id: '/_chat/settings/diffs'
       path: '/diffs'
@@ -955,6 +949,13 @@ declare module '@tanstack/react-router' {
       path: '/devices'
       fullPath: '/settings/devices'
       preLoaderRoute: typeof ChatSettingsDevicesRouteImport
+      parentRoute: typeof ChatSettingsRoute
+    }
+    '/_chat/settings/databases': {
+      id: '/_chat/settings/databases'
+      path: '/databases'
+      fullPath: '/settings/databases'
+      preLoaderRoute: typeof ChatSettingsDatabasesRouteImport
       parentRoute: typeof ChatSettingsRoute
     }
     '/_chat/settings/connections': {
@@ -1039,14 +1040,17 @@ interface ChatSettingsRouteChildren {
   ChatSettingsBrowserRoute: typeof ChatSettingsBrowserRoute
   ChatSettingsChatRoute: typeof ChatSettingsChatRoute
   ChatSettingsConnectionsRoute: typeof ChatSettingsConnectionsRoute
+  ChatSettingsDatabasesRoute: typeof ChatSettingsDatabasesRoute
   ChatSettingsDevicesRoute: typeof ChatSettingsDevicesRoute
   ChatSettingsDiagnosticsRoute: typeof ChatSettingsDiagnosticsRoute
   ChatSettingsDiffsRoute: typeof ChatSettingsDiffsRoute
+  ChatSettingsEfficiencyRoute: typeof ChatSettingsEfficiencyRoute
   ChatSettingsGeneralRoute: typeof ChatSettingsGeneralRoute
   ChatSettingsIntegrationsRoute: typeof ChatSettingsIntegrationsRoute
   ChatSettingsKeybindingsRoute: typeof ChatSettingsKeybindingsRoute
   ChatSettingsLabsRoute: typeof ChatSettingsLabsRoute
   ChatSettingsMaintenanceRoute: typeof ChatSettingsMaintenanceRoute
+  ChatSettingsNotificationsRoute: typeof ChatSettingsNotificationsRoute
   ChatSettingsOpenSourceLicensesRoute: typeof ChatSettingsOpenSourceLicensesRoute
   ChatSettingsProjectsRoute: typeof ChatSettingsProjectsRoute
   ChatSettingsProvidersRoute: typeof ChatSettingsProvidersRoute
@@ -1055,11 +1059,8 @@ interface ChatSettingsRouteChildren {
   ChatSettingsSourceControlRoute: typeof ChatSettingsSourceControlRoute
   ChatSettingsStorageRoute: typeof ChatSettingsStorageRoute
   ChatSettingsThreadsRoute: typeof ChatSettingsThreadsRoute
-  ChatSettingsWorktreesRoute: typeof ChatSettingsWorktreesRoute
-  ChatSettingsDatabasesRoute: typeof ChatSettingsDatabasesRoute
-  ChatSettingsEfficiencyRoute: typeof ChatSettingsEfficiencyRoute
-  ChatSettingsNotificationsRoute: typeof ChatSettingsNotificationsRoute
   ChatSettingsUsageRoute: typeof ChatSettingsUsageRoute
+  ChatSettingsWorktreesRoute: typeof ChatSettingsWorktreesRoute
 }
 
 const ChatSettingsRouteChildren: ChatSettingsRouteChildren = {
@@ -1071,14 +1072,17 @@ const ChatSettingsRouteChildren: ChatSettingsRouteChildren = {
   ChatSettingsBrowserRoute: ChatSettingsBrowserRoute,
   ChatSettingsChatRoute: ChatSettingsChatRoute,
   ChatSettingsConnectionsRoute: ChatSettingsConnectionsRoute,
+  ChatSettingsDatabasesRoute: ChatSettingsDatabasesRoute,
   ChatSettingsDevicesRoute: ChatSettingsDevicesRoute,
   ChatSettingsDiagnosticsRoute: ChatSettingsDiagnosticsRoute,
   ChatSettingsDiffsRoute: ChatSettingsDiffsRoute,
+  ChatSettingsEfficiencyRoute: ChatSettingsEfficiencyRoute,
   ChatSettingsGeneralRoute: ChatSettingsGeneralRoute,
   ChatSettingsIntegrationsRoute: ChatSettingsIntegrationsRoute,
   ChatSettingsKeybindingsRoute: ChatSettingsKeybindingsRoute,
   ChatSettingsLabsRoute: ChatSettingsLabsRoute,
   ChatSettingsMaintenanceRoute: ChatSettingsMaintenanceRoute,
+  ChatSettingsNotificationsRoute: ChatSettingsNotificationsRoute,
   ChatSettingsOpenSourceLicensesRoute: ChatSettingsOpenSourceLicensesRoute,
   ChatSettingsProjectsRoute: ChatSettingsProjectsRoute,
   ChatSettingsProvidersRoute: ChatSettingsProvidersRoute,
@@ -1087,11 +1091,8 @@ const ChatSettingsRouteChildren: ChatSettingsRouteChildren = {
   ChatSettingsSourceControlRoute: ChatSettingsSourceControlRoute,
   ChatSettingsStorageRoute: ChatSettingsStorageRoute,
   ChatSettingsThreadsRoute: ChatSettingsThreadsRoute,
-  ChatSettingsWorktreesRoute: ChatSettingsWorktreesRoute,
-  ChatSettingsDatabasesRoute: ChatSettingsDatabasesRoute,
-  ChatSettingsEfficiencyRoute: ChatSettingsEfficiencyRoute,
-  ChatSettingsNotificationsRoute: ChatSettingsNotificationsRoute,
   ChatSettingsUsageRoute: ChatSettingsUsageRoute,
+  ChatSettingsWorktreesRoute: ChatSettingsWorktreesRoute,
 }
 
 const ChatSettingsRouteWithChildren = ChatSettingsRoute._addFileChildren(
@@ -1099,18 +1100,18 @@ const ChatSettingsRouteWithChildren = ChatSettingsRoute._addFileChildren(
 )
 
 interface ChatRouteChildren {
-  ChatNewRoute: typeof ChatNewRoute
-  ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatAutomationsRoute: typeof ChatAutomationsRoute
   ChatCommandRoute: typeof ChatCommandRoute
   ChatInboxRoute: typeof ChatInboxRoute
   ChatLessonsRoute: typeof ChatLessonsRoute
+  ChatNewRoute: typeof ChatNewRoute
   ChatObservationsRoute: typeof ChatObservationsRoute
   ChatProspectsRoute: typeof ChatProspectsRoute
+  ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatResourcesRoute: typeof ChatResourcesRoute
   ChatResponsibilitiesRoute: typeof ChatResponsibilitiesRoute
-  ChatSprintPlanRoute: typeof ChatSprintPlanRoute
   ChatSettingsRoute: typeof ChatSettingsRouteWithChildren
+  ChatSprintPlanRoute: typeof ChatSprintPlanRoute
   ChatUsageRoute: typeof ChatUsageRoute
   ChatIndexRoute: typeof ChatIndexRoute
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
@@ -1118,18 +1119,18 @@ interface ChatRouteChildren {
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
-  ChatNewRoute: ChatNewRoute,
-  ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatAutomationsRoute: ChatAutomationsRoute,
   ChatCommandRoute: ChatCommandRoute,
   ChatInboxRoute: ChatInboxRoute,
   ChatLessonsRoute: ChatLessonsRoute,
+  ChatNewRoute: ChatNewRoute,
   ChatObservationsRoute: ChatObservationsRoute,
   ChatProspectsRoute: ChatProspectsRoute,
+  ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatResourcesRoute: ChatResourcesRoute,
   ChatResponsibilitiesRoute: ChatResponsibilitiesRoute,
-  ChatSprintPlanRoute: ChatSprintPlanRoute,
   ChatSettingsRoute: ChatSettingsRouteWithChildren,
+  ChatSprintPlanRoute: ChatSprintPlanRoute,
   ChatUsageRoute: ChatUsageRoute,
   ChatIndexRoute: ChatIndexRoute,
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
