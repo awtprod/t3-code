@@ -101,6 +101,18 @@
               "packages/provider-testing/**"
             ],
             "options": { "diagnosticSeverity": { "effectFnOpportunity": "off" } }
+          },
+          // Fork-owned server code predates upstream's Effect.fn rule; migrate it in its own change.
+          // tsc-rs only matches globs that end in a file pattern.
+          {
+            "include": [
+              "**/server/src/command-center/**/*.ts",
+              "**/server/src/efficiency/**/*.ts",
+              "**/server/src/mcp/toolkits/command-center/**/*.ts",
+              "**/server/src/resourceTelemetry/HostUsage.ts",
+              "**/server/src/webPush/**/*.ts"
+            ],
+            "options": { "diagnosticSeverity": { "effectFnOpportunity": "off" } }
           }
         ]
       }
