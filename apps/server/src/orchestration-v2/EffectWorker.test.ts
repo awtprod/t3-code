@@ -167,6 +167,54 @@ function layerExecutorFor(input: {
   );
 }
 
+it("does not retry pure interrupt races where the turn is already gone", () => {
+  assert.isTrue(
+    EffectWorker.isNonRetryableProviderTurnControlFailure(
+      "provider-turn.interrupt",
+      "ProviderAdapterInterruptError: ... ACP provider turn provider-turn:x is not active",
+    ),
+  );
+  assert.isTrue(
+    EffectWorker.isNonRetryableProviderTurnControlFailure(
+      "provider-turn.interrupt",
+      "Provider session provider-session:x is not active.",
+    ),
+  );
+  // Claude words its stale-target refusal differently. The fork treated a Stop
+  // whose turn had already been replaced as settled; retrying it only delays.
+  assert.isTrue(
+    EffectWorker.isNonRetryableProviderTurnControlFailure(
+      "provider-turn.interrupt",
+      "ProviderAdapterProtocolError: Claude provider turn provider-turn:x is not the active turn.",
+    ),
+  );
+  assert.isFalse(
+    EffectWorker.isNonRetryableProviderTurnControlFailure(
+      "provider-turn.restart",
+      "ProviderAdapterProtocolError: Claude provider turn provider-turn:x is not the active turn.",
+    ),
+  );
+  // Restart is compound (interrupt + detach + start). Do not swallow start failures.
+  assert.isFalse(
+    EffectWorker.isNonRetryableProviderTurnControlFailure(
+      "provider-turn.restart",
+      "Provider session provider-session:x is not active.",
+    ),
+  );
+  assert.isFalse(
+    EffectWorker.isNonRetryableProviderTurnControlFailure(
+      "provider-turn.start",
+      "Provider session provider-session:x is not active.",
+    ),
+  );
+  assert.isFalse(
+    EffectWorker.isNonRetryableProviderTurnControlFailure(
+      "provider-turn.interrupt",
+      "ACP hard teardown failed unexpectedly; the session is poisoned",
+    ),
+  );
+});
+
 it.effect("settles a stopped run when its adapter has already lost the native turn", () =>
   Effect.gen(function* () {
     const now = yield* DateTime.now;
