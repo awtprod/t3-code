@@ -113,6 +113,7 @@ import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } f
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { useThreadHasUnsentDraft } from "../../composerDraftStore";
+import { useThreadAlert } from "../../notifications/threadAlertStore";
 
 // The fields thread rows show. Provider status pushes refresh `checkedAt`,
 // status and auth on every provider; leaving those out keeps each
@@ -673,6 +674,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const terminalProcessCount = runningTerminalIds.length;
   const hasUnsentDraft = useThreadHasUnsentDraft(threadRef) && !props.isRouteThread;
+  // Set when a task finished or failed while this thread was off screen; cleared on open.
+  const threadAlert = useThreadAlert(threadRef);
   const handleDiscardDraftClick = (event: ReactMouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
@@ -962,7 +965,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     isFileDragOver && !props.isActive && !isSelected && "bg-sidebar-row-hover",
     props.sortable?.isDragging &&
       "bg-sidebar bg-linear-to-b from-sidebar-row-active to-sidebar-row-active text-sidebar-foreground opacity-100 shadow-lg",
+    // The tint survives Do Not Disturb, when the banner and chime may both be swallowed.
+    threadAlert === "completed" && "bg-success/10",
+    threadAlert === "failed" && "bg-error/10",
   );
+  const threadAlertSplash =
+    threadAlert === null ? null : (
+      <span
+        aria-hidden
+        className={cn(
+          "pointer-events-none absolute inset-y-0 left-0 z-0 w-1 rounded-r-sm motion-safe:animate-thread-alert-splash",
+          threadAlert === "failed" ? "bg-error" : "bg-success",
+        )}
+      />
+    );
   const sortable = props.sortable;
   const sortableRootProps = sortable
     ? {
@@ -1231,6 +1247,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               />
             }
           >
+            {threadAlertSplash}
             {/* `contents` keeps one-line rows a single flex row. */}
             <div className={multiline ? "flex h-6 min-w-0 items-center gap-2.5" : "contents"}>
               {accessibleTitle}
@@ -1413,6 +1430,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           }
         >
           {accessibleTitle}
+          {threadAlertSplash}
           <div
             className={cn(
               "relative z-10 h-[4.875rem] px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)",

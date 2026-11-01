@@ -36,7 +36,9 @@ export function markdownImageCopy(alt: string, src: string, title: string | unde
   const escapedAlt = alt.replaceAll("\\", "\\\\").replaceAll("[", "\\[").replaceAll("]", "\\]");
   const titleSuffix =
     title === undefined ? "" : ` "${title.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
-  return `![${escapedAlt}](${src}${titleSuffix})`;
+  if (!/[\s()]/.test(src)) return `![${escapedAlt}](${src}${titleSuffix})`;
+  const escapedSrc = src.replaceAll("\\", "\\\\").replaceAll("<", "\\<").replaceAll(">", "\\>");
+  return `![${escapedAlt}](<${escapedSrc}>${titleSuffix})`;
 }
 
 /**

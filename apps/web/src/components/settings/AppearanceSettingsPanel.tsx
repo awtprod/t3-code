@@ -266,8 +266,8 @@ export function AppearanceSettingsPanel() {
                   <SelectValue>{CHAT_WIDTH_LABELS[settings.chatWidth]}</SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
-                  <SelectItem value="comfortable">Comfortable (default)</SelectItem>
-                  <SelectItem value="wide">Wide</SelectItem>
+                  <SelectItem value="comfortable">Comfortable</SelectItem>
+                  <SelectItem value="wide">Wide (default)</SelectItem>
                   <SelectItem value="full">Full</SelectItem>
                 </SelectPopup>
               </Select>
