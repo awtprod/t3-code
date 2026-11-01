@@ -502,6 +502,16 @@ After the GitHub Release is published, the workflow runs `node scripts/build-npm
 `node apps/server/scripts/cli.ts publish --packages-dir npm-packages`, which runs `npm publish` on
 the launcher tarball. That is the only package published per release: `@awtprod/command-center`.
 
+Command Center fork status: `release.yml` does not run in this fork. Every job needs
+`resolve_commit`, which is gated on `github.repository == 'pingdotgg/t3code'`, and desktop builds go
+through `desktop-macos-build.yml`, `desktop-windows-build.yml` and `release-desktop.yml`. Before
+turning releases on, reconcile the fork's `publish_cli` job with the launcher flow above: it still
+runs before `release` and calls `cli.ts publish --tag … --app-version …`, but `publish` now takes
+`--packages-dir` and publishes `t3.tgz`, and `scripts/build-npm-launcher.ts` still names the launcher
+package `t3` (`NPM_LAUNCHER_PACKAGE_NAME`), not `@awtprod/command-center`. The job aligns package
+versions to the release version (`scripts/update-release-package-versions.ts`) before it publishes, so
+nothing needs a manual version bump.
+
 Checklist:
 
 1. Create the public npm package `@awtprod/command-center` under the `awtprod` scope, or confirm the
