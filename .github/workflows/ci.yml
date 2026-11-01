@@ -171,6 +171,10 @@ jobs:
       - name: Test nightly release checks
         run: node --test .github/scripts/check-nightly-release.test.cjs
 
+      # Upstream v0.1.5's web browser test project and the built-boot check run in headless Chromium.
+      - name: Install Chromium for web browser tests
+        run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
+
       - name: Test
         run: vp run --parallel --concurrency-limit 4 --filter '!@awtprod/command-center' --filter '!@t3tools/monorepo' test
 
