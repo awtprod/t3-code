@@ -1224,11 +1224,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/labs",
   },
   {
-    id: "restore-plan-mode",
-    title: "Restore plan mode (legacy)",
-    to: "/settings/labs",
-  },
-  {
     id: "load-balancing",
     title: "Load balancing",
     to: "/settings/connections",
