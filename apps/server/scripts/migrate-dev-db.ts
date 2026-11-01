@@ -34,7 +34,7 @@ export class MigrateDevDbSharedHomeError extends Schema.TaggedError<MigrateDevDb
   {},
 ) {
   override get message(): string {
-    return "Refusing to rebuild the shared ~/.t3 database. Use an isolated --base-dir.";
+    return "Refusing to rebuild a shared or live database (~/.t3 or the Command Center home). Use an isolated --base-dir.";
   }
 }
 
@@ -472,12 +472,17 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
   if (!(yield* fs.exists(sourcePath))) {
     return yield* new MigrateDevDbSourceMissingError({ sourcePath });
   }
-  const [canonicalBaseDir, canonicalSharedHome] = yield* Effect.all([
-    fs.realPath(baseDir).pipe(Effect.orElseSucceed(() => baseDir)),
-    fs.realPath(sharedHome).pipe(Effect.orElseSucceed(() => sharedHome)),
-  ]);
-  if (canonicalBaseDir === canonicalSharedHome) {
-    return yield* new MigrateDevDbSharedHomeError();
+  // Command Center's live home is never a dev target either, wherever it is configured.
+  const protectedHomes = [
+    sharedHome,
+    path.resolve(process.env.COMMAND_CENTER_HOME ?? path.join(NodeOS.homedir(), ".command-center")),
+  ];
+  const canonicalBaseDir = yield* fs.realPath(baseDir).pipe(Effect.orElseSucceed(() => baseDir));
+  for (const home of protectedHomes) {
+    const canonicalHome = yield* fs.realPath(home).pipe(Effect.orElseSucceed(() => home));
+    if (canonicalBaseDir === canonicalHome) {
+      return yield* new MigrateDevDbSharedHomeError();
+    }
   }
   // Both destination and snapshot are deleted below; reject sources resolving to either.
   const canonicalSourcePath = yield* fs
