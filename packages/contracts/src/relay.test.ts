@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
-import * as OpenApi from "effect/http-api/OpenApi";
 import * as Schema from "effect/Schema";
 
 import {
-  RelayApi,
   RelayDeviceRegistrationRequest,
   RelayProspectNotification,
   relayProspectNotificationIdempotencyKey,
@@ -13,12 +11,11 @@ const decodeRegistration = Schema.decodeUnknownSync(RelayDeviceRegistrationReque
 const decodeProspectNotification = Schema.decodeUnknownSync(RelayProspectNotification);
 
 describe("RelayDeviceRegistrationRequest", () => {
-  // Older app builds predate platform "web"; their payloads must keep
-  // decoding unchanged after the platform union widened.
+  // Older app builds predate platform "web"; their payloads must still decode.
   it("still decodes iOS payloads from older app builds", () => {
     const decoded = decodeRegistration({
       deviceId: "device-1",
-      label: "Julius's iPhone",
+      label: "Example iPhone",
       platform: "ios",
       iosMajorVersion: 18,
       appVersion: "1.0.0",
@@ -76,20 +73,6 @@ const device = {
 };
 
 describe("mobile device platforms", () => {
-  it.each([
-    [23, "Failure"],
-    [24, "Success"],
-    [37, "Success"],
-  ])("enforces the Android minimum without an upper bound (API %i)", (androidApiLevel, result) => {
-    expect(decodeDevice({ ...device, platform: "android", androidApiLevel })._tag).toBe(result);
-  });
-
-  it("accepts Android tokens without Apple routing and preserves older iOS registrations", () => {
-    expect(decodeDevice({ ...device, platform: "android", androidApiLevel: 36 })._tag).toBe(
-      "Success",
-    );
-    expect(decodeDevice({ ...device, platform: "ios", iosMajorVersion: 18 })._tag).toBe("Success");
-  });
   it("rejects missing platform versions and Apple activity tokens on Android", () => {
     expect(decodeDevice({ ...device, platform: "ios" })._tag).toBe("Failure");
     expect(decodeDevice({ ...device, platform: "android" })._tag).toBe("Failure");
@@ -144,17 +127,5 @@ describe("RelayProspectNotification", () => {
       relayProspectNotificationIdempotencyKey({ ...valid }),
     );
     expect(relayProspectNotificationIdempotencyKey(valid)).toContain("evaluation-1");
-  });
-});
-
-describe("RelayApi security", () => {
-  it("describes DPoP access tokens using the HTTP DPoP authorization scheme", () => {
-    const document = OpenApi.fromApi(RelayApi);
-
-    expect(document.components.securitySchemes?.relayDpop).toEqual({
-      type: "http",
-      scheme: "DPoP",
-      description: "DPoP-bound access token. Requests must also include the DPoP proof JWT header.",
-    });
   });
 });

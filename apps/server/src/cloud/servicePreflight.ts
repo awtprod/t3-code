@@ -1,4 +1,5 @@
 import packageJson from "../../package.json" with { type: "json" };
+import { BUILD_MIGRATION_HEAD, recordedMigrations } from "../persistence/databaseMigrationHead.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
 export type ServicePreflightResult =
@@ -14,7 +15,6 @@ export type ServicePreflightResult =
     };
 
 export function runServicePreflight(input: {
-  /** Older servers always pass this flag when invoking a staged preflight. */
   readonly databasePath: string;
   readonly launcherProtocol: number;
   readonly version?: string;
@@ -24,12 +24,43 @@ export function runServicePreflight(input: {
     return {
       status: "blocked",
       version,
-      reason:
-        "This release requires a newer Command Center service launcher. Update it on the server machine.",
+      // A stale CLI earlier on PATH (an old npm/nvm global) makes `command-center service install`
+      // reinstall itself and report success, so name the exact build and the path check.
+      reason: [
+        `The installed Command Center service launcher speaks protocol ${input.launcherProtocol}, but @awtprod/command-center@${version} requires protocol ${SERVICE_LAUNCHER_PROTOCOL}.`,
+        `On the server machine, install this exact Command Center CLI (@awtprod/command-center@${version}).`,
+        `Check that \`command-center --version\` prints ${version} and that \`which -a command-center t3\` lists no older install (such as an npm or nvm global) first, then run \`command-center service install\` with that CLI.`,
+        "Updating the desktop app does not update this CLI, and `command-center service update` only repairs the service with whichever CLI runs it.",
+      ].join(" "),
+    };
+  }
+
+  const newer = newerRecordedMigrations(input.databasePath);
+  if (newer === null) {
+    return {
+      status: "blocked",
+      version,
+      reason: `Could not read this database to confirm @awtprod/command-center@${version} supports it.`,
+    };
+  }
+  if (newer.length > 0) {
+    return {
+      status: "blocked",
+      version,
+      reason: `This database has migrations that @awtprod/command-center@${version} does not know: ${newer.join(", ")}. A newer build wrote them, and running @awtprod/command-center@${version} on this database is not safe. Stay on the newer release, or wait for a release that includes these migrations.`,
     };
   }
 
   return { status: "ready", version, launcherProtocol: SERVICE_LAUNCHER_PROTOCOL };
+}
+
+/** Migrations a newer build recorded, or null when the database exists but cannot be read.
+ * Startup already handles renamed ids this build knows. */
+function newerRecordedMigrations(databasePath: string): ReadonlyArray<string> | null {
+  const recorded = recordedMigrations(databasePath);
+  return recorded === null
+    ? null
+    : recorded.filter(({ id }) => id > BUILD_MIGRATION_HEAD).map(({ id, name }) => `${id}_${name}`);
 }
 
 export function decodeServicePreflightResult(value: unknown): ServicePreflightResult | undefined {

@@ -29,10 +29,6 @@ import * as DesktopConnectionCatalogStore from "../app/DesktopConnectionCatalogS
 import { isLocalExecutionOverride } from "../ipc/methods/primaryBackend.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 
-// A loopback /oauth/token exchange can fail transiently while the backend
-// settles (a 502-504, a refused or reset connection, a timeout). Retry those
-// for as long as the renderer's own bootstrap does; a rejected credential or a
-// server error is final.
 const BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT = Duration.seconds(15);
 const BOOTSTRAP_TRANSIENT_RETRY_INTERVAL = Duration.millis(500);
 const TRANSIENT_BOOTSTRAP_STATUS_CODES = new Set([502, 503, 504]);
@@ -249,9 +245,7 @@ export const make = Effect.gen(function* () {
           return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
         }
         const config = configOption.value;
-        // A backend launched with the desktop secret accepts the current
-        // window's token, not the one frozen into its launch config; this
-        // exchange can run long after launch (e.g. after a suspend).
+        // Secret-authenticated backends accept the current window token; the launch token may be stale.
         const secret = config.bootstrap.desktopBootstrapSecret;
         const credential =
           secret === undefined
@@ -273,7 +267,6 @@ export const make = Effect.gen(function* () {
             while: isTransientBearerBootstrapError,
             schedule: Schedule.spaced(BOOTSTRAP_TRANSIENT_RETRY_INTERVAL),
           }),
-          // Bounds the attempts and any request still in flight at the deadline.
           Effect.timeout(BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT),
           Effect.mapError(
             (cause) =>

@@ -10,6 +10,17 @@ import type {
   ModelSelection,
   ProviderInstanceId,
 } from "@t3tools/contracts";
+import {
+  isProviderAvailable,
+  isProviderTextGenerationCapable,
+  resolveProjectProviderInstanceEnabled,
+} from "@t3tools/contracts";
+import { exhaustedUsageWindow } from "@t3tools/shared/usageLimits";
+import {
+  defaultTextGenerationModel,
+  fallbackTextGenerationModelSelection,
+} from "@t3tools/shared/serverSettings";
+import * as ServerSettings from "../serverSettings.ts";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import { TextGenerationError } from "@t3tools/contracts";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -34,9 +45,6 @@ export type {
   ThreadTitleGenerationResult,
 } from "@t3tools/provider-core/server/textGeneration";
 
-/**
- * TextGeneration - Service tag for commit and change request text generation.
- */
 export class TextGeneration extends Context.Service<TextGeneration, ProviderTextGeneration>()(
   "@awtprod/command-center/textGeneration/TextGeneration",
 ) {}
@@ -124,84 +132,151 @@ const resolveInstance = (
     ),
   );
 
+// Review guides investigate the checkout read-only; the other drivers reject that request.
+const INVESTIGATING_DRIVERS = new Set(["codex", "claudeAgent"]);
+
+/**
+ * Builds the service over a registry. `serverSettings` enables upstream's
+ * out-of-usage fallback; without it (tests) the requested selection is used.
+ * Command Center records every op except review guides through `record`.
+ */
 export const makeTextGenerationFromRegistry = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
   record: (usage: InternalGenerationUsage) => Effect.Effect<void> = () => Effect.void,
   sourceControl?: SourceControlProviderRegistry.SourceControlProviderRegistry["Service"],
-): TextGeneration["Service"] =>
-  TextGeneration.of({
-    generateCommitMessage: (input) =>
-      instrumentInternalGeneration(
-        "generateCommitMessage",
-        input,
-        resolveInstance(registry, "generateCommitMessage", input.modelSelection.instanceId).pipe(
-          Effect.flatMap((textGeneration) => textGeneration.generateCommitMessage(input)),
-        ),
-        record,
+  serverSettings?: ServerSettings.ServerSettingsService["Service"],
+): TextGeneration["Service"] => {
+  const fallbackSelection = Effect.fn("TextGeneration.fallbackSelection")(function* (
+    operation: TextGenerationOp,
+    selection: ModelSelection,
+    settingsService: ServerSettings.ServerSettingsService["Service"],
+  ) {
+    const snapshots = yield* registry.listInstances.pipe(
+      Effect.flatMap((instances) =>
+        Effect.forEach(instances, (instance) => instance.snapshot.getSnapshot),
       ),
-    generatePrContent: (input) =>
-      instrumentInternalGeneration(
-        "generatePrContent",
-        input,
-        resolveInstance(registry, "generatePrContent", input.modelSelection.instanceId).pipe(
-          Effect.flatMap((textGeneration) => textGeneration.generatePrContent(input)),
-        ),
-        record,
+    );
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const limited = exhaustedUsageWindow(
+      snapshots.find((provider) => provider.instanceId === selection.instanceId),
+      now,
+      selection.model,
+    );
+    if (!limited) return selection;
+    const settings = yield* settingsService.getSettings.pipe(
+      Effect.mapError(
+        (cause) =>
+          new TextGenerationError({
+            operation,
+            detail: "Could not read fallback model settings.",
+            cause,
+          }),
       ),
-    generateBranchName: (input) =>
-      instrumentInternalGeneration(
-        "generateBranchName",
-        input,
-        resolveInstance(registry, "generateBranchName", input.modelSelection.instanceId).pipe(
-          Effect.flatMap((textGeneration) => textGeneration.generateBranchName(input)),
-        ),
-        record,
-      ),
-    generateReviewGuide: (input) =>
-      resolveInstance(registry, "generateReviewGuide", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateReviewGuide(input)),
-      ),
-    generateThreadTitle: (input) =>
-      instrumentInternalGeneration(
-        "generateThreadTitle",
-        input,
-        resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
-          Effect.flatMap((textGeneration) =>
-            Effect.gen(function* () {
-              const linkedContext =
-                input.linkedContext ??
-                (sourceControl === undefined
-                  ? undefined
-                  : yield* ThreadTitleLinks.resolveThreadTitleLinks(input).pipe(
-                      Effect.provideService(
-                        SourceControlProviderRegistry.SourceControlProviderRegistry,
-                        sourceControl,
-                      ),
-                    ));
-              return yield* textGeneration.generateThreadTitle({ ...input, linkedContext });
-            }),
-          ),
-        ),
-        record,
-      ),
-    generateAutomationSchedule: (input) =>
-      instrumentInternalGeneration(
-        "generateAutomationSchedule",
-        input,
-        resolveInstance(
-          registry,
-          "generateAutomationSchedule",
-          input.modelSelection.instanceId,
-        ).pipe(
-          Effect.flatMap((textGeneration) => textGeneration.generateAutomationSchedule(input)),
-        ),
-        record,
-      ),
+    );
+    return (
+      fallbackTextGenerationModelSelection(
+        settings.providerInstances,
+        (instanceId, driver) => {
+          const provider = snapshots.find((candidate) => candidate.instanceId === instanceId);
+          return (
+            instanceId !== selection.instanceId &&
+            provider?.enabled === true &&
+            resolveProjectProviderInstanceEnabled(settings, null, instanceId) &&
+            provider.installed &&
+            provider.auth.status !== "unauthenticated" &&
+            isProviderAvailable(provider) &&
+            isProviderTextGenerationCapable(provider) &&
+            (operation !== "generateReviewGuide" || INVESTIGATING_DRIVERS.has(driver)) &&
+            !exhaustedUsageWindow(provider, now, defaultTextGenerationModel(driver))
+          );
+        },
+        { includeConfiguredInstances: true },
+      ) ?? selection
+    );
   });
+  const generate = Effect.fn("TextGeneration.generate")(function* <A>(
+    operation: TextGenerationOp,
+    requested: ModelSelection,
+    invoke: (
+      service: ProviderTextGeneration,
+      modelSelection: ModelSelection,
+    ) => Effect.Effect<A, TextGenerationError>,
+  ) {
+    const selection =
+      serverSettings === undefined
+        ? requested
+        : yield* fallbackSelection(operation, requested, serverSettings);
+    const run = resolveInstance(registry, operation, selection.instanceId).pipe(
+      Effect.flatMap((service) => invoke(service, selection)),
+    );
+    // Usage is recorded against the selection that actually ran (after any fallback).
+    return yield* operation === "generateReviewGuide"
+      ? run
+      : instrumentInternalGeneration(operation, { modelSelection: selection }, run, record);
+  });
+  return TextGeneration.of({
+    generateCommitMessage: Effect.fn("TextGeneration.generateCommitMessage")(function (input) {
+      return generate("generateCommitMessage", input.modelSelection, (service, modelSelection) =>
+        service.generateCommitMessage({ ...input, modelSelection }),
+      );
+    }),
+    generatePrContent: Effect.fn("TextGeneration.generatePrContent")(function (input) {
+      return generate("generatePrContent", input.modelSelection, (service, modelSelection) =>
+        service.generatePrContent({ ...input, modelSelection }),
+      );
+    }),
+    generateBranchName: Effect.fn("TextGeneration.generateBranchName")(function (input) {
+      return generate("generateBranchName", input.modelSelection, (service, modelSelection) =>
+        service.generateBranchName({ ...input, modelSelection }),
+      );
+    }),
+    generateReviewGuide: Effect.fn("TextGeneration.generateReviewGuide")(function (input) {
+      return generate("generateReviewGuide", input.modelSelection, (service, modelSelection) =>
+        service.generateReviewGuide({ ...input, modelSelection }),
+      );
+    }),
+    generateThreadTitle: Effect.fn("TextGeneration.generateThreadTitle")(function (input) {
+      return generate(
+        "generateThreadTitle",
+        input.modelSelection,
+        (textGeneration, modelSelection) =>
+          Effect.gen(function* () {
+            const linkedContext =
+              input.linkedContext ??
+              (sourceControl === undefined
+                ? undefined
+                : yield* ThreadTitleLinks.resolveThreadTitleLinks(input).pipe(
+                    Effect.provideService(
+                      SourceControlProviderRegistry.SourceControlProviderRegistry,
+                      sourceControl,
+                    ),
+                  ));
+            return yield* textGeneration.generateThreadTitle({
+              ...input,
+              linkedContext,
+              modelSelection,
+            });
+          }),
+      );
+    }),
+    generateAutomationSchedule: Effect.fn("TextGeneration.generateAutomationSchedule")(
+      function (input) {
+        return generate(
+          "generateAutomationSchedule",
+          input.modelSelection,
+          (service, modelSelection) =>
+            service.generateAutomationSchedule({ ...input, modelSelection }),
+        );
+      },
+    ),
+  });
+};
 
+/** @public */
 export const make = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const sourceControl = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
   // SqlClient is optional so the service can be constructed in contexts without
   // persistence (tests); when present, internal generation usage is recorded.
   const sqlOption = yield* Effect.serviceOption(SqlClient.SqlClient);
@@ -230,7 +305,7 @@ export const make = Effect.gen(function* () {
           ),
         );
       };
-  return makeTextGenerationFromRegistry(registry, record, sourceControl);
+  return makeTextGenerationFromRegistry(registry, record, sourceControl, serverSettings);
 });
 
 export const layer = Layer.effect(TextGeneration, make);

@@ -96,7 +96,7 @@ function runChecked(command, args) {
   throw new Error(`Failed to run ${command} ${args.join(" ")}: ${details}`.trim());
 }
 
-export function resolveMacCodeSignArguments(appBundlePath) {
+function resolveMacCodeSignArguments(appBundlePath) {
   return ["--force", "--deep", "--sign", "-", "--timestamp=none", appBundlePath];
 }
 
@@ -203,7 +203,7 @@ function registerMacLauncherBundle(appBundlePath) {
 }
 
 // Bundle-internal paths are macOS paths whatever host builds them.
-export function resolveMacLauncherIconPaths(runtimeDir, development = isDevelopment) {
+function resolveMacLauncherIconPaths(runtimeDir, development = isDevelopment) {
   return {
     sourceIconPath: development ? developmentMacIconPngPath : productionMacIconPngPath,
     generatedIconPath: NodePath.posix.join(
@@ -262,7 +262,7 @@ function ensureMacIconIcns(runtimeDir) {
   }
 }
 
-export function resolveMacBundleInfoPlistStrings(executableName) {
+function resolveMacBundleInfoPlistStrings(executableName) {
   return {
     CFBundleDisplayName: APP_DISPLAY_NAME,
     CFBundleName: APP_DISPLAY_NAME,
@@ -374,9 +374,7 @@ function buildMacLauncher(electronBinaryPath) {
     JSON.stringify(currentMetadata) === JSON.stringify(expectedMetadata)
   ) {
     if (isDevelopment) {
-      // The launcher also handles protocol activations outside the dev runner,
-      // so refresh its fallback environment on every launch. Never let a value
-      // captured by an older parent app override the live dev-runner environment.
+      // Protocol activations bypass the dev runner, so refresh the fallback environment on every launch.
       writeDevelopmentEnvironmentScript();
       if (writeDevelopmentLauncherScript(launcherBinaryPath, runtimeElectronBinaryPath)) {
         signMacLauncherBundle(targetAppBundlePath);
@@ -387,10 +385,7 @@ function buildMacLauncher(electronBinaryPath) {
   }
 
   NodeFS.rmSync(targetAppBundlePath, { recursive: true, force: true });
-  // verbatimSymlinks keeps the framework's relative symlinks intact
-  // (e.g. Resources -> Versions/Current/Resources). Without it cpSync
-  // rewrites them to absolute paths into node_modules, which escape the
-  // bundle and crash sandboxed helper processes (icudtl.dat not found).
+  // Without verbatimSymlinks, cpSync makes framework symlinks point outside the bundle and crashes helpers.
   NodeFS.cpSync(sourceAppBundlePath, targetAppBundlePath, {
     recursive: true,
     verbatimSymlinks: true,

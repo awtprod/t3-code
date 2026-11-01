@@ -1,5 +1,4 @@
 import { assert, describe, it } from "@effect/vitest";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -10,6 +9,7 @@ import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as DesktopObservability from "../app/DesktopObservability.ts";
+import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopBrowserHost from "../preview/DesktopBrowserHost.ts";
@@ -19,29 +19,7 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
-import type { DesktopBackendSnapshot, DesktopBackendStartConfig } from "./DesktopBackendManager.ts";
-
-function makeStubInstance(
-  id: DesktopBackendPool.BackendInstanceId,
-  label: string,
-): DesktopBackendPool.DesktopBackendInstance {
-  const snapshot: DesktopBackendSnapshot = {
-    desiredRunning: false,
-    ready: false,
-    activePid: Option.none(),
-    restartAttempt: 0,
-    restartScheduled: false,
-  };
-  return {
-    id,
-    label: Effect.succeed(label),
-    start: Effect.void,
-    stop: () => Effect.void,
-    currentConfig: Effect.succeed(Option.none<DesktopBackendStartConfig>()),
-    snapshot: Effect.succeed(snapshot),
-    waitForReady: (_timeout: Duration.Duration) => Effect.succeed(false),
-  };
-}
+import type { DesktopBackendStartConfig } from "./DesktopBackendManager.ts";
 
 function layerPool(
   labelRef: Ref.Ref<string>,
@@ -88,6 +66,7 @@ function layerPool(
           currentBootstrapToken: Effect.die("unexpected bootstrap token read"),
         } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"]),
         DesktopAppSettings.layerTest(settings),
+        DesktopState.layer,
         DesktopWslEnvironment.layerTest(),
         ElectronDialog.layer,
         ElectronApp.layer,
@@ -151,13 +130,38 @@ describe("DesktopBackendPool", () => {
   it.effect("resolves the primary label lazily after pool layer construction", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const labelRef = yield* Ref.make("Windows");
-        const pool = yield* DesktopBackendPool.DesktopBackendPool.pipe(
-          Effect.provide(layerPool(labelRef)),
-        );
-        const primary = yield* pool.primary;
+        const id = DesktopBackendPool.BackendInstanceId("wsl:Ubuntu");
+        const pool = yield* DesktopBackendPool.DesktopBackendPool;
+        const instance = yield* pool.register({
+          id,
+          label: Effect.succeed("WSL (Ubuntu)"),
+          configResolve: Effect.succeed({
+            executablePath: "/electron",
+            args: [],
+            entryPath: "/server/bin.mjs",
+            cwd: "/server",
+            env: {},
+            bootstrap: {
+              mode: "desktop",
+              noBrowser: true,
+              port: 3774,
+              t3Home: "/tmp/t3",
+              host: "127.0.0.1",
+              desktopBootstrapToken: "token",
+              tailscaleServeEnabled: false,
+              tailscaleServePort: 443,
+            },
+            bootstrapDelivery: "fd3",
+            extendEnv: true,
+            httpBaseUrl: new URL("http://127.0.0.1:3774"),
+            captureOutput: false,
+            preflightFailure: Option.some({ reason: "WSL starting", fatal: false }),
+          } satisfies DesktopBackendStartConfig),
+        });
+        yield* instance.start;
+        assert.equal((yield* instance.snapshot).restartScheduled, true);
 
-        yield* Ref.set(labelRef, "WSL (Ubuntu)");
+        yield* pool.unregister(id);
 
         assert.equal(yield* Option.getOrThrow(primary).label, "WSL (Ubuntu)");
       }),

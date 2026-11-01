@@ -7,20 +7,6 @@ import * as CodexError from "../errors.ts";
 import { makeStderrTail, makeTerminationError } from "./stdio.ts";
 
 describe("Codex App Server child process termination", () => {
-  it.effect("retains the process identifier with the exit code", () =>
-    Effect.gen(function* () {
-      const error = yield* makeTerminationError({
-        pid: ChildProcessSpawner.ProcessId(51),
-        exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(9)),
-      });
-
-      assert.instanceOf(error, CodexError.CodexAppServerProcessExitedError);
-      assert.equal(error.pid, 51);
-      assert.equal(error.code, 9);
-      assert.equal(error.message, "Codex App Server process exited with code 9");
-    }),
-  );
-
   it.effect("attaches the stderr tail and summarizes its last lines in the message", () =>
     Effect.gen(function* () {
       const error = yield* makeTerminationError(

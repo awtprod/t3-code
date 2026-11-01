@@ -52,17 +52,6 @@ export const ProviderOptionSelection = Schema.Struct({
 });
 export type ProviderOptionSelection = typeof ProviderOptionSelection.Type;
 
-/**
- * Legacy on-disk shape for provider option selections, kept readable by the
- * decoder so we can tolerate stored data written before the v3 array shape.
- *
- * Persisted historically as `{ effort: "max", fastMode: true, ... }` inside
- * `modelSelection.options`. Migration 026 rewrites stored rows to the
- * canonical array shape, but we still see the legacy form in:
- *   - `settings.json` files from older client builds,
- *   - SQLite databases that have not yet run migration 026,
- *   - any future regression that re-introduces the legacy shape.
- */
 const LegacyProviderOptionSelectionsObject = Schema.Record(Schema.String, Schema.Unknown);
 
 const ProviderOptionSelectionsFromLegacyObject = LegacyProviderOptionSelectionsObject.pipe(
@@ -75,18 +64,6 @@ const ProviderOptionSelectionsFromLegacyObject = LegacyProviderOptionSelectionsO
   ),
 );
 
-/**
- * Schema for the `options` field of every `ModelSelection` variant.
- *
- * Accepts both:
- *   - the canonical array shape `Array<{ id, value }>` (preferred), and
- *   - the legacy object shape `Record<string, string | boolean | …>` from
- *     pre-migration data.
- *
- * Always normalizes to the canonical array on decode and re-encodes as the
- * canonical array, so any legacy storage gets cleaned up the next time the
- * containing record is written back.
- */
 export const ProviderOptionSelections = Schema.Union([
   Schema.Array(ProviderOptionSelection),
   ProviderOptionSelectionsFromLegacyObject,
@@ -106,8 +83,6 @@ function coerceLegacyOptionsObjectToArray(
     } else if (typeof rawValue === "boolean") {
       entries.push({ id, value: rawValue });
     }
-    // Drop anything else (numbers, null, nested objects/arrays) to match the
-    // permissive normalization performed by migration 026.
   }
   return entries;
 }
@@ -127,11 +102,6 @@ export const ModelCapabilities = Schema.Struct({
 });
 export type ModelCapabilities = typeof ModelCapabilities.Type;
 
-/**
- * A user-authored custom model. `name` and `capabilities` are optional so a
- * bare slug keeps its driver-default presentation; when `capabilities` is
- * set, its descriptors replace the driver default in the model picker.
- */
 export const CustomModelEntry = Schema.Struct({
   slug: TrimmedNonEmptyString,
   name: Schema.optional(TrimmedNonEmptyString),
@@ -139,7 +109,6 @@ export const CustomModelEntry = Schema.Struct({
 });
 export type CustomModelEntry = typeof CustomModelEntry.Type;
 
-/** On-disk custom model setting: the legacy bare slug, or a full entry. */
 export const CustomModelSetting = Schema.Union([Schema.String, CustomModelEntry]);
 export type CustomModelSetting = typeof CustomModelSetting.Type;
 
@@ -147,6 +116,7 @@ const CODEX_DRIVER_KIND = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
 const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
+const FX_DRIVER_KIND = ProviderDriverKind.make("fx");
 const MUSE_DRIVER_KIND = ProviderDriverKind.make("muse");
 const PI_DRIVER_KIND = ProviderDriverKind.make("pi");
 const ACP_REGISTRY_DRIVER_KIND = ProviderDriverKind.make("acpRegistry");
@@ -154,11 +124,7 @@ const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
 export const DEFAULT_MODEL = "gpt-6-sol";
 
-/**
- * Codex default-model preference, most preferred first. The provider snapshot
- * marks the first of these present in the live `model/list` response as
- * default; when none are available, Codex's own `isDefault` flag wins.
- */
+/** First model present in model/list wins; otherwise use Codex's isDefault. */
 export const PREFERRED_DEFAULT_CODEX_MODELS: ReadonlyArray<string> = [
   "gpt-6-sol",
   "gpt-6-terra",
@@ -177,8 +143,9 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [CODEX_DRIVER_KIND]: DEFAULT_MODEL,
   [CLAUDE_DRIVER_KIND]: "claude-sonnet-5",
   [CURSOR_DRIVER_KIND]: "auto",
-  // Product slug, not an ACP model id. The Grok adapter treats it as "the session's current model".
+  // Product slug meaning the current session model, never an ACP model id.
   [GROK_DRIVER_KIND]: "grok-build",
+  [FX_DRIVER_KIND]: "default",
   [MUSE_DRIVER_KIND]: MUSE_DEFAULT_MODEL,
   [ACP_REGISTRY_DRIVER_KIND]: "default",
   // "default" defers to the user's own Pi settings.json model selection.
@@ -187,7 +154,6 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [ProviderDriverKind.make("antigravity")]: ANTIGRAVITY_DEFAULT_MODEL,
 };
 
-/** Per-provider text generation model defaults. */
 export const DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
   Record<ProviderDriverKind, string>
 > = {
@@ -259,74 +225,45 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
   [OPENCODE_DRIVER_KIND]: {},
 };
 
-// ── Manager / worker model policy ─────────────────────────────────────
-//
-// Expensive "manager"-tier models (Fable on the Claude provider, Astra on the
-// Codex provider) are meant to orchestrate and delegate, not to be spawned as
-// subagents. Any subagent that would inherit or explicitly request a
-// manager-tier model is forced onto a cheaper worker model, whatever the
-// parent model is. Enforced by ClaudeAdapter's PreToolUse guardrail hook
-// (`Agent` spawns and `Bash` worker dispatch) and by the Codex thread config
-// (`agents.default_subagent_model`).
+// Manager-tier models (Claude Fable, Codex Astra) orchestrate and delegate; a subagent
+// that would inherit or request one runs on a cheaper worker model instead. Enforced by
+// ClaudeAdapter's PreToolUse guardrail (`Agent` spawns and `Bash` worker dispatch) and by
+// the Codex thread config (`agents.default_subagent_model`).
 
-/**
- * Canonical Claude worker model that manager-tier subagents are downgraded to.
- * Opus 5.5 is the fleet's designated delegated-work model (the current Opus in
- * the catalog; requires claude-code >= 2.1.280).
- */
+/** Claude worker model that manager-tier subagents are downgraded to (claude-code >= 2.1.280). */
 export const CLAUDE_WORKER_FALLBACK_MODEL = "claude-opus-5-5";
 
 /**
- * True when `slug` is a Claude "manager"-tier model that must not be spawned as
- * a subagent of another manager. Matches the Fable family by canonical-slug
- * prefix so future Fable versions are covered automatically. Pass a canonical
- * slug (resolve aliases via `resolveClaudeModelSlug` first).
+ * True for a Claude manager-tier slug. Matches the Fable family by canonical prefix so
+ * future Fable versions are covered; resolve aliases via `resolveClaudeModelSlug` first.
  */
 export function isClaudeManagerModelSlug(slug: string | null | undefined): boolean {
   return typeof slug === "string" && slug.trim().toLowerCase().startsWith("claude-fable");
 }
 
-/**
- * Codex worker model that Astra-rooted threads spawn subagents on instead of
- * inheriting Astra.
- */
+/** Codex worker model that Astra-rooted threads spawn subagents on instead of inheriting Astra. */
 export const CODEX_WORKER_FALLBACK_MODEL = "gpt-6-sol";
 
-/**
- * True when `slug` is a Codex "manager"-tier model (the Astra family, e.g.
- * `gpt-6-astra`) that subagents must not inherit or request.
- */
+/** True for a Codex manager-tier slug (the Astra family, e.g. `gpt-6-astra`). */
 export function isCodexManagerModelSlug(slug: string | null | undefined): boolean {
   return typeof slug === "string" && /(?:^|-)astra(?:$|-)/.test(slug.trim().toLowerCase());
 }
 
 /**
- * Rewrite manager-tier model flags in a shell command that launches a headless
- * worker CLI: `claude … --model claude-fable*` (or the bare `fable` alias)
- * becomes the Claude worker model, and `codex … --model/-m *astra*` (or
- * `-c model=*astra*`) becomes the Codex worker model. Covers the detached
- * worker-dispatch path, which the `Agent`-tool guardrail cannot see.
- *
- * Conservative and regex-based, not a shell parser: it rewrites the model token
- * (versioned slug, optional `[1m]`-style context suffix, quoted or `=` form) only
- * when the command also invokes the matching CLI. This fails safe toward the
- * cheaper model; the only false positive is rewriting a literal `--model …`
- * mention inside prompt prose, which is harmless. Returns the input string
- * unchanged (same reference) when there is nothing to rewrite.
+ * Rewrites manager-tier `--model` flags in a headless `claude`/`codex` worker command to the
+ * worker model, covering the detached dispatch path the `Agent` guardrail cannot see. Regex
+ * based and only when the matching CLI is invoked; it fails safe toward the cheaper model and
+ * returns the same string reference when nothing changes.
  */
 export function rewriteManagerModelInCommand(command: string): string {
   if (typeof command !== "string") {
     return command;
   }
   let rewritten = command;
-  // Require an actual executable invocation (at a command position, followed by
-  // whitespace) — not merely the substring "claude" that every `claude-*` model
-  // slug contains — so a bare mention like `echo claude-fable` is left alone.
+  // Needs a real `claude` invocation, not the substring every `claude-*` slug contains.
   if (/(?:^|[\s;&|(/])claude(?=\s|$)/.test(rewritten)) {
     rewritten = rewritten.replace(
-      // Model token is limited to slug characters (letters, digits, `.`, `-`) plus
-      // an optional `[…]` context-window suffix, so it stops at shell separators
-      // like `;` `&` `|` and whitespace rather than swallowing them.
+      // Slug characters plus an optional `[…]` context suffix; stops at shell separators.
       /(--model[=\s]+["']?)(?:claude-fable[\w.\-[\]]*|fable(?![\w.-]))/gi,
       (_match, prefix: string) => `${prefix}${CLAUDE_WORKER_FALLBACK_MODEL}`,
     );
@@ -340,14 +277,13 @@ export function rewriteManagerModelInCommand(command: string): string {
   return rewritten === command ? command : rewritten;
 }
 
-// ── Provider display names ────────────────────────────────────────────
-
 export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>> = {
   [ProviderDriverKind.make("antigravity")]: "Antigravity",
   [CODEX_DRIVER_KIND]: "Codex",
   [CLAUDE_DRIVER_KIND]: "Claude",
   [CURSOR_DRIVER_KIND]: "Cursor",
   [GROK_DRIVER_KIND]: "Grok",
+  [FX_DRIVER_KIND]: "fx",
   [MUSE_DRIVER_KIND]: "Muse Code",
   [ACP_REGISTRY_DRIVER_KIND]: "ACP Registry",
   [PI_DRIVER_KIND]: "Pi",

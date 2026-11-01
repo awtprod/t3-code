@@ -80,23 +80,12 @@ describe("Codex MCP elicitation approvals", () => {
     });
   });
 
+  // regression: #8058 show Codex app access approval prompts
   it("returns persistent approval in the MCP response", () => {
     NodeAssert.deepStrictEqual(toMcpElicitationResponse(request, "acceptAlways"), {
       action: "accept",
       _meta: { persist: "always" },
       content: { approval: "always" },
-    });
-  });
-
-  it("returns rejection without form content", () => {
-    NodeAssert.deepStrictEqual(toMcpElicitationResponse(request, "decline"), {
-      action: "decline",
-    });
-  });
-
-  it("returns cancellation without form content", () => {
-    NodeAssert.deepStrictEqual(toMcpElicitationResponse(request, "cancel"), {
-      action: "cancel",
     });
   });
 

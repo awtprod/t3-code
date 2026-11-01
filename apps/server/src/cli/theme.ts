@@ -1,21 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - publish commits and rollbacks
 // move exact directory entries with rename, which the FileSystem service does
 // not expose atomically.
-/**
- * `t3 theme` - inspect and set the environment's theme. Connected web and
- * desktop clients switch when it is set; mobile keeps its own appearance
- * settings. Each client applies one set once, so a theme the user picks in
- * Settings afterwards sticks until the next `t3 theme set`.
- *
- * Writes `defaultTheme` (and `defaultThemeSetAt`, so a re-set of the same
- * value still acts) into the environment's `settings.json`. A running server
- * watches that file and pushes the change, so this works before the first
- * launch and on a live server alike.
- *
- * The edit is deliberately a minimal one on the parsed JSON object rather than
- * a schema round-trip. Settings files outlive the build that reads them, and a
- * provisioning command must not drop keys this version does not recognise.
- */
 import * as NodeFS from "node:fs";
 
 import {
@@ -46,8 +31,6 @@ import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
 import { withServerSettingsFileLock } from "../serverSettingsFileLock.ts";
 import { baseDirFlag } from "./config.ts";
 
-/** Settings files outlive the build that reads them, so the object is carried
- * as-is and only the theme keys are touched. */
 const SparseSettings = Schema.Record(Schema.String, Schema.Unknown);
 const decodeSettingsJson = Schema.decodeUnknownEffect(fromLenientJson(SparseSettings));
 const encodeSettingsJson = Schema.encodeEffect(fromJsonStringPretty(SparseSettings));
@@ -94,8 +77,6 @@ export class ThemeSettingsWriteError extends Schema.TaggedError<ThemeSettingsWri
 
 export class ThemeFileUnreadableError extends Schema.TaggedError<ThemeFileUnreadableError>()(
   "ThemeFileUnreadableError",
-  // Optional: a path that never existed has no underlying failure to carry,
-  // and a manufactured string there would only look like a real one.
   { filePath: Schema.String, cause: Schema.optional(Schema.Defect()) },
 ) {
   override get message(): string {
@@ -160,7 +141,6 @@ export class ThemeIdInvalidError extends Schema.TaggedError<ThemeIdInvalidError>
   }
 }
 
-/** A filename that cannot be a theme id, where --id is the way out. */
 export class ThemeFileIdInvalidError extends Schema.TaggedError<ThemeFileIdInvalidError>()(
   "ThemeFileIdInvalidError",
   { themeId: Schema.String, filePath: Schema.String },
@@ -183,10 +163,8 @@ const envCommandCenterHome = Config.String("COMMAND_CENTER_HOME").pipe(Config.op
 const envT3Home = Config.String("T3CODE_HOME").pipe(Config.option);
 
 const resolveThemePaths = Effect.fn(function* (explicitBaseDir: Option.Option<string>) {
-  // Same precedence as the rest of the CLI: --base-dir, then COMMAND_CENTER_HOME,
-  // then T3CODE_HOME, then the default home. A provisioning script exporting
-  // either home var must not have this one command silently target the default
-  // install (see cli/config.ts explicitBaseDir resolution).
+  // Same precedence as cli/config.ts: --base-dir, then COMMAND_CENTER_HOME, then T3CODE_HOME,
+  // then the default home, so a provisioning script's home var is never silently ignored.
   const commandCenterHome = Option.filter(
     yield* envCommandCenterHome,
     (value) => value.trim().length > 0,
@@ -204,11 +182,7 @@ const resolveThemePaths = Effect.fn(function* (explicitBaseDir: Option.Option<st
   };
 });
 
-/**
- * Reads the sparse settings object, treating only a genuinely absent file as
- * empty. A permission or I/O error must propagate: reading it as "no settings"
- * would have the caller write a fresh sparse file over settings it never saw.
- */
+/** Propagate read errors to avoid overwriting unread settings with a sparse file. */
 const readSettingsObject = Effect.fn(function* (settingsPath: string) {
   const fs = yield* FileSystem.FileSystem;
   const exists = yield* fs
@@ -253,8 +227,6 @@ const writeDefaultThemeUnlocked = Effect.fn(function* (input: {
   );
 });
 
-/** Publishes a theme file into the environment's themes directory and returns
- * the id it published under. */
 const publishThemeFile = Effect.fn(function* (input: {
   readonly themesDir: string;
   readonly filePath: string;
@@ -262,8 +234,6 @@ const publishThemeFile = Effect.fn(function* (input: {
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  // A preflight for error quality only: it tells a FIFO from an oversized
-  // file. Enforcement happens at the guarded read below.
   const info = yield* fs
     .stat(input.filePath)
     .pipe(
@@ -279,12 +249,6 @@ const publishThemeFile = Effect.fn(function* (input: {
     });
   }
 
-  // An explicit source path is the user's own input, and a symlink there is a
-  // normal way to point at a theme (desktop hooks symlink the current
-  // palette), so it is resolved before the guarded read. The read still goes
-  // through one opened handle whose type and size checks bind to the file
-  // actually read, so a FIFO cannot hang the command and an oversized target
-  // is refused.
   const resolvedSource = yield* fs
     .realPath(input.filePath)
     .pipe(
@@ -305,16 +269,13 @@ const publishThemeFile = Effect.fn(function* (input: {
 
   const fileBasename = path.basename(input.filePath, ".json");
   const themeId = Option.getOrElse(input.explicitId, () => fileBasename);
-  // The same rules the watcher applies when it reads the directory back, so a
-  // publish cannot report success for a file that will then be skipped.
+  // Match watcher validation so published files will not be skipped.
   if (!isEnvironmentThemeId(themeId) || UNPUBLISHABLE_THEME_IDS.has(themeId)) {
     return yield* new ThemeFileIdInvalidError({ themeId, filePath: input.filePath });
   }
 
   const destinationPath = path.join(input.themesDir, `${themeId}.json`);
-  // Neither ends in `.json`, so the watcher never mistakes them for themes.
-  // Both names carry the pid, so concurrent publishers of one id cannot
-  // unlink or restore over each other's staging and rollback copies.
+  // Non-JSON suffixes hide these from the watcher; PIDs isolate concurrent publishers.
   const backupPath = `${destinationPath}.rollback-${process.pid}`;
   const stagingPath = `${destinationPath}.staging-${process.pid}`;
   yield* fs
@@ -338,19 +299,13 @@ const publishThemeFile = Effect.fn(function* (input: {
     catch: publishFailure,
   });
 
-  // Staged in full before anything moves, so the commit below is two adjacent
-  // renames with no I/O between them. The staging entry is created O_EXCL
-  // after clearing any stale leftover, so a symlink or file already at that
-  // predictable name is never followed or written through. Written verbatim:
-  // appending so much as a newline could push a file at the size limit past
-  // it and have the watcher skip what was just accepted.
+  // O_EXCL prevents following a symlink at the predictable staging path.
+  // Preserve bytes exactly: even an added newline could exceed the watcher's size limit.
   const stagedIno = yield* Effect.try({
     try: () => {
       try {
         NodeFS.unlinkSync(stagingPath);
-      } catch {
-        // Nothing stale to clear.
-      }
+      } catch {}
       const fd = NodeFS.openSync(
         stagingPath,
         NodeFS.constants.O_WRONLY | NodeFS.constants.O_CREAT | NodeFS.constants.O_EXCL,
@@ -358,8 +313,6 @@ const publishThemeFile = Effect.fn(function* (input: {
       );
       try {
         NodeFS.writeFileSync(fd, raw);
-        // Rename preserves the inode, so this identifies our published file
-        // at the destination for as long as it is actually ours.
         return NodeFS.fstatSync(fd).ino;
       } finally {
         NodeFS.closeSync(fd);
@@ -368,12 +321,7 @@ const publishThemeFile = Effect.fn(function* (input: {
     catch: publishFailure,
   });
 
-  // Whatever occupies the destination -- a theme, a symlink, anything -- is
-  // moved aside in one atomic step rather than inspected and then replaced:
-  // there is no window between a check and the commit, and rollback restores
-  // that exact directory entry instead of a re-read of it. Only "nothing
-  // there" continues; any other rename failure aborts before the destination
-  // is touched.
+  // Atomic rename avoids a check/replace race and preserves the exact entry for rollback.
   const hadPrevious = yield* Effect.try({
     try: () => {
       try {
@@ -390,13 +338,9 @@ const publishThemeFile = Effect.fn(function* (input: {
   const revert = Effect.sync(() => {
     try {
       NodeFS.unlinkSync(stagingPath);
-    } catch {
-      // Usually already renamed away; a stray staging file is watcher-inert.
-    }
+    } catch {}
     try {
-      // The destination is touched only while it is empty or still holds
-      // the exact file this process put there; a concurrent publisher's
-      // newer file wins, and this process's obsolete copy is discarded.
+      // Only replace this process's inode or an empty destination; concurrent publishers win.
       const destinationIno = (() => {
         try {
           return NodeFS.lstatSync(destinationPath).ino;
@@ -413,16 +357,12 @@ const publishThemeFile = Effect.fn(function* (input: {
       } else if (destinationIno === stagedIno) {
         NodeFS.unlinkSync(destinationPath);
       }
-    } catch {
-      // Best effort; the failure that triggered the revert still surfaces.
-    }
+    } catch {}
   });
   const cleanup = Effect.sync(() => {
     try {
       if (hadPrevious) NodeFS.unlinkSync(backupPath);
-    } catch {
-      // A stray backup is inert: it is not `.json`, so nothing serves it.
-    }
+    } catch {}
   });
 
   yield* Effect.try({
@@ -433,13 +373,7 @@ const publishThemeFile = Effect.fn(function* (input: {
   return { themeId, revert, cleanup };
 });
 
-/**
- * Ids a client can actually resolve: this build's built-ins plus what the
- * machine publishes, read through the same function the watcher uses so a file
- * it would skip can never be accepted here. The mobile default is absent on
- * purpose -- web and desktop cannot resolve it and mobile does not follow this
- * setting, so naming it would be the silent no-op this check exists to stop.
- */
+/** Web and desktop cannot resolve the mobile default, and mobile does not follow this setting. */
 const resolvableThemeIds = Effect.fn(function* (themesDir: string) {
   const published = yield* readPublishedThemes(themesDir);
   return [...BUILT_IN_THEME_IDS, ...published.map((theme) => theme.id)].toSorted();
@@ -453,7 +387,7 @@ const themeSetCommand = Command.make("set", {
   ),
   theme: Argument.String("theme").pipe(
     Argument.withDescription(
-      'A theme id (a built-in, or one this machine publishes — themes/nightfall.json is "nightfall"), or a path to a theme JSON file to publish and set in one step.',
+      'A theme id (a built-in, or one this machine publishes, where themes/nightfall.json is "nightfall"), or a path to a theme JSON file to publish and set in one step.',
     ),
   ),
 }).pipe(
@@ -467,13 +401,7 @@ const themeSetCommand = Command.make("set", {
       }
       const paths = yield* resolveThemePaths(flags.baseDir);
 
-      // An existing file publishes; anything path-shaped that does not exist
-      // is a mistake to surface, not an id to store; everything else must be
-      // a well-formed id, so a typo cannot be written as a theme no client
-      // will ever resolve.
-      // Path-shaped first, existence second. Deciding on existence alone would
-      // make `t3 theme set ocean` publish ./ocean whenever the cwd happens to
-      // hold a file by that name, instead of selecting the built-in.
+      // A bare theme id must not publish a same-named file that happens to exist in cwd.
       const looksLikePath =
         target.endsWith(".json") ||
         target.includes("/") ||

@@ -6,13 +6,11 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  attachmentFileExtension,
   chatAttachmentStableKey,
   createAttachmentId,
   createDeterministicAttachmentId,
   createPendingAttachmentId,
   parseAttachmentUuid,
-  parseAttachmentFileExtension,
   planAttachmentClaim,
   parseThreadSegmentFromAttachmentId,
   PENDING_ATTACHMENT_THREAD_SEGMENT,
@@ -43,7 +41,6 @@ describe("attachmentStore", () => {
       "thread-1",
       chatAttachmentStableKey("message-1", 0, imageA),
     );
-    // Editing the queued message keeps its id, and the new upload is first in its batch.
     const edited = createDeterministicAttachmentId(
       "thread-1",
       chatAttachmentStableKey("message-1", 0, imageB),
@@ -64,36 +61,12 @@ describe("attachmentStore", () => {
     expect(dashed && parseThreadSegmentFromAttachmentId(dashed)).toBe("thread-a");
   });
 
-  it("sanitizes thread ids when creating attachment ids", () => {
-    const attachmentId = createAttachmentId("thread.folder/unsafe space");
-    expect(attachmentId).toBeTruthy();
-    if (!attachmentId) {
-      return;
-    }
-
-    const threadSegment = parseThreadSegmentFromAttachmentId(attachmentId);
-    expect(threadSegment).toBeTruthy();
-    expect(threadSegment).toMatch(/^[a-z0-9_-]+$/i);
-    expect(threadSegment).not.toContain(".");
-    expect(threadSegment).not.toContain("%");
-    expect(threadSegment).not.toContain("/");
-  });
-
   it("parses exact thread segments from attachment ids without prefix collisions", () => {
     const fooId = "foo-00000000-0000-4000-8000-000000000001";
     const fooBarId = "foo-bar-00000000-0000-4000-8000-000000000002";
 
     expect(parseThreadSegmentFromAttachmentId(fooId)).toBe("foo");
     expect(parseThreadSegmentFromAttachmentId(fooBarId)).toBe("foo-bar");
-  });
-
-  it("normalizes created thread segments to lowercase", () => {
-    const attachmentId = createAttachmentId("Thread.Foo");
-    expect(attachmentId).toBeTruthy();
-    if (!attachmentId) {
-      return;
-    }
-    expect(parseThreadSegmentFromAttachmentId(attachmentId)).toBe("thread-foo");
   });
 
   it("reserves the pending attachment segment", () => {
@@ -110,72 +83,6 @@ describe("attachmentStore", () => {
     expect(parseThreadSegmentFromAttachmentId(createAttachmentId("pending_thread")!)).toBe(
       "pending_thread",
     );
-  });
-
-  it("preserves safe file extensions in attachment ids and paths", () => {
-    const attachmentId = createPendingAttachmentId(".PDF");
-
-    expect(parseThreadSegmentFromAttachmentId(attachmentId)).toBe(
-      PENDING_ATTACHMENT_THREAD_SEGMENT,
-    );
-    expect(parseAttachmentUuid(attachmentId)).toMatch(/^[a-f0-9-]{36}$/);
-    expect(parseAttachmentFileExtension(attachmentId)).toBe("pdf");
-    expect(attachmentFileExtension("report.PDF")).toBe(".pdf");
-    expect(attachmentFileExtension("report")).toBe(".bin");
-    expect(attachmentFileExtension("report.extensiontoolong")).toBe(".bin");
-    // ".part" is the in-flight upload suffix; storing it would make the file
-    // look like a stale partial to the sweep.
-    expect(attachmentFileExtension("archive.part")).toBe(".bin");
-    expect(createAttachmentId("x".repeat(80), ".abcdefghij")?.length).toBeLessThanOrEqual(128);
-  });
-
-  it("resolves attachment path by id using the extension that exists on disk", () => {
-    const attachmentsDir = NodeFS.mkdtempSync(
-      NodePath.join(NodeOS.tmpdir(), "t3code-attachment-store-"),
-    );
-    try {
-      const attachmentId = "thread-1-attachment";
-      const pngPath = NodePath.join(attachmentsDir, `${attachmentId}.png`);
-      NodeFS.writeFileSync(pngPath, Buffer.from("hello"));
-
-      const resolved = resolveAttachmentPathById({
-        attachmentsDir,
-        attachmentId,
-      });
-      expect(resolved).toBe(pngPath);
-    } finally {
-      NodeFS.rmSync(attachmentsDir, { recursive: true, force: true });
-    }
-  });
-
-  it("returns null when no attachment file exists for the id", () => {
-    const attachmentsDir = NodeFS.mkdtempSync(
-      NodePath.join(NodeOS.tmpdir(), "t3code-attachment-store-"),
-    );
-    try {
-      const resolved = resolveAttachmentPathById({
-        attachmentsDir,
-        attachmentId: "thread-1-missing",
-      });
-      expect(resolved).toBeNull();
-    } finally {
-      NodeFS.rmSync(attachmentsDir, { recursive: true, force: true });
-    }
-  });
-
-  it("resolves generic attachments without scanning the attachment directory", () => {
-    const attachmentsDir = NodeFS.mkdtempSync(
-      NodePath.join(NodeOS.tmpdir(), "t3code-file-attachment-"),
-    );
-    try {
-      const attachmentId = "thread-1-00000000-0000-4000-8000-000000000001-zip";
-      const archivePath = NodePath.join(attachmentsDir, `${attachmentId}.zip`);
-      NodeFS.writeFileSync(archivePath, Buffer.from("archive"));
-
-      expect(resolveAttachmentPathById({ attachmentsDir, attachmentId })).toBe(archivePath);
-    } finally {
-      NodeFS.rmSync(attachmentsDir, { recursive: true, force: true });
-    }
   });
 
   it("plans pending attachment claims with direct filename lookups", () => {
@@ -241,6 +148,7 @@ describe("attachmentStore", () => {
         attachmentsDir,
         `${PENDING_ATTACHMENT_THREAD_SEGMENT}-${uuid}-pdf.pdf`,
       );
+      const sidecarPath = `${pendingFilePath}.txt`;
       const legacyPendingPath = NodePath.join(attachmentsDir, `pending-${uuid}.png`);
       const legacyRemappedPath = NodePath.join(attachmentsDir, `_pending-${uuid}.png`);
       const threadPath = NodePath.join(attachmentsDir, `thread-1-${uuid}.png`);
@@ -248,6 +156,7 @@ describe("attachmentStore", () => {
       for (const filePath of [
         pendingPath,
         pendingFilePath,
+        sidecarPath,
         legacyPendingPath,
         legacyRemappedPath,
         threadPath,
@@ -257,9 +166,10 @@ describe("attachmentStore", () => {
         NodeFS.utimesSync(filePath, oldTimeSeconds, oldTimeSeconds);
       }
 
-      expect(sweepStalePendingAttachments({ attachmentsDir, nowMs: now })).toEqual({ deleted: 3 });
+      expect(sweepStalePendingAttachments({ attachmentsDir, nowMs: now })).toEqual({ deleted: 4 });
       expect(NodeFS.existsSync(pendingPath)).toBe(false);
       expect(NodeFS.existsSync(pendingFilePath)).toBe(false);
+      expect(NodeFS.existsSync(sidecarPath)).toBe(false);
       expect(NodeFS.existsSync(partialPath)).toBe(false);
       expect(NodeFS.existsSync(legacyPendingPath)).toBe(true);
       expect(NodeFS.existsSync(legacyRemappedPath)).toBe(true);

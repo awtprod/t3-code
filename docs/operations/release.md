@@ -16,11 +16,12 @@ the version.
   - manual `workflow_dispatch` with an explicit `validate` or `publish` mode
 - Runs lint, typecheck, and tests alongside artifact builds. Publishing waits for every check.
 - Reads the shared production T3 Connect relay URL and Clerk client configuration before packaging clients.
-- Builds four artifacts in parallel for both channels:
+- Builds four artifacts in parallel for both channels. macOS and Linux targets build on hardware of their own architecture. The Windows target builds and signs (with jsign) on a Linux runner, which packages faster than Windows runners, and a Windows job of the target's architecture (`windows-2025`, the `verify_runner`) runs the packaged natives and the CLI archive:
   - macOS `arm64` DMG
   - macOS `x64` DMG
   - Linux `x64` AppImage
   - Windows `x64` NSIS installer
+- Opens the packaged Linux x64 AppImage (under Xvfb) and macOS arm64 DMG against a seeded database and opens a thread (`scripts/smoke-desktop-app.ts`). A build whose backend or bundle cannot start fails here, so nothing is published. The database in `scripts/fixtures/desktop-launch` is an old snapshot on purpose: the packaged server must migrate it forward, as it does for upgrading users. Do not regenerate it on schema changes.
 - In `validate` mode, retains one consolidated signed artifact bundle for 14 days without publishing
   npm, GitHub Releases, Vercel deployments, tags, aliases, or version commits.
 - In `publish` mode, publishes one GitHub Release with all produced files.
@@ -28,17 +29,54 @@ the version.
   - Only plain stable `X.Y.Z` releases are marked as the repository's latest release.
   - Nightly runs are always GitHub prereleases and never marked latest.
   - Automatically generated release notes are pinned to the previous tag in the same channel, so stable compares to the previous stable tag and nightly compares to the previous nightly tag.
+  - The release job's **Write release notes** step (`scripts/generate-release-notes.ts`) builds the body: a computed header line, a short summary from `gpt-6.1-terra`, and GitHub's generated list folded under `<details>`. It needs the `OPENAI_API_KEY` secret. The summary leaves out commits whose scopes are all mobile; the header counts every commit. The desktop update popover, on every channel, shows the highlights paragraph and the header counts as a short note per release, with the offered release's age from the update feed's `releaseDate`. The nightly Discord post shows the part above `<details>`. If the step fails or there is nothing to summarize, it writes no file and the release uses GitHub's generated notes as before.
 - Includes Electron auto-update metadata (for example `latest*.yml`, `nightly*.yml`, and `*.blockmap`) in release assets.
 - Generates `SHA256SUMS.txt` and validates every updater-manifest file path and byte size before publication.
-- Publishes the CLI package (`apps/server`, npm package `@awtprod/command-center`) with OIDC trusted publishing from the same workflow file:
+- Builds a self-contained CLI archive per platform (`t3-<version>-<platform>-<arch>.tar.gz`, `.zip` on Windows) in the same job as that target's desktop artifact and attaches them to the GitHub Release with a `SHA256SUMS` file, on every channel, for the targets above except macOS x64: macOS arm64, Linux x64, and Windows x64. Every archive is smoke-tested on hardware of its own architecture, and every one but the Windows archives is also built and signed there. There is no macOS x64 archive: Node single-executables are unsupported on x64 macOS (the SEA docs list macOS as arm64 only) and the binary segfaults on start; the x64 desktop app is Electron and unaffected.
+  - The archive holds the server as a Node single-executable (`scripts/build-cli-archive.ts`), so unpacking it needs neither Node, npm, nor a compiler. It is the only form in which Command Center manages a runtime: the desktop's SSH environments, the boot service, `command-center update`, and the install scripts all download and verify this archive against `SHA256SUMS`. The `@awtprod/command-center` npm package exists for people who run `npx @awtprod/command-center` or `npm install -g @awtprod/command-center` themselves, and it downloads this same archive too; nothing in the product installs from npm. The `curl | sh` installers are `scripts/install.sh` and `scripts/install.ps1`; the marketing site copies them into its `public/` at build time (`apps/marketing/scripts/stage-install-scripts.mjs`) and serves them from there.
+  - The root `package.json` pins `engines.node` to the exact Node version used by development, CI and standalone executables. Keep it exact: cross-target builds download that version, and native executable builds reject a different host Node version. TEMPORARY: Linux arm64 executables build only on a Linux arm64 host and are injected with postject, because Node's `--build-sea` output cannot load on 16 or 64 KiB page kernels. Revert when [nodejs/node#67048](https://github.com/nodejs/node/issues/67048) is fixed. Runtime changes need a new Command Center release version because installed runtimes are cached by that version.
+  - macOS archives are signed with the Developer ID certificate and notarized when the Apple secrets are present (ad hoc otherwise, which still runs from `curl`/`tar` installs). Windows executables use the same Azure Trusted Signing setup as the installer. Every native addon in the macOS archive is signed too, since the hardened runtime refuses unsigned libraries.
+  - Each archive is extracted and executed (`scripts/smoke-cli-archive.ts`) on its build runner, or on the `verify_runner` for Windows.
+- After the GitHub Release is published, publishes the `@awtprod/command-center` npm package with OIDC trusted publishing from the same workflow file. It is only a launcher (`scripts/npm-launcher/t3.mjs`): on first run it downloads its exact version's CLI archive from the GitHub Release, verifies it against `SHA256SUMS`, and unpacks it into `<Command Center home>/runtime/versions/<version>`, the layout the install scripts and `command-center update` share. The executables are not on npm: npm's publish-time scanning held large platform packages back for up to an hour after the launcher was live, and every install in that window got a launcher with no executable. Because the launcher reads from the release, `publish_cli` runs after `release`, never before.
   - stable releases publish npm dist-tag `latest`
   - nightly releases publish npm dist-tag `nightly`
+  - preview releases publish npm dist-tag `preview`, which nothing resolves unless asked for by name
+  - one-time setup: package `@awtprod/command-center` needs a trusted publisher registered for this workflow file (see below).
 - Deploys the hosted web app to the dedicated `awtprod-command-center` Vercel project only after a
   release is published. Stable releases update its production `vercel.app` domain; nightlies retain
   the generated preview deployment URL.
 - Stable versions, including validation runs and prereleases, fail closed unless macOS and Windows signing
   configuration is complete. Pre-release and nightly builds may be unsigned only when no partial
   signing configuration is present.
+
+## Pull request macOS previews
+
+Labeling a PR `preview:mac` publishes a signed, notarized Apple Silicon DMG with T3 Connect enabled
+to the rolling `desktop-preview` prerelease, and works for fork PRs. The label is a one-shot request
+for the commit it is applied to: the trusted workflow removes it once the build is in hand, and later
+pushes do not build until a maintainer applies it again. Every signed preview is therefore a
+per-commit maintainer decision, which matters because the result carries the Developer ID signature.
+Vouching a contributor lets their labeled commits be signed; it is not a standing grant. The build is
+split so the Developer ID certificate never shares a job with PR code:
+
+- `.github/workflows/desktop-macos-preview.yml` runs on `pull_request` with no secrets and builds
+  only the JS bundle from the PR (the same `js-bundle` artifact `release.yml` produces).
+- `.github/workflows/desktop-macos-preview-publish.yml` runs on `workflow_run` from `main`. It
+  refuses unless the PR is open, still labeled, its head is the built commit, and the author is a
+  bot, a collaborator, or listed in `.github/VOUCHED.td` (read from the default branch, so a PR cannot vouch
+  for itself). It then packages and signs the bundle through `release-desktop.yml` checked out at
+  `main`, so packaging, native helpers, and the Electron/desktop dependencies come from `main`, not
+  the PR. Only the version and the public T3 Connect identifiers in `.env.example` are read from the
+  PR commit, as data, so the signed app's passkey entitlement matches the bundle. A PR that changes
+  packaging must use a manual `workflow_dispatch` with `channel=preview` instead.
+
+Before handing the bundle to the signing runner, the trusted workflow validates its ZIP entries
+and accepts only regular files under `server/dist` and `desktop/dist-electron`, plus the directory
+entries that lead to those roots. The artifact cannot
+overwrite packaging code or installed dependencies. The bundle is copied into the app, never executed,
+on the signing runner. The
+`pull_request_target` cleanup job in the publish workflow removes the download when the PR closes, or
+when the label is removed by hand before a build consumed it, and never checks out PR code.
 
 ## Required release credentials
 
@@ -101,11 +139,14 @@ Required `production` environment secrets:
 - `CLERK_SECRET_KEY`
 - `APNS_PRIVATE_KEY`
 
+Optional `production` environment secrets:
+
+- `T3CHAT_LINK_SECRET` for the T3 Chat account link. It must match
+  `T3CODE_LINK_SECRET` on T3 Chat.
+
 After changing a variable or secret, run the **Deploy T3 Connect relay** workflow manually from
 `main` with **force** unchecked. Alchemy compares the values the Worker reads and redeploys it when
-one changed. Check **force** only to redeploy resources with no detected change: a forced run also
-replaces the Postgres runtime role and its password
-([alchemy-run/alchemy#1832](https://github.com/alchemy-run/alchemy/issues/1832)).
+one changed. Check **force** only to redeploy resources with no detected change.
 
 The account-scoped repository credentials are consumed by Alchemy while provisioning relay stages; they
 are not bound into the relay Worker. The production deployment uses an Axiom personal access token,
@@ -114,11 +155,17 @@ database. Local personal stages provision isolated branches from it and are neve
 Production adopts the configured relay API and tunnel DNS zones as retained Cloudflare resources.
 Personal stages reference the production-owned zones.
 
-Developers deploy personal stages locally rather than through pull-request automation:
+Developers deploy personal stages locally:
 
 ```sh
 vp run --filter t3code-relay deploy -- --stage "$USER" --env-file .env.local
 ```
+
+A same-repository PR labeled `relay:preview` deploys stage `pr-<number>` through
+`.github/workflows/relay-preview.yml`, after approval in the `relay-preview` environment. Removing the
+label or closing the PR runs `.github/workflows/relay-preview-cleanup.yml`, which destroys the stage
+and sweeps its managed tunnels and DNS records. A nightly run destroys stages of closed labeled PRs
+whose teardown failed. Fork PRs get no preview.
 
 ### Managed tunnel cleanup rollout
 
@@ -251,12 +298,42 @@ these repository-level release credentials before running stable validation:
 Discord secrets are optional. Both announcement steps use `continue-on-error`, so missing Discord
 configuration cannot block a release.
 
+## Mobile TestFlight and store releases
+
+Merges to main publish compatible OTAs and build iOS prereleases with the `testflight`
+profile at version `3.0.0`. Build numbers increment automatically. The committed app
+version remains the App Store release version; Android keeps using that version.
+
+To release iOS, dispatch **Mobile EAS Production** with `mode=build`,
+`profile=production`, `platform=ios`, and the intended version, such as `2.0.1`.
+The workflow commits and pushes the version before building and uploading it.
+Select that build in App Store Connect for App Store review.
+
+To force a TestFlight rebuild, select `profile=testflight`, `platform=ios`, and
+leave the version blank. Submit the first `3.0.0` build for external beta review
+in App Store Connect. Later builds may still require review; uploads alone do
+not guarantee external approval. TestFlight builds expire after 90 days.
+
+Both release and TestFlight binaries receive compatible production-channel OTAs,
+separated by their major-version fingerprints. Manual `mode=update` uses the
+selected profile's version. Before releasing `3.0.0` to the App Store, advance
+`build.testflight.env.T3CODE_MOBILE_VERSION` in `apps/mobile/eas.json` to the next
+unreleased major and get its first beta build approved.
+
 ## Android APK mirror
 
-`.github/workflows/mobile-android-apk.yml` checks Google Play hourly and publishes the newest
-build on the `v2` closed testing track to the rolling `android-nightly` prerelease, for nightly
-users who can't join the Play testing group. Those v2-preview builds are the only Android builds that can
-connect to a nightly server. The APK is the universal APK Play generates and signs from the
+`.github/workflows/mobile-android-apk.yml` checks the Google Play Alpha closed-testing
+track hourly. Each new beta gets one `android-beta-<build-number>` prerelease
+containing its APK. Unchanged checks publish nothing, and interrupted draft
+uploads resume on the next check.
+
+Normal Nightly releases include the newest processed internal-testing APK available
+when the release publishes. Internal builds do not create separate Android releases.
+If Play credentials or a processed APK are unavailable, the Nightly can still publish
+without an APK. Android submissions continue to go to internal testing; promote a
+build to Alpha to publish it as a beta.
+
+The APK is the universal APK Play generates and signs from the
 uploaded bundle, so no signing key lives in GitHub. The job skips itself until
 `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` holds a Play service account key with the "Release to
 production, exclude devices, and use Play App Signing" permission, which downloading generated
@@ -317,24 +394,35 @@ One-time Vercel dashboard setup:
   - `make_latest` is always `false`
 - Uses the next stable patch version as the nightly base. For example, `0.0.17` produces nightlies on `0.0.18-nightly.*`.
 - Publishes Electron auto-update metadata to the dedicated `nightly` updater channel, so desktop users can opt into that track independently from stable.
-- Publishes the CLI package (`apps/server`, npm package `@awtprod/command-center`) to the `nightly` npm dist-tag using the same nightly version.
+- Publishes the `@awtprod/command-center` npm launcher to the `nightly` npm dist-tag using the same nightly version.
 - Does not commit version bumps back to `main`.
 
 ## Server self-update release invariant
 
-Connected servers update to the client's exact version, not to an npm dist-tag. Every released
-desktop or hosted client version must therefore have a matching
-`@awtprod/command-center@<version>` package available on npm before users can receive that client.
+Connected servers update to the client's exact version, not to an npm dist-tag. Servers that update
+themselves download that version's CLI archive from the GitHub Release; servers run through npm are
+handed an `@awtprod/command-center@<version>` command to run. Every released client version must
+therefore have its release archives, and then its npm launcher, available before users can receive
+that client.
 
 The workflow enforces this ordering:
 
-1. `publish_cli` publishes the exact stable or nightly version to npm.
-2. `release` depends on `publish_cli` before exposing desktop artifacts in GitHub Releases.
-3. `deploy_web` depends on `release` before moving the hosted channel to the new client.
+1. `release` publishes the GitHub Release with the CLI archives and `SHA256SUMS`. Every channel
+   uploads to a draft and publishes only after all assets are attached, so a new version in the
+   desktop update feed already has its archives. **Update everything** relies on this to update
+   background-service hosts before npm has the version. Rerunning `release` after publication
+   replaces assets in a public release, so service updates can fail until the upload finishes.
+2. `publish_cli` publishes the `@awtprod/command-center@<version>` launcher, which downloads from
+   that release, on every channel.
+3. `deploy_web` depends on both before moving the hosted channel to the new client.
    `build_web` builds that client earlier with `vercel deploy --prod --skip-domain`, which
    leaves the custom domains alone but moves the project's own `*.vercel.app` production
    hostname. That hostname is behind Vercel SSO, so users only get the client through the
    custom domains.
+
+Desktop auto-update reads the GitHub Release directly, so a desktop client can see the new version
+a few minutes before `@awtprod/command-center@<version>` is on npm. Only the copied manual command for npm-run servers
+depends on npm, and it works once `publish_cli` finishes.
 
 Preserve these dependencies when changing the release graph. Publishing a client first would leave
 the **Update server** action targeting a package version that does not exist yet.
@@ -410,23 +498,24 @@ blockmaps, with a 60 MB maximum for a representative sidecar-to-sidecar update.
 
 ## 0) npm OIDC trusted publishing setup (CLI)
 
-The workflow publishes the CLI with `npm publish` from `apps/server` after bumping
-the package version to the release tag version.
+After the GitHub Release is published, the workflow runs `node scripts/build-npm-launcher.ts`, then
+`node apps/server/scripts/cli.ts publish --packages-dir npm-packages`, which runs `npm publish` on
+the launcher tarball. That is the only package published per release: `@awtprod/command-center`.
 
 Checklist:
 
-1. Create the public npm package `@awtprod/command-center` under the `awtprod` scope.
-2. In npm package settings, configure Trusted Publisher:
+1. Create the public npm package `@awtprod/command-center` under the `awtprod` scope, or confirm the
+   org already owns it.
+2. For `@awtprod/command-center`, configure a Trusted Publisher in the npm package settings:
    - Provider: GitHub Actions
    - Repository: this repo
    - Workflow file: `.github/workflows/release.yml`
    - Environment (if used): match your npm trusted publishing config
 3. Ensure npm account and org policies allow trusted publishing for the package.
-4. Create release tag `vX.Y.Z` and push; workflow will:
-   - set `apps/server/package.json` version to `X.Y.Z`
-   - build web + server
-   - run `npm publish --access public --tag latest`
-5. Nightly runs from the same workflow file publish with `npm publish --access public --tag nightly`.
+4. Create release tag `vX.Y.Z` and push; the workflow publishes the GitHub Release and then the
+   launcher with npm dist-tag `latest`.
+5. Nightly runs from the same workflow file publish with npm dist-tag `nightly`; preview runs with
+   `preview`.
 
 ## 1) Signed validation release
 
