@@ -41,3 +41,14 @@ This local command is read-only. When the automated run reports a conflict, reso
 branch from `main`, merge the target, renumber colliding migrations after the fork's highest, and
 open a PR. Review every sync PR for preserved Command Center contracts, privacy boundaries,
 migrations, responsive web, Electron behavior, and T3 Code attribution before merging.
+
+## Renumbered upstream migrations
+
+Upstream migrations append after the fork's highest id at each sync. Fork ids are never renumbered.
+`apps/server/src/persistence/Migrations.ts` points here.
+
+| Sync                      | Upstream ids | Command Center ids |
+| ------------------------- | ------------ | ------------------ |
+| v0.0.45 catch-up          | 044-054      | 083-093            |
+| v0.1.0 (orchestration V2) | 055-062      | 095-102            |
+| v0.1.5                    | 063-072      | 104-113            |
