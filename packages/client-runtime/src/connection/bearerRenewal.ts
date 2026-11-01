@@ -17,12 +17,10 @@ import * as EnvironmentRegistry from "./registry.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
 
 /**
- * Bearer sessions expire 30 days after issue. Paired clients renew theirs from
- * the environment shortly before that so nobody has to re-pair every month.
- *
- * The check is local (the token's `exp` claim) and cheap, so it runs on every
- * successful connect, on app activation, and hourly while connected. The
- * network is only used once a token is inside the server's renewal window.
+ * Bearer sessions expire 30 days after issue; paired clients renew shortly before.
+ * The check is local (the token's `exp` claim), so it runs on every connect, app
+ * activation, and hourly while connected; the network is used only once a token
+ * is inside the server's renewal window.
  */
 const BEARER_RENEWAL_CHECK_INTERVAL = Duration.hours(1);
 /** How long to leave a connection alone after a renewal attempt failed. */

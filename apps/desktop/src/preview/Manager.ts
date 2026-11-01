@@ -1570,7 +1570,14 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     // close callback cannot start capture cleanup while this handoff is waiting.
     const previousMainWindow = currentMainWindow;
     currentMainWindow = window;
-    frameCaptureWindowOpen = true;
+    // Frame capture opens only once the replacement is installed, so it stays closed during cleanup.
+    const releaseMainWindowClaim = Effect.sync(() => {
+      if (currentMainWindow !== window) return;
+      const previousWindowIsOpen =
+        previousMainWindow !== undefined && !previousMainWindow.isDestroyed();
+      currentMainWindow = previousWindowIsOpen ? previousMainWindow : undefined;
+      frameCaptureWindowOpen = previousWindowIsOpen;
+    });
     if (mainWindowCleanupFiber) {
       yield* Fiber.join(mainWindowCleanupFiber);
       mainWindowCleanupFiber = undefined;
@@ -1578,11 +1585,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     yield* SynchronizedRef.modifyEffect(frameCaptureSessionsRef, (sessions) =>
       Effect.gen(function* () {
         // Cleanup or lock acquisition can outlive the replacement window.
-        if (window.isDestroyed()) return [undefined, sessions] as const;
+        if (window.isDestroyed()) {
+          yield* releaseMainWindowClaim;
+          return [undefined, sessions] as const;
+        }
         if (sessions.size > 0) {
           yield* setWindowBackgroundThrottling(window, false);
         }
         yield* Ref.set(mainWindowRef, Option.some(window));
+        frameCaptureWindowOpen = true;
         window.once("closed", () => {
           if (currentMainWindow !== window) return;
           currentMainWindow = undefined;
@@ -1598,16 +1609,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       }),
     ).pipe(
       Effect.uninterruptible,
-      Effect.onError(() =>
-        Effect.sync(() => {
-          if (currentMainWindow === window) {
-            const previousWindowIsOpen =
-              previousMainWindow !== undefined && !previousMainWindow.isDestroyed();
-            currentMainWindow = previousWindowIsOpen ? previousMainWindow : undefined;
-            frameCaptureWindowOpen = previousWindowIsOpen;
-          }
-        }),
-      ),
+      Effect.onError(() => releaseMainWindowClaim),
     );
   });
 

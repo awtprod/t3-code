@@ -109,12 +109,10 @@ export const make = Effect.gen(function* () {
       }
       const updatedAt = DateTime.formatIso(yield* DateTime.now);
 
-      // Same lazy-proxy constraint as Devices.register: every db chain must be
-      // consumed via `yield*`, never handed to Effect.all.
-      //
-      // An endpoint uniquely identifies one browser subscription; if another
-      // row (any user, any device) still holds it, that row is stale — claim
-      // it by deletion so the unique index cannot reject the upsert.
+      // Lazy-proxy constraint (as in Devices.register): consume every db chain via
+      // `yield*`, never Effect.all. An endpoint identifies one browser subscription;
+      // another row still holding it (any user or device) is stale, so claim it by
+      // deletion before the upsert hits the unique index.
       yield* db
         .delete(relayWebPushSubscriptions)
         .where(

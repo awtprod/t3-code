@@ -114,14 +114,10 @@ export const JudgeTransport = Schema.Literals(["off", "typesafe", "openai-compat
 export type JudgeTransport = typeof JudgeTransport.Type;
 
 /**
- * Judge model configuration. Additive and fully defaulted so existing settings
- * JSON decodes to a disabled judge. `model` and `apiKeyEnv` carry the TypeSafe
- * defaults; the Judge service swaps them for the gateway defaults when
- * `transport` is `openai-compatible` and the operator left them untouched (see
- * `resolveJudgeConfig` in `apps/server/src/efficiency/Judge.ts`).
- *
- * `apiKeyEnv` is the NAME of the environment variable that holds the key, never a
- * key value.
+ * Judge model configuration, fully defaulted so existing settings decode to a
+ * disabled judge. `model`/`apiKeyEnv` carry TypeSafe defaults that the Judge swaps
+ * for gateway defaults when `transport` is `openai-compatible` and they are untouched
+ * (see `resolveJudgeConfig`). `apiKeyEnv` is an env variable NAME, never a key value.
  */
 export const EfficiencyJudgeSettings = Schema.Struct({
   transport: JudgeTransport.pipe(Schema.withDecodingDefault(Effect.succeed("off" as const))),
@@ -136,11 +132,10 @@ export const EfficiencyJudgeSettings = Schema.Struct({
 export type EfficiencyJudgeSettings = typeof EfficiencyJudgeSettings.Type;
 
 /**
- * Confidence-gated tier judgment. When `enabled`, an auto-routed turn asks the
- * judge to score task complexity, classify its task kind, and say whether it
- * continues the thread's current task. The mapped tier (and kind) only apply when
- * `confidence >= minConfidence`; a continuation (`continuation >=
- * continuationThreshold`) keeps the thread's current route instead.
+ * Confidence-gated tier judgment. When `enabled`, an auto-routed turn asks the judge
+ * for task complexity, task kind, and whether it continues the current task. The
+ * mapped tier (and kind) apply only when `confidence >= minConfidence`; a
+ * continuation (`>= continuationThreshold`) keeps the thread's current route.
  */
 export const EfficiencyTierJudgmentSettings = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -282,16 +277,10 @@ export const EfficiencyModelSelection = Schema.Struct({
 });
 
 /**
- * Confidence-gated tier judgment recorded on a decision. `applied` is true only
- * when the judgment actually overrode the static tier (no rule matched and
- * `confidence >= minConfidence`); otherwise `reason` explains why it was kept for
- * the log only. `score` is the probability-weighted rubric level (0..2).
- *
- * `kind`/`kindConfidence` are the judged task kind; `kindApplied` is true when a
- * specialist candidate for that kind was routed. `continuation` is the judged
- * probability that the message continues the current task; `sticky` is true
- * when the thread's previous route was reused because of it (the kind fields are
- * then inherited from that route). All five are additive and optional.
+ * Confidence-gated tier judgment recorded on a decision. `applied` is true only when it
+ * overrode the static tier (no rule matched and `confidence >= minConfidence`); otherwise
+ * `reason` says why it was kept for the log only. `score` is the probability-weighted
+ * rubric level (0..2).
  */
 export const EfficiencyTierJudgment = Schema.Struct({
   score: Schema.Number,
@@ -300,10 +289,13 @@ export const EfficiencyTierJudgment = Schema.Struct({
   applied: Schema.Boolean,
   reason: Schema.optional(TrimmedNonEmptyString),
   model: TrimmedNonEmptyString,
+  /** Judged task kind; `kindApplied` is true when a specialist candidate for it was routed. */
   kind: Schema.optional(TaskKind),
   kindConfidence: Schema.optional(Schema.Number),
   kindApplied: Schema.optional(Schema.Boolean),
+  /** Judged probability that the message continues the current task. */
   continuation: Schema.optional(Schema.Number),
+  /** True when the previous route was reused because of `continuation` (kind fields inherited). */
   sticky: Schema.optional(Schema.Boolean),
 });
 export type EfficiencyTierJudgment = typeof EfficiencyTierJudgment.Type;
@@ -355,17 +347,6 @@ export const InternalGenerationUsage = Schema.Struct({
 });
 export type InternalGenerationUsage = typeof InternalGenerationUsage.Type;
 
-/**
- * Per-thread efficiency routing, a fork-owned side channel next to the
- * orchestration V2 thread shell (which carries no routing fields).
- *
- * `routingMode`/`efficiencyTier` are the composer's routing controls for the
- * thread. `pendingRetryOfTurnId` marks the next routed turn as a "retry one
- * tier higher" of an earlier turn; the server clears it when that turn routes.
- * `latestDecision` is the newest per-run decision. `delegations` lists the
- * child threads auto-routing forked for this thread (newest first, bounded),
- * and `delegatedFrom` is set on a child thread.
- */
 export const EfficiencyThreadDelegation = Schema.Struct({
   parentThreadId: ThreadId,
   childThreadId: ThreadId,
@@ -385,6 +366,12 @@ export const EfficiencyRunDecision = Schema.Struct({
 });
 export type EfficiencyRunDecision = typeof EfficiencyRunDecision.Type;
 
+/**
+ * Per-thread efficiency routing, a fork-owned side channel next to the orchestration V2
+ * thread shell (which carries no routing fields). `pendingRetryOfTurnId` marks the next
+ * routed turn as a "retry one tier higher" of an earlier turn; the server clears it when
+ * that turn routes. `delegations` are the child threads auto-routing forked (newest first).
+ */
 export const EfficiencyThreadRouting = Schema.Struct({
   threadId: ThreadId,
   routingMode: ThreadRoutingMode,

@@ -29,11 +29,9 @@ function resolveHomeDir(explicit: string | undefined): string {
 }
 
 /**
- * Sweep the process table (Linux `/proc`) for dev trees rooted in this repo that
- * are not covered by a lock — pre-lock launches, or servers whose lock was
- * removed but that outlived their parent. Matches the dev-runner launcher, the
- * `node --watch src/bin.ts` server watcher, and Vite web dev servers (see
- * isDevServerCmdline) whose cwd is under this repo.
+ * Sweep the Linux `/proc` table for dev trees rooted in this repo that no lock covers
+ * (pre-lock launches, or servers that outlived their parent after the lock was
+ * removed): processes matching isDevServerCmdline whose cwd is under this repo.
  */
 function sweepRepoDevGroups(): number[] {
   const pgids = new Set<number>();

@@ -533,10 +533,6 @@ export const AuthOtherClientSessionsRevokeResult = Schema.Struct({
 });
 export type AuthOtherClientSessionsRevokeResult = typeof AuthOtherClientSessionsRevokeResult.Type;
 
-// ===============================
-// Direct Web Push (RFC 8291 aes128gcm + VAPID, no relay)
-// ===============================
-
 // Every client-supplied string is length-bounded: the endpoint is POSTed to
 // verbatim and the keys/deviceId are stored, so an unbounded value is a memory
 // and log-volume hazard. The SSRF host allowlist is enforced server-side.

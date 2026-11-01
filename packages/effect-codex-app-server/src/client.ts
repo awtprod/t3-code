@@ -280,12 +280,10 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
 
 export interface CodexAppServerChildProcessClientOptions extends CodexAppServerClientOptions {
   /**
-   * Receives the child's stderr as decoded UTF-8 text, chunk by chunk.
-   *
-   * The client is the only reader of `handle.stderr`: a Node child's stderr is
-   * a single readable, so a second independent reader would split chunks with
-   * this one and both would see a partial log. Consumers that also need stderr
-   * (e.g. to surface log lines) must subscribe through this callback.
+   * Receives the child's stderr as decoded UTF-8 text, chunk by chunk. The client is
+   * the only reader of `handle.stderr` (a Node child's stderr is a single readable; a
+   * second reader would split chunks and both would see a partial log), so consumers
+   * that also need stderr must subscribe through this callback.
    */
   readonly onStderr?: (text: string) => Effect.Effect<void>;
 }

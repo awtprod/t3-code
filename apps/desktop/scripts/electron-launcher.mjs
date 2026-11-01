@@ -397,11 +397,10 @@ function buildMacLauncher(electronBinaryPath) {
   );
   patchHelperBundleInfoPlists(targetAppBundlePath);
   if (isDevelopment) {
-    // Keep Electron's native executable inside the branded bundle. Launching the
-    // node_modules copy makes macOS associate the process (and Dock label) with
-    // Electron.app even though this bundle's Info.plist has the Command Center name.
-    // Its conventional executable name also keeps Electron's default-app runtime
-    // in development mode instead of making app.isPackaged report true.
+    // Keep Electron's native executable inside the branded bundle: launching the
+    // node_modules copy makes macOS label the process and Dock as Electron.app. Its
+    // conventional executable name also keeps the default-app runtime in development
+    // mode instead of making app.isPackaged report true.
     writeDevelopmentEnvironmentScript();
     writeDevelopmentLauncherScript(launcherBinaryPath, runtimeElectronBinaryPath);
   }

@@ -64,12 +64,10 @@ export class DesktopBackendPool extends Context.Service<
     // primary backend is a remote server: those launches deliberately have
     // no local primary.
     readonly primary: Effect.Effect<Option.Option<DesktopBackendInstance>>;
-    // Build a fresh DesktopBackendInstance from `spec` and add it to the
-    // registry. The pool owns the instance's scope: unregister(id) or pool
-    // teardown closes it and runs the instance's auto-stop finalizer. The
-    // returned instance has not been started — callers decide when to
-    // start it (and can call start more than once if a retry-after-failure
-    // story makes sense for them).
+    // Build a fresh DesktopBackendInstance from `spec` and add it to the registry.
+    // The pool owns the instance's scope: unregister(id) or pool teardown closes it
+    // and runs its auto-stop finalizer. The returned instance has not been started;
+    // callers decide when to start it (and may call start more than once).
     readonly register: (
       spec: BackendInstanceSpec,
     ) => Effect.Effect<DesktopBackendInstance, DesktopBackendPoolInstanceAlreadyRegisteredError>;
@@ -121,13 +119,10 @@ export const layer = Layer.effect(
     const loadedSettings = yield* appSettings.load;
     const startupPlan = DesktopAppSettings.resolveDesktopStartupPlan(loadedSettings);
     const { primaryBackendStartup } = yield* DesktopState.DesktopState;
-    // Anchor the pool's lifetime to its layer scope so registered
-    // instance scopes can be forked off it. Without this, instance
-    // scopes are orphaned: they only close via explicit unregister()
-    // calls, so on app shutdown the WSL backend child process gets
-    // hard-killed by the OS instead of receiving the graceful
-    // SIGTERM + grace period the instance's stop finalizer would
-    // otherwise run.
+    // Anchor the pool's lifetime to its layer scope so instance scopes can be forked
+    // off it. Otherwise they close only via explicit unregister(), and on app shutdown
+    // the WSL backend child is hard-killed instead of getting the graceful
+    // SIGTERM + grace period its stop finalizer would run.
     const layerScope = yield* Scope.Scope;
     const factoryContext = yield* Effect.context<BackendInstanceFactoryRequirements>();
 
@@ -183,12 +178,10 @@ export const layer = Layer.effect(
               // primaries as Windows.
               label: configuration.resolvePrimaryLabel,
               configResolve: configuration.resolvePrimary,
-              // Window creation errors propagating out of handleBackendReady must
-              // not block the readiness callback (that would prevent restartAttempt
-              // from being reset), so we absorb them here. The window service only
-              // logs on success, so log the failure here before swallowing it —
-              // otherwise a post-readiness window-open failure vanishes silently and
-              // is near-impossible to diagnose in production.
+              // Window creation errors from handleBackendReady must not block the
+              // readiness callback (restartAttempt would never reset), so absorb them.
+              // The window service only logs on success; log the failure here so a
+              // post-readiness window-open failure does not vanish silently.
               onReady: (httpBaseUrl) =>
                 desktopWindow.handleBackendReady(httpBaseUrl).pipe(
                   // Only once the main window exists, so the recovery window never closes into nothing.

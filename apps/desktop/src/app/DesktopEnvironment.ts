@@ -59,12 +59,10 @@ export class DesktopEnvironment extends Context.Service<
     // Build-time flag: remote-only installers ship the renderer without
     // apps/server and never launch a local backend (see remoteOnlyBuild.ts).
     readonly remoteOnlyBuild: boolean;
-    // Root of the tree containing apps/server/dist and node_modules for the
-    // backend. Equals appRoot everywhere except packaged Windows, where the
-    // server tree ships as the resources/server.asar sidecar (see
-    // scripts/build-desktop-artifact.ts) that the asar-aware
-    // ELECTRON_RUN_AS_NODE primary reads in place and the WSL backend
-    // extracts on demand (see DesktopWslServerTree).
+    // Tree holding apps/server/dist and node_modules for the backend. Equals appRoot
+    // except on packaged Windows, where it is the resources/server.asar sidecar
+    // (see scripts/build-desktop-artifact.ts): the primary reads it in place, the
+    // WSL backend extracts it on demand (see DesktopWslServerTree).
     readonly serverRoot: string;
     readonly backendEntryPath: string;
     // Built web client the packaged renderer is served from over commandcenter://app.

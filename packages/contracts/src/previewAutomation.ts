@@ -984,14 +984,10 @@ export const PreviewAutomationError = Schema.Union([
 export type PreviewAutomationError = typeof PreviewAutomationError.Type;
 
 /**
- * How a preview URL was reached.
- *
- * - `direct` — the environment is this machine, so the loopback URL stands.
- * - `direct-private-network` — the environment's own host is reachable from
- *   here (LAN, Tailscale), so the dev server's port is dialled on that host.
- * - `preview-gateway` — neither holds, so the URL points at the authenticated
- *   preview gateway, which forwards to the loopback port on the environment's
- *   machine. This is the path that removes the per-session tunnel.
+ * How a preview URL was reached: `direct` (the environment is this machine, so the
+ * loopback URL stands), `direct-private-network` (its host is reachable from here
+ * over LAN/Tailscale, so the port is dialled there), or `preview-gateway` (neither,
+ * so the URL goes through the authenticated gateway, with no per-session tunnel).
  */
 export const PreviewUrlResolutionKind = Schema.Literals([
   "direct",

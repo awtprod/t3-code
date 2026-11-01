@@ -3651,12 +3651,8 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
 
   const electronVersion = desktopPackageJson.dependencies.electron;
   const remoteOnlyBuild = options.remoteOnly;
-  // The web and desktop vite sub-builds each key their remote-only behaviour off
-  // `process.env.VITE_REMOTE_ONLY` (apps/web/vite.config.ts,
-  // apps/desktop/vite.config.ts, which bakes __T3CODE_REMOTE_ONLY__ from it).
-  // `--remote-only` / T3CODE_DESKTOP_REMOTE_ONLY resolve into `options.remoteOnly`
-  // but do not set that env var, so normalise it here — otherwise the packer
-  // would skip the server while the client bundles were still built full.
+  // The web and desktop vite builds read VITE_REMOTE_ONLY, which `--remote-only` does not set;
+  // without it the packer would skip the server while the client bundles still build full.
   if (remoteOnlyBuild) {
     process.env.VITE_REMOTE_ONLY = "1";
   }
@@ -3765,18 +3761,9 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     }
   }
 
-  // Assert against the emitted bundle, not the bundler config. `alwaysBundle`
-  // only forces packages IN, so a transitive dependency of an external package
-  // is bundled by default however the predicate is written — that silently
-  // inlined a native loader (node-gyp-build-optional-packages) while every
-  // list-based test still passed. An inlined native loader resolves its
-  // prebuilds relative to the bundle and quietly falls back to a slower
-  // pure-JS path, so this fails the build rather than shipping a silent
-  // regression.
-  //
-  // A remote-only build never produces distDirs.serverDist (see
-  // requiredBuildInputs above), so this scan has nothing to read and is
-  // skipped entirely for that build shape.
+  // Assert on the emitted bundle: `alwaysBundle` only forces packages in, so an external's
+  // transitive native loader can be inlined and silently fall back to its pure-JS path.
+  // Remote-only builds emit no server bundle, so there is nothing to scan.
   if (!remoteOnlyBuild) {
     const chunkNames = (yield* fs.readDirectory(distDirs.serverDist)).filter((entry) =>
       entry.endsWith(".mjs"),
@@ -3953,12 +3940,8 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     );
   }
 
-  // Windows splits dependencies per process: app.asar carries only the
-  // desktop main-process externals, while the server bundle's externals live
-  // in the server.asar sidecar (see stageWindowsServerSidecar). A remote-only
-  // build ships no server on any platform, so it needs only the desktop
-  // externals too. macOS and Linux (non-remote-only) merge both sets into one
-  // app.asar.
+  // Windows and remote-only app.asar carry only desktop externals (Windows server externals
+  // live in the server.asar sidecar); macOS and Linux merge both sets into one app.asar.
   const stageDependencies =
     options.platform === "win" || remoteOnlyBuild
       ? { ...resolvedDesktopRuntimeDependencies }
@@ -4199,21 +4182,9 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     });
   }
 
-  // Prove the packaged bundle is self-contained by loading it the way the WSL
-  // backend does, rather than by reasoning about the emitted source.
-  //
-  // Static analysis kept getting this wrong here. Scanning for bare imports
-  // matched specifiers inside effect's JSDoc examples and inside ajv's runtime
-  // codegen template, and asserting that one sentinel package was inlined
-  // missed a build that inlined `effect` while leaving `yaml` external. Node's
-  // resolver has no such ambiguity: it either finds every import or it does not.
-  //
-  // Only Windows unpacks anything; macOS and Linux keep the whole tree inside
-  // the app asar. Windows validates and executes the separately packed server
-  // sidecar after electron-builder copies it into the final payload. A
-  // remote-only build has no WSL backend and stages no server bundle, so there
-  // is nothing to prove self-contained — skip it there as with the server-bundle
-  // checks above.
+  // Prove the packaged bundle is self-contained by loading it, not by scanning source:
+  // import scans misread JSDoc examples and codegen templates. Remote-only builds stage
+  // no server bundle, so both self-checks skip them.
   if (options.platform === "win" && !remoteOnlyBuild) {
     yield* validateWindowsPackagedPayload({
       stageDistDir,
@@ -4228,7 +4199,12 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     });
   }
   // x64 builds on arm64 runners; the arm64 check covers the shared JS bundle.
-  if (options.platform === "mac" && options.arch === "arm64" && hostPlatform === "darwin") {
+  if (
+    !remoteOnlyBuild &&
+    options.platform === "mac" &&
+    options.arch === "arm64" &&
+    hostPlatform === "darwin"
+  ) {
     yield* validateMacPackagedPayload({ stageDistDir, verbose: options.verbose });
   }
 

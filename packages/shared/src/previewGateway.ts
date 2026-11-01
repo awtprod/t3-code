@@ -1,17 +1,8 @@
 /**
- * The wire contract between the preview gateway (`apps/server/src/preview/`) and
- * the clients that point a preview at it.
- *
- * The gateway is mounted at the **root** of its own port rather than under a
- * `/preview/<port>/` prefix, because dev servers emit absolute URLs
- * (`/@vite/client`, `/src/main.tsx`, the HMR socket) that resolve against the
- * gateway origin and would 404 under a prefix. Root mounting means the request
- * path can no longer name the upstream, so the port is chosen once via
- * {@link PREVIEW_GATEWAY_SELECT_PATH} and then travels in a signed cookie.
- *
- * These names live in `shared` rather than in the server because the client has
- * to build the select URL, and a second copy of the path would be a silent
- * mismatch waiting to happen.
+ * Wire contract for the preview gateway (`apps/server/src/preview/`), shared so client
+ * and server cannot drift on the path. It is mounted at the root of its own port, not
+ * under `/preview/<port>/`, because dev servers emit absolute URLs (`/@vite/client`)
+ * that would 404 there; the port is chosen once via {@link PREVIEW_GATEWAY_SELECT_PATH}.
  */
 
 /**
@@ -29,14 +20,10 @@ export const PREVIEW_GATEWAY_PORT_PARAM = "port";
 export const PREVIEW_GATEWAY_REDIRECT_PARAM = "to";
 
 /**
- * Build the URL that selects an upstream port and then lands on `to`.
- *
- * The gateway answers this with a `303` that sets the port cookie, so a single
- * navigation both selects the upstream and loads the page.
- *
- * `to` is forced to an absolute path: the gateway refuses anything else (a
- * scheme-relative `//host` would be an open redirect), and silently sending a
- * value that will be discarded server-side would strand the browser at `/`.
+ * Build the URL that selects an upstream port and then lands on `to`: the gateway
+ * answers with a `303` that sets the port cookie. `to` is forced to an absolute path:
+ * the gateway refuses anything else (a scheme-relative `//host` would be an open
+ * redirect), and sending a value it discards would strand the browser at `/`.
  */
 export function buildPreviewGatewaySelectUrl(input: {
   readonly gatewayOrigin: string;

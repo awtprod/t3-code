@@ -135,11 +135,10 @@ function resolveThreadAwarenessPhaseV2(
 }
 
 /**
- * Short status word for a phase, shown as the leading token of a notification
- * body (`${status}: ${projectTitle}`). Mirrors the relay's private
- * `statusForPhase` in infra/relay/src/agentActivity/AgentActivityPublisher.ts so
- * the same thread reads identically across the relay (APNs) and direct Web Push
- * channels; keep the two in sync.
+ * Short status word for a phase, the leading token of a notification body
+ * (`${status}: ${projectTitle}`). Mirrors the relay's private `statusForPhase` in
+ * infra/relay/src/agentActivity/AgentActivityPublisher.ts so a thread reads
+ * identically over APNs and direct Web Push; keep the two in sync.
  */
 export function agentAwarenessStatusWord(phase: AgentAwarenessPhase): string {
   switch (phase) {

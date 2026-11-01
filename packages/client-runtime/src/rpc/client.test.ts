@@ -63,6 +63,7 @@ const makeHarness = Effect.fn("TestEnvironmentRpc.makeHarness")(function* () {
   );
   const prepared = yield* SubscriptionRef.make<Option.Option<PreparedConnection>>(Option.none());
   const retryCount = yield* Ref.make(0);
+  const retries = yield* Queue.unbounded<void>();
   const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
     target: TARGET,
     state,
@@ -70,10 +71,13 @@ const makeHarness = Effect.fn("TestEnvironmentRpc.makeHarness")(function* () {
     prepared,
     connect: Effect.void,
     disconnect: Effect.void,
-    retryNow: Ref.update(retryCount, (count) => count + 1),
+    retryNow: Ref.update(retryCount, (count) => count + 1).pipe(
+      Effect.andThen(Queue.offer(retries, undefined)),
+    ),
   } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
   return {
     activeSession,
+    retries,
     retryCount,
     supervisor,
   };
@@ -247,7 +251,7 @@ describe("environment RPC", () => {
           return Stream.never;
         },
       } as unknown as WsRpcProtocolClient;
-      const { activeSession, retryCount, supervisor } = yield* makeHarness();
+      const { activeSession, retries, retryCount, supervisor } = yield* makeHarness();
 
       const subscriptionFiber = yield* subscribe(WS_METHODS.subscribeTerminalMetadata, {}).pipe(
         Stream.runDrain,
@@ -258,12 +262,7 @@ describe("environment RPC", () => {
       while (subscriptions.length < 1) {
         yield* Queue.take(subscriptionChanges);
       }
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        if ((yield* Ref.get(retryCount)) >= 1) {
-          break;
-        }
-        yield* Effect.yieldNow;
-      }
+      yield* Queue.take(retries);
       expect(yield* Ref.get(retryCount)).toBe(1);
 
       yield* SubscriptionRef.set(activeSession, Option.none());

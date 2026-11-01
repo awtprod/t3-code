@@ -156,12 +156,10 @@ export class UsageReadError extends Schema.TaggedError<UsageReadError>()("UsageR
   }
 }
 
-// ---------------------------------------------------------------------------
-// Command Center usage analytics (fork): orchestration-projection-backed usage
-// query contract (`usage.query` RPC). Distinct from the transcript-scan
-// summary above. The fork's `UsageSummary`/`UsageTokenTotals` are exported as
-// `UsageQuerySummary`/`UsageQueryTokenTotals` to coexist with upstream's names.
-// ---------------------------------------------------------------------------
+// Command Center usage analytics (fork): orchestration-projection-backed `usage.query`
+// contract, distinct from the transcript-scan summary above. The fork's `UsageSummary`/
+// `UsageTokenTotals` are exported as `UsageQuerySummary`/`UsageQueryTokenTotals` to
+// coexist with upstream's names.
 
 export const UsageBucketSize = Schema.Literals(["hour", "day", "week", "month"]);
 export type UsageBucketSize = typeof UsageBucketSize.Type;

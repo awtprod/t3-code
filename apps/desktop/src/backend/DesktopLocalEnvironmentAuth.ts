@@ -135,12 +135,9 @@ interface SavedRemoteCredential {
 
 /**
  * Every bearer credential saved for exactly `remoteHttpBaseUrl`, best first.
- *
- * Orphaned profiles for the same server can outlive a re-pairing, so the first
- * URL match is not necessarily the current credential. Profiles referenced by a
- * saved bearer target come first, as that is the connection the renderer
- * resolves; the rest follow by token expiry, latest first, which also places
- * expired tokens after unexpired ones. Unreadable expiry claims go last.
+ * Orphaned profiles can outlive a re-pairing, so the first URL match may be stale:
+ * profiles referenced by a saved bearer target come first (the renderer's
+ * connection), then the rest by token expiry, latest first; unreadable claims last.
  */
 function savedRemoteCredentialsFor(
   catalog: ConnectionCatalogDocumentType,
@@ -184,7 +181,7 @@ function savedRemoteCredentialsFor(
   return candidates.map(({ token, environmentId }) => ({ token, environmentId }));
 }
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const appSettings = yield* DesktopAppSettings.DesktopAppSettings;

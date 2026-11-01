@@ -15,6 +15,25 @@ import {
   CommandCenterSprintPlanSnapshot,
 } from "./commandCenterSprintPlan.ts";
 
+const decodePreviewImportResult = Schema.decodeSync(CommandCenterSprintPlanPreviewImportResult);
+const decodeSnapshot = Schema.decodeSync(CommandCenterSprintPlanSnapshot);
+const decodeGetOriginalResult = Schema.decodeSync(CommandCenterSprintPlanGetOriginalResult);
+const decodeListInput = Schema.decodeSync(CommandCenterSprintPlanListInput);
+const decodeApplyImportInput = Schema.decodeSync(CommandCenterSprintPlanApplyImportInput);
+const decodePreviewImportInput = Schema.decodeSync(CommandCenterSprintPlanPreviewImportInput);
+const decodePatchTaskInput = Schema.decodeSync(CommandCenterSprintPlanPatchTaskInput);
+const decodeUnknownListResult = Schema.decodeUnknownSync(CommandCenterSprintPlanListResult);
+const decodeUnknownGetOriginalInput = Schema.decodeUnknownSync(
+  CommandCenterSprintPlanGetOriginalInput,
+);
+const decodeUnknownApplyImportInput = Schema.decodeUnknownSync(
+  CommandCenterSprintPlanApplyImportInput,
+);
+const decodeUnknownPatchTaskInput = Schema.decodeUnknownSync(CommandCenterSprintPlanPatchTaskInput);
+const decodeUnknownResolveDateConflictInput = Schema.decodeUnknownSync(
+  CommandCenterSprintPlanResolveDateConflictInput,
+);
+
 const source = () => ({
   version: 2,
   updated: "2026-09-27T19:40:38.746Z",
@@ -105,7 +124,7 @@ const snapshot = () => {
 
 describe("Command Center sprint-plan wire outputs", () => {
   it("accepts preview hashes and complete snapshots without dropping optional source metadata", () => {
-    const preview = Schema.decodeSync(CommandCenterSprintPlanPreviewImportResult)({
+    const preview = decodePreviewImportResult({
       planId: "fall-plan",
       sourceSha256: "b".repeat(64),
       sourceVersion: 2,
@@ -118,7 +137,7 @@ describe("Command Center sprint-plan wire outputs", () => {
     });
     expect(preview.sourceSha256).toBe("b".repeat(64));
 
-    const decoded = Schema.decodeSync(CommandCenterSprintPlanSnapshot)(snapshot());
+    const decoded = decodeSnapshot(snapshot());
     expect(decoded.baseline.campaign).toEqual({
       channel: "live",
       flags: ["keep", "lossless"],
@@ -130,7 +149,7 @@ describe("Command Center sprint-plan wire outputs", () => {
 
   it("validates the standalone immutable original without adding it to snapshots", () => {
     const originalSource = source();
-    const decoded = Schema.decodeSync(CommandCenterSprintPlanGetOriginalResult)({
+    const decoded = decodeGetOriginalResult({
       planId: "fall-plan",
       spaceId: "charlotte-comedy",
       sourceVersion: 2,
@@ -144,14 +163,12 @@ describe("Command Center sprint-plan wire outputs", () => {
     });
     expect(decoded.sourceJson).toBe(JSON.stringify(originalSource));
     expect(decoded.originalNormalized.dateConflicts).toEqual([]);
-    expect(Schema.decodeSync(CommandCenterSprintPlanSnapshot)(snapshot())).not.toHaveProperty(
-      "original",
-    );
+    expect(decodeSnapshot(snapshot())).not.toHaveProperty("original");
   });
 
   it("rejects malformed hashes, dates, and oversized optional metadata", () => {
     expect(() =>
-      Schema.decodeSync(CommandCenterSprintPlanPreviewImportResult)({
+      decodePreviewImportResult({
         planId: "fall-plan",
         sourceSha256: "latest",
         sourceVersion: 2,
@@ -166,7 +183,7 @@ describe("Command Center sprint-plan wire outputs", () => {
 
     const invalidDate = snapshot();
     invalidDate.current.weeks[0]!.start = "2026-02-30";
-    expect(() => Schema.decodeSync(CommandCenterSprintPlanSnapshot)(invalidDate)).toThrow();
+    expect(() => decodeSnapshot(invalidDate)).toThrow();
 
     const oversizedMetadata = snapshot();
     const metadataTask = oversizedMetadata.current.weeks[0]!.tasks[0]! as unknown as {
@@ -175,7 +192,7 @@ describe("Command Center sprint-plan wire outputs", () => {
     metadataTask.sourceMetadata = {
       order: ["x".repeat(8_193), 2],
     };
-    expect(() => Schema.decodeSync(CommandCenterSprintPlanSnapshot)(oversizedMetadata)).toThrow();
+    expect(() => decodeSnapshot(oversizedMetadata)).toThrow();
   });
 
   it("bounds history pages and validates their full actor/provenance payload", () => {
@@ -220,7 +237,7 @@ describe("Command Center sprint-plan wire outputs", () => {
   });
 
   it("keeps plan discovery bounded and summary-only", () => {
-    const decoded = Schema.decodeUnknownSync(CommandCenterSprintPlanListResult)({
+    const decoded = decodeUnknownListResult({
       plans: [
         {
           id: "fall-plan",
@@ -243,7 +260,7 @@ describe("Command Center sprint-plan wire outputs", () => {
     expect(decoded.plans[0]).not.toHaveProperty("sourceJson");
     expect(decoded.plans[0]).not.toHaveProperty("current");
     expect(() =>
-      Schema.decodeUnknownSync(CommandCenterSprintPlanListResult)({
+      decodeUnknownListResult({
         plans: Array.from({ length: 101 }, () => decoded.plans[0]),
       }),
     ).toThrow();
@@ -253,7 +270,7 @@ describe("Command Center sprint-plan wire outputs", () => {
 describe("Command Center sprint-plan wire inputs", () => {
   it("requires a bounded Space-scoped keyset cursor for list discovery", () => {
     expect(
-      Schema.decodeSync(CommandCenterSprintPlanListInput)({
+      decodeListInput({
         spaceId: "charlotte-comedy",
         cursor: { updatedAt: "2026-09-28T01:00:00.000Z", planId: "fall-plan" },
         limit: 25,
@@ -264,7 +281,7 @@ describe("Command Center sprint-plan wire inputs", () => {
       limit: 25,
     });
     expect(() =>
-      Schema.decodeSync(CommandCenterSprintPlanListInput)({
+      decodeListInput({
         spaceId: "charlotte-comedy",
         cursor: { updatedAt: "not-a-date", planId: "fall-plan" },
         limit: 101,
@@ -273,7 +290,7 @@ describe("Command Center sprint-plan wire inputs", () => {
   });
 
   it("keeps getOriginal Space-scoped and strips forged public authority", () => {
-    const decoded = Schema.decodeUnknownSync(CommandCenterSprintPlanGetOriginalInput)({
+    const decoded = decodeUnknownGetOriginalInput({
       planId: "fall-plan",
       spaceId: "charlotte-comedy",
       actor: { id: "forged", kind: "system" },
@@ -283,7 +300,7 @@ describe("Command Center sprint-plan wire inputs", () => {
   });
 
   it("keeps actors server-owned and source provenance reference-only", () => {
-    const apply = Schema.decodeUnknownSync(CommandCenterSprintPlanApplyImportInput)({
+    const apply = decodeUnknownApplyImportInput({
       planId: "fall-plan",
       spaceId: "charlotte-comedy",
       sourceJson: JSON.stringify(source()),
@@ -294,7 +311,7 @@ describe("Command Center sprint-plan wire inputs", () => {
     });
     expect(apply).not.toHaveProperty("actor");
     expect(() =>
-      Schema.decodeSync(CommandCenterSprintPlanApplyImportInput)({
+      decodeApplyImportInput({
         ...apply,
         provenance: { sourceRef: "artifact:sprint-plan", originalFileName: "../plan.json" },
       }),
@@ -338,7 +355,7 @@ describe("Command Center sprint-plan wire inputs", () => {
 
   it("enforces byte limits before import and exact field patch value types", () => {
     expect(() =>
-      Schema.decodeSync(CommandCenterSprintPlanPreviewImportInput)({
+      decodePreviewImportInput({
         planId: "fall-plan",
         spaceId: "charlotte-comedy",
         sourceJson: "x".repeat(1_048_577),
@@ -354,7 +371,7 @@ describe("Command Center sprint-plan wire inputs", () => {
       provenance: { kind: "manual" },
     } as const;
     expect(
-      Schema.decodeSync(CommandCenterSprintPlanPatchTaskInput)({
+      decodePatchTaskInput({
         ...common,
         field: "done",
         before: false,
@@ -362,7 +379,7 @@ describe("Command Center sprint-plan wire inputs", () => {
       }),
     ).toMatchObject({ field: "done", after: true });
     expect(() =>
-      Schema.decodeUnknownSync(CommandCenterSprintPlanPatchTaskInput)({
+      decodeUnknownPatchTaskInput({
         ...common,
         field: "done",
         before: "false",
@@ -370,7 +387,7 @@ describe("Command Center sprint-plan wire inputs", () => {
       }),
     ).toThrow();
     expect(() =>
-      Schema.decodeUnknownSync(CommandCenterSprintPlanPatchTaskInput)({
+      decodeUnknownPatchTaskInput({
         ...common,
         field: "owner",
         before: "Production",
@@ -381,7 +398,7 @@ describe("Command Center sprint-plan wire inputs", () => {
 
   it("rejects client-forged approved adjustments for patches and date resolutions", () => {
     expect(() =>
-      Schema.decodeUnknownSync(CommandCenterSprintPlanPatchTaskInput)({
+      decodeUnknownPatchTaskInput({
         planId: "fall-plan",
         spaceId: "charlotte-comedy",
         taskId: "publish-recap",
@@ -394,7 +411,7 @@ describe("Command Center sprint-plan wire inputs", () => {
       }),
     ).toThrow();
     expect(() =>
-      Schema.decodeUnknownSync(CommandCenterSprintPlanResolveDateConflictInput)({
+      decodeUnknownResolveDateConflictInput({
         planId: "fall-plan",
         spaceId: "charlotte-comedy",
         taskId: "publish-recap",
