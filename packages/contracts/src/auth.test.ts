@@ -12,6 +12,7 @@ import {
   sessionGrantsScope,
   sessionHasLegacyPermissions,
 } from "./auth.ts";
+import { ForwardCompatibleArray } from "./baseSchemas.ts";
 
 describe("authorization grants", () => {
   it("decodes legacy review credentials without offering them in new grants", () => {
@@ -57,6 +58,92 @@ describe("authorization grants", () => {
     expect(decodeOldScopes(response.scopes)).toEqual(response.scopes);
     expect(response.permissions).toEqual(AuthStandardClientScopes);
     expect(response.scopes).not.toContain("filesystem:read");
+  });
+
+  // Frozen stock T3 Code 2.2.0 vocabulary, independent of the CC enum/formatter.
+  const stockScope = Schema.Literals([
+    "orchestration:read",
+    "orchestration:operate",
+    "settings:write",
+    "providers:manage",
+    "environment:maintain",
+    "preview:operate",
+    "diagnostics:read",
+    "terminal:read",
+    "terminal:operate",
+    "filesystem:read",
+    "filesystem:write",
+    "review:write",
+    "source-control:write",
+    "access:read",
+    "access:write",
+    "relay:read",
+    "relay:write",
+  ]);
+  const stockScopes = Schema.Array(stockScope);
+  const stockSession = Schema.Struct({
+    ...AuthSessionState.fields,
+    scopes: Schema.optionalKey(stockScopes),
+    permissions: Schema.optionalKey(ForwardCompatibleArray(stockScope)),
+  });
+  const decodeStockScopes = Schema.decodeUnknownSync(stockScopes);
+  const decodeStockSession = Schema.decodeUnknownSync(stockSession);
+  const decodeCcSession = Schema.decodeUnknownSync(AuthSessionState);
+
+  it("keeps stock send and answer enabled while CC clients retain custom permissions", () => {
+    const grant = Object.freeze([
+      "orchestration:read",
+      "orchestration:operate",
+      "filesystem:read",
+      "command-center:read",
+      "command-center:operate",
+      "command-center:approve",
+    ] as const);
+    const originalGrant = [...grant];
+    const response = {
+      authenticated: true,
+      auth: {
+        policy: "remote-reachable",
+        bootstrapMethods: ["one-time-token"],
+        sessionMethods: ["bearer-access-token"],
+        sessionCookieName: "session",
+      },
+      sessionMethod: "bearer-access-token",
+      draftScopeId: "paired-mobile-session",
+      ...authScopeResponse(grant),
+    };
+    const stock = decodeStockSession(response);
+    expect(stock.scopes).toEqual(["orchestration:read", "orchestration:operate"]);
+    expect(stock.permissions).toEqual([
+      "orchestration:read",
+      "orchestration:operate",
+      "filesystem:read",
+    ]);
+    // Mobile gates both sending messages and answering questions on this scope.
+    expect(sessionGrantsScope(stock, "orchestration:operate")).toBe(true);
+    const cc = decodeCcSession(response);
+    expect(cc.permissions).toEqual(originalGrant);
+    expect(response.permissions).toBe(grant);
+    expect(grant).toEqual(originalGrant);
+  });
+
+  it.each([
+    { label: "empty", scopes: [] },
+    { label: "read-only", scopes: ["orchestration:read"] },
+    {
+      label: "CC-only",
+      scopes: ["command-center:read", "command-center:operate", "command-center:approve"],
+    },
+  ] as const)("does not add orchestration access to $label grants", ({ scopes }) => {
+    const grant = Object.freeze(scopes);
+    const originalGrant = [...grant];
+    const response = authScopeResponse(grant);
+    expect(decodeStockScopes(response.scopes)).not.toContain("orchestration:operate");
+    expect(sessionGrantsScope({ authenticated: true, ...response }, "orchestration:operate")).toBe(
+      false,
+    );
+    expect(response.permissions).toBe(grant);
+    expect(grant).toEqual(originalGrant);
   });
 
   it("ignores unknown response permissions without falling back to broader scopes", () => {
@@ -146,6 +233,19 @@ describe("legacy permission notice", () => {
     expect(
       sessionHasLegacyPermissions({ authenticated: false, permissions: ["orchestration:operate"] }),
     ).toBe(false);
+  });
+  it("recognizes old grants that also contain CC permissions", () => {
+    expect(
+      sessionHasLegacyPermissions({
+        authenticated: true,
+        permissions: [
+          "orchestration:operate",
+          "command-center:read",
+          "command-center:operate",
+          "command-center:approve",
+        ],
+      }),
+    ).toBe(true);
   });
   it("skips new grants and old grants that lost no implied permissions", () => {
     for (const permissions of [
