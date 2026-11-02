@@ -133,7 +133,7 @@ export type AuthGrantScope = typeof AuthGrantScope.Type;
 export const AuthGrantScopes = Schema.Array(AuthGrantScope);
 export type AuthGrantScopes = typeof AuthGrantScopes.Type;
 
-// Frozen wire vocabulary for clients released before granular permissions.
+// Frozen vocabulary for recognizing grants from before granular permissions.
 // Command Center clients from before granular permissions already knew the
 // command-center:* scopes, so they stay in the frozen vocabulary.
 const legacyScopes = new Set<AuthEnvironmentScope>([
@@ -152,7 +152,13 @@ const legacyScopes = new Set<AuthEnvironmentScope>([
 
 /** Format public auth metadata without changing the server's authorization grant. */
 export function authScopeResponse(scopes: ReadonlyArray<AuthEnvironmentScope>) {
-  return { scopes: scopes.filter((scope) => legacyScopes.has(scope)), permissions: scopes };
+  return {
+    // Stock clients reject CC scopes here; permissions is forward-compatible.
+    scopes: scopes.filter(
+      (scope) => legacyScopes.has(scope) && !scope.startsWith("command-center:"),
+    ),
+    permissions: scopes,
+  };
 }
 
 const authScopeResponseFields = {
