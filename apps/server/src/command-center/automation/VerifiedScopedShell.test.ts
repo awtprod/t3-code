@@ -15,6 +15,7 @@ import * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
 import * as TestClock from "effect/testing/TestClock";
 import { describe } from "vite-plus/test";
+import { OUTREACH } from "./OutreachExecutionProfile.ts";
 
 import {
   type VerifiedScopedShellPolicyEntry,
@@ -25,6 +26,18 @@ import {
   makeVerifiedLinuxScopedShell,
   verifiedScopedShellWritableFilesystemLimitExceeded,
 } from "./VerifiedScopedShell.ts";
+
+const binding = {
+  project: "/srv/example/project",
+  controller: "/srv/example/project/bin/guarded-campaign/guarded_outreach.py",
+  journal: "/srv/example/state/journal",
+  holdParent: "/srv/example/launch-state",
+  environmentId: "00000000-0000-4000-8000-000000000001",
+  spaceId: "example-space",
+  repositoryId: "example-repository",
+  uid: NodeProcess.geteuid?.() ?? 1,
+  gid: NodeProcess.getegid?.() ?? 1,
+} as const;
 
 const basePolicy = (
   overrides: Partial<VerifiedScopedShellPolicyEntry> = {},
@@ -194,6 +207,134 @@ it.layer(NodeServices.layer)("Verified scoped shell admission", (it) => {
         })
         .pipe(Effect.flip);
       NodeAssert.equal(error.code, "unsupported-platform");
+    }),
+  );
+
+  it.effect("pins canonical outreach paths and narrowly admits the owner-bound hold parent", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const temp = yield* fs.makeTempDirectoryScoped({ prefix: "cc-outreach-admit-" });
+      const file = `${temp}/fixture`;
+      yield* fs.writeFileString(file, "fixture");
+      const directoryInfo = yield* fs.stat(temp);
+      const fileInfo = yield* fs.stat(file);
+      const inputPath = `${binding.journal}/approved.json`;
+      const credential = "/srv/example/keys/authorized.json";
+      const profile = {
+        name: OUTREACH.name,
+        binding,
+        automationId: "outreach",
+        nodeId: "send",
+        definitionDigest: `sha256:${"a".repeat(64)}`,
+        snapshotDigest: `sha256:${"b".repeat(64)}`,
+        inputPath,
+        credentialReferencePath: credential,
+      };
+      for (const scenario of [
+        "owner-hold",
+        "foreign-credential",
+        "wrong-identity",
+        "private-file-alias",
+        "missing-inode",
+        "controller-symlink",
+        "journal-symlink",
+      ] as const) {
+        const fakeFs = {
+          ...fs,
+          realPath: (target: string) =>
+            target === "/usr/bin/bwrap"
+              ? fs.realPath(`${temp}/missing-bwrap`)
+              : Effect.succeed(
+                  (scenario === "controller-symlink" && target === binding.controller) ||
+                    (scenario === "journal-symlink" && target === binding.journal)
+                    ? `${temp}/escaped`
+                    : target,
+                ),
+          stat: (target: string) => {
+            const isDirectory = [
+              binding.project,
+              binding.holdParent,
+              binding.journal,
+              "/etc/ssl/certs",
+            ].includes(target);
+            const foreign =
+              target === binding.holdParent ||
+              (scenario === "foreign-credential" && target === credential);
+            return Effect.succeed({
+              ...(isDirectory ? directoryInfo : fileInfo),
+              ino:
+                scenario === "missing-inode" && target === credential
+                  ? Option.none()
+                  : Option.some(
+                      scenario === "private-file-alias" && target === credential
+                        ? 10
+                        : [
+                            binding.project,
+                            binding.controller,
+                            binding.holdParent,
+                            binding.journal,
+                            inputPath,
+                            credential,
+                            "/etc/resolv.conf",
+                            "/etc/hosts",
+                            "/etc/nsswitch.conf",
+                            "/etc/ssl/certs",
+                            OUTREACH.executable,
+                          ].indexOf(target) + 6,
+                    ),
+              gid: Option.some(binding.gid),
+              uid: Option.some(
+                foreign
+                  ? 65534
+                  : target === OUTREACH.executable || target.startsWith("/etc/")
+                    ? 0
+                    : binding.uid,
+              ),
+              mode:
+                target === binding.controller
+                  ? 0o664
+                  : foreign
+                    ? 0o775
+                    : target === inputPath || target === credential || target === binding.journal
+                      ? 0o700
+                      : 0o755,
+            });
+          },
+        };
+        const service = yield* makeVerifiedLinuxScopedShell().pipe(
+          Effect.provideService(FileSystem.FileSystem, fakeFs),
+        );
+        const denied = yield* service
+          .execute({
+            policy: basePolicy({
+              executable: OUTREACH.executable,
+              argv: ["-I", "-S", "-B", binding.controller, "--input", inputPath],
+              cwd: binding.journal,
+              access: "write",
+              retryable: false,
+            }),
+            runtime: {
+              allowedRoots: [{ canonicalPath: binding.journal, access: "write" }],
+              outreachProfile:
+                scenario === "wrong-identity"
+                  ? { ...profile, binding: { ...binding, uid: binding.uid + 1 } }
+                  : profile,
+            },
+          })
+          .pipe(Effect.flip);
+        NodeAssert.equal(
+          denied.code,
+          scenario === "owner-hold"
+            ? "bwrap-unavailable"
+            : scenario === "foreign-credential" ||
+                scenario === "private-file-alias" ||
+                scenario === "missing-inode"
+              ? "unsafe-runtime-location"
+              : scenario === "wrong-identity"
+                ? "invalid-policy"
+                : "path-not-canonical",
+        );
+      }
     }),
   );
 

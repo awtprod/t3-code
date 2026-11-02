@@ -709,6 +709,7 @@ const layerAutomationScheduleInterpreter = AutomationScheduleInterpreter.layer.p
 );
 
 const layerAutomationScopedShell = AutomationScopedShell.AutomationScopedShellLayer.pipe(
+  Layer.provide(ServerEnvironment.layerIdentity),
   Layer.provide(VerifiedScopedShell.VerifiedLinuxScopedShellLayer),
   Layer.provide(layerCommandCenterConfig),
   Layer.provide(RepositoryIdentityResolver.layer),
