@@ -1,3 +1,7 @@
+import * as Crypto from "effect/Crypto";
+import { EnvironmentId } from "@t3tools/contracts";
+import { ServerEnvironmentIdentity } from "../../environment/ServerEnvironment.ts";
+import { OUTREACH } from "./OutreachExecutionProfile.ts";
 import * as NodeProcess from "node:process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -31,6 +35,7 @@ const repositoryARemote = "https://example.invalid/sample/repository-a.git";
 const repositoryBRemote = "https://example.invalid/sample/repository-b.git";
 const repositoryACanonicalRemote = normalizeGitRemoteUrl(repositoryARemote);
 const repositoryBCanonicalRemote = normalizeGitRemoteUrl(repositoryBRemote);
+const decodeEnvironmentId = Schema.decodeUnknownSync(EnvironmentId);
 const decodeSpace = Schema.decodeUnknownSync(Space);
 const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const space = decodeSpace({
@@ -95,12 +100,30 @@ const manifestEntry = (overrides: Readonly<Record<string, unknown>> = {}) => ({
   ...overrides,
 });
 
-function testLayer(calls: VerifiedScopedShellExecuteInput[]) {
+function testLayer(calls: VerifiedScopedShellExecuteInput[], outreach = false) {
   const configLayer = Layer.succeed(
     CommandCenterConfig,
     CommandCenterConfig.of({
       configDirectory: "/private/config",
-      load: Effect.succeed(loadedConfig),
+      load: Effect.succeed(
+        outreach
+          ? {
+              ...loadedConfig,
+              spaces: [
+                {
+                  ...space,
+                  id: OUTREACH.spaceId as typeof space.id,
+                  repositories: [
+                    {
+                      ...space.repositories[0]!,
+                      id: OUTREACH.repositoryId as (typeof space.repositories)[number]["id"],
+                    },
+                  ],
+                },
+              ],
+            }
+          : loadedConfig,
+      ),
       resolveGoogleAccount: () => Effect.die("Google is not used by scoped-shell tests."),
     }),
   );
@@ -162,6 +185,9 @@ function testLayer(calls: VerifiedScopedShellExecuteInput[]) {
   return Layer.mergeAll(
     ServerConfig.layerTest(NodeProcess.cwd(), { prefix: "cc-shell-manifest-" }),
     configLayer,
+    Layer.succeed(ServerEnvironmentIdentity, {
+      getEnvironmentId: Effect.succeed(decodeEnvironmentId(OUTREACH.environmentId)),
+    }),
     verifiedLayer,
     repositoryIdentityLayer,
     SqlitePersistenceMemory,
@@ -780,3 +806,124 @@ it.effect("rejects permissive, symlinked, duplicate, and unsafe-retry manifests"
     expect(calls).toEqual([]);
   }).pipe(Effect.provide(testLayer(calls)));
 });
+
+it.effect(
+  "reloads protected outreach authority on fresh fires/restart and rejects revocation/cross-job",
+  () => {
+    const calls: VerifiedScopedShellExecuteInput[] = [];
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const digest = `sha256:${"a".repeat(64)}`;
+      const json = JSON.stringify({
+        id: "automation-a",
+        name: "Outreach",
+        version: 1,
+        enabled: true,
+        trigger: { type: "schedule", expression: "0 10 * * 1-5", timezone: "America/New_York" },
+        definitionDigest: digest,
+        configCommit: "1".repeat(40),
+        createdAt: now,
+        updatedAt: now,
+        edges: [],
+        spaceId: OUTREACH.spaceId,
+        nodes: [
+          {
+            id: "send",
+            kind: "shell.scoped",
+            config: { allowlistId: "outreach" },
+            position: { x: 0, y: 0 },
+          },
+        ],
+      });
+      const crypto = yield* Crypto.Crypto;
+      const hash = yield* crypto.digest("SHA-256", new TextEncoder().encode(json));
+      const snapshotDigest = `sha256:${Array.from(hash, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+      const profile = {
+        name: OUTREACH.name,
+        automationId: "automation-a",
+        nodeId: "send",
+        definitionDigest: digest,
+        snapshotDigest,
+        environmentId: OUTREACH.environmentId,
+        uid: OUTREACH.uid,
+        gid: OUTREACH.gid,
+        inputPath: `${OUTREACH.journal}/approved.json`,
+        credentialReferencePath: "/var/lib/example/existing-key.json",
+      };
+      const entry = manifestEntry({
+        allowlistId: "outreach",
+        spaceId: OUTREACH.spaceId,
+        repositoryId: OUTREACH.repositoryId,
+        executable: OUTREACH.executable,
+        argv: ["-I", "-S", "-B", OUTREACH.controller, "--input", profile.inputPath],
+        access: "write",
+        cwd: OUTREACH.journal,
+        retryable: false,
+        allowedRoots: [{ canonicalPath: OUTREACH.journal, access: "write" }],
+        executionProfile: profile,
+      });
+      const initialShell = yield* makeAutomationScopedShell;
+      for (const override of [
+        { name: "foreign" },
+        { environmentId: "foreign" },
+        { uid: 0 },
+        { gid: 0 },
+        { arbitrary: true },
+      ]) {
+        yield* writeManifest({
+          schemaVersion: 1,
+          entries: [{ ...entry, executionProfile: { ...profile, ...override } }],
+        });
+        const denied = yield* initialShell
+          .execute({
+            executionId: "uncreated",
+            nodeId: "send",
+            spaceId: OUTREACH.spaceId,
+            allowlistId: "outreach",
+          })
+          .pipe(Effect.flip);
+        expect(denied.code).toBe("manifest-invalid");
+      }
+      yield* writeManifest({ schemaVersion: 1, entries: [entry] });
+      for (const executionId of ["fire-1", "fire-2"]) {
+        yield* seedCheckpoint({ executionId, nodeId: "send" });
+        yield* sql`INSERT OR IGNORE INTO command_center_spaces (id, slug, name, kind, created_at, updated_at) VALUES (${OUTREACH.spaceId}, ${OUTREACH.spaceId}, 'ViewHook', 'business', ${now}, ${now})`;
+        yield* sql`UPDATE command_center_automation_executions SET space_id = ${OUTREACH.spaceId}, definition_json = ${json}, definition_digest = ${digest} WHERE id = ${executionId}`;
+        // Recreate the service each fire: authority is reloaded from owner manifest and durable DB, never a prior turn grant.
+        const shell = yield* makeAutomationScopedShell;
+        yield* shell.execute({
+          executionId,
+          nodeId: "send",
+          spaceId: OUTREACH.spaceId,
+          allowlistId: "outreach",
+        });
+      }
+      expect(calls).toHaveLength(2);
+      expect(calls.every((call) => call.runtime.outreachProfile?.name === OUTREACH.name)).toBe(
+        true,
+      );
+      yield* sql`UPDATE command_center_automation_executions SET automation_id = 'foreign' WHERE id = 'fire-2'`;
+      const shell = yield* makeAutomationScopedShell;
+      const denied = yield* Effect.flip(
+        shell.execute({
+          executionId: "fire-2",
+          nodeId: "send",
+          spaceId: OUTREACH.spaceId,
+          allowlistId: "outreach",
+        }),
+      );
+      expect(denied.code).toBe("scope-denied");
+      yield* writeManifest({ schemaVersion: 1, entries: [] });
+      const revoked = yield* Effect.flip(
+        shell.execute({
+          executionId: "fire-1",
+          nodeId: "send",
+          spaceId: OUTREACH.spaceId,
+          allowlistId: "outreach",
+        }),
+      );
+      expect(revoked.code).toBe("allowlist-missing");
+      expect(calls).toHaveLength(2);
+    }).pipe(Effect.provide(testLayer(calls, true)));
+  },
+);

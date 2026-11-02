@@ -3,6 +3,11 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import type * as NodeFSP from "node:fs/promises";
 import * as NodeProcess from "node:process";
+import {
+  OUTREACH,
+  outreachProfileIssue,
+  type OutreachExecutionProfile,
+} from "./OutreachExecutionProfile.ts";
 
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
@@ -89,6 +94,7 @@ export interface VerifiedScopedShellGitMetadata {
 export interface VerifiedScopedShellRuntimePolicy {
   readonly allowedRoots: ReadonlyArray<VerifiedScopedShellAllowedRoot>;
   readonly gitMetadata?: VerifiedScopedShellGitMetadata;
+  readonly outreachProfile?: OutreachExecutionProfile;
 }
 
 export interface VerifiedScopedShellExecuteInput {
@@ -147,6 +153,7 @@ interface FileIdentity {
   readonly ino: number | undefined;
   readonly mode: number;
   readonly uid: number | undefined;
+  readonly gid: number | undefined;
 }
 
 interface OpenedStablePath {
@@ -181,6 +188,11 @@ interface AdmittedScopedShellExecution {
       }
     | undefined;
   readonly maxProcesses: number;
+  readonly outreachProfile?: OutreachExecutionProfile;
+  readonly outreachMounts?: ReadonlyArray<{
+    readonly destination: string;
+    readonly identity: FileIdentity;
+  }>;
 }
 
 interface LinuxAccountTaskCount {
@@ -281,7 +293,8 @@ function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
     left.dev === right.dev &&
     left.ino === right.ino &&
     left.mode === right.mode &&
-    left.uid === right.uid
+    left.uid === right.uid &&
+    left.gid === right.gid
   );
 }
 
@@ -293,6 +306,7 @@ function identity(path: string, info: FileSystem.File.Info): FileIdentity {
     ino: Option.getOrUndefined(info.ino),
     mode: info.mode,
     uid: Option.getOrUndefined(info.uid),
+    gid: Option.getOrUndefined(info.gid),
   };
 }
 
@@ -310,6 +324,7 @@ function nodeIdentity(path: string, info: NodeFS.Stats): FileIdentity {
     ino: info.ino,
     mode: info.mode,
     uid: info.uid,
+    gid: info.gid,
   };
 }
 
@@ -396,6 +411,7 @@ export function buildVerifiedScopedShellBwrapArguments(input: {
   readonly argv: ReadonlyArray<string>;
   readonly cwdFd: number;
   readonly access: VerifiedScopedShellAccess;
+  readonly outreachMounts?: ReadonlyArray<{ readonly destination: string; readonly fd: number }>;
   readonly gitMetadata?: {
     readonly dotGitFd: number;
     readonly commonGitDirFd: number;
@@ -404,6 +420,7 @@ export function buildVerifiedScopedShellBwrapArguments(input: {
 }): ReadonlyArray<string> {
   return [
     "--unshare-all",
+    ...(input.outreachMounts === undefined ? [] : ["--share-net"]),
     "--unshare-user",
     "--disable-userns",
     // Node already launches the resource controller as a detached session
@@ -417,6 +434,9 @@ export function buildVerifiedScopedShellBwrapArguments(input: {
     "command-center",
     "--clearenv",
     ...Object.entries(CLEAN_ENVIRONMENT).flatMap(([name, value]) => ["--setenv", name, value]),
+    ...(input.outreachMounts === undefined
+      ? []
+      : ["--setenv", "NODE_OPTIONS", "--max-old-space-size=128"]),
     "--proc",
     "/proc",
     "--dev",
@@ -447,9 +467,18 @@ export function buildVerifiedScopedShellBwrapArguments(input: {
     "/command",
     "--dir",
     "/workspace",
-    input.access === "write" ? "--bind-fd" : "--ro-bind-fd",
-    String(input.cwdFd),
-    "/workspace",
+    ...(input.outreachMounts === undefined
+      ? [input.access === "write" ? "--bind-fd" : "--ro-bind-fd", String(input.cwdFd), "/workspace"]
+      : [
+          "--bind-fd",
+          String(input.cwdFd),
+          OUTREACH.journal,
+          ...input.outreachMounts.flatMap((mount) => [
+            "--ro-bind-fd",
+            String(mount.fd),
+            mount.destination,
+          ]),
+        ]),
     ...(input.gitMetadata === undefined
       ? []
       : [
@@ -469,7 +498,7 @@ export function buildVerifiedScopedShellBwrapArguments(input: {
           "/workspace/.git",
         ]),
     "--chdir",
-    "/workspace",
+    input.outreachMounts === undefined ? "/workspace" : OUTREACH.journal,
     "--remount-ro",
     "/",
     "--",
@@ -483,6 +512,7 @@ export function buildVerifiedScopedShellPrlimitArguments(input: {
   readonly bwrapArguments: ReadonlyArray<string>;
   readonly timeoutMs: number;
   readonly maxProcesses: number;
+  readonly outreachProfile?: typeof OUTREACH.name;
 }): ReadonlyArray<string> {
   const maxCpuSeconds = Math.max(
     1,
@@ -495,7 +525,7 @@ export function buildVerifiedScopedShellPrlimitArguments(input: {
   return [
     `--nproc=${exact(input.maxProcesses)}`,
     `--cpu=${exact(maxCpuSeconds)}`,
-    `--as=${exact(VERIFIED_SCOPED_SHELL_RESOURCE_LIMITS.maxAddressSpaceBytes)}`,
+    `--as=${exact(input.outreachProfile === OUTREACH.name ? OUTREACH.maxAddressSpaceBytes : VERIFIED_SCOPED_SHELL_RESOURCE_LIMITS.maxAddressSpaceBytes)}`,
     `--fsize=${exact(VERIFIED_SCOPED_SHELL_RESOURCE_LIMITS.maxFileSizeBytes)}`,
     `--nofile=${exact(VERIFIED_SCOPED_SHELL_RESOURCE_LIMITS.maxOpenFiles)}`,
     `--core=${exact(VERIFIED_SCOPED_SHELL_RESOURCE_LIMITS.maxCoreFileBytes)}`,
@@ -817,6 +847,106 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
         );
       }
 
+      const outreachProfile = input.runtime.outreachProfile;
+      if (
+        outreachProfile !== undefined &&
+        (outreachProfile.name !== OUTREACH.name ||
+          NodeProcess.geteuid?.() !== OUTREACH.uid ||
+          NodeProcess.getegid?.() !== OUTREACH.gid ||
+          outreachProfileIssue(outreachProfile, {
+            ...input.policy,
+            spaceId: OUTREACH.spaceId,
+            repositoryId: OUTREACH.repositoryId,
+            allowedRoots: input.runtime.allowedRoots,
+          }) !== undefined ||
+          input.runtime.gitMetadata !== undefined)
+      ) {
+        return yield* failure(
+          allowlistId,
+          "invalid-policy",
+          "Outreach requires its exact fixed command, identity and journal-only policy.",
+        );
+      }
+      const outreachMounts =
+        outreachProfile === undefined
+          ? undefined
+          : yield* Effect.forEach(
+              [
+                OUTREACH.project,
+                OUTREACH.controller,
+                OUTREACH.holdParent,
+                outreachProfile.inputPath,
+                outreachProfile.credentialReferencePath,
+                "/etc/resolv.conf",
+                "/etc/hosts",
+                "/etc/nsswitch.conf",
+                "/etc/ssl/certs",
+              ],
+              (destination) =>
+                Effect.gen(function* () {
+                  // Resolver aliases alone may resolve to their pinned canonical target; no parent /etc or /run mount.
+                  const target = destination.startsWith("/etc/")
+                    ? yield* fileSystem
+                        .realPath(destination)
+                        .pipe(
+                          Effect.mapError((cause) =>
+                            failure(
+                              allowlistId,
+                              "path-not-canonical",
+                              "Outreach resolver or trust metadata is unavailable.",
+                              cause,
+                            ),
+                          ),
+                        )
+                    : destination;
+                  const identity = yield* canonicalIdentity(allowlistId, target, "root");
+                  const directory =
+                    destination === OUTREACH.project ||
+                    destination === OUTREACH.holdParent ||
+                    destination === "/etc/ssl/certs";
+                  if (
+                    identity.type !== (directory ? "Directory" : "File") ||
+                    (destination !== OUTREACH.holdParent &&
+                      destination !== OUTREACH.controller &&
+                      (identity.mode & 0o022) !== 0) ||
+                    (!destination.startsWith("/etc/") &&
+                      destination !== OUTREACH.holdParent &&
+                      identity.uid !== OUTREACH.uid &&
+                      identity.uid !== 1000 &&
+                      identity.uid !== 0)
+                  ) {
+                    return yield* failure(
+                      allowlistId,
+                      "unsafe-runtime-location",
+                      "Outreach read-only support path is not trusted.",
+                    );
+                  }
+                  if (
+                    destination === OUTREACH.controller &&
+                    (identity.uid !== OUTREACH.uid ||
+                      identity.gid !== OUTREACH.gid ||
+                      (identity.mode & 0o002) !== 0)
+                  ) {
+                    return yield* failure(
+                      allowlistId,
+                      "unsafe-runtime-location",
+                      "The fixed canonical outreach controller is not executor/group-bound.",
+                    );
+                  }
+                  if (
+                    destination === outreachProfile?.inputPath &&
+                    (identity.uid !== OUTREACH.uid || (identity.mode & 0o077) !== 0)
+                  ) {
+                    return yield* failure(
+                      allowlistId,
+                      "unsafe-runtime-location",
+                      "Outreach input must remain private to the executor.",
+                    );
+                  }
+                  return { destination, identity };
+                }),
+              { concurrency: 1 },
+            );
       const executable = yield* canonicalIdentity(
         allowlistId,
         input.policy.executable,
@@ -843,6 +973,13 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
           allowlistId,
           "invalid-policy",
           "Scoped shell cwd must be a directory.",
+        );
+      }
+      if (outreachProfile !== undefined && (cwd.uid !== OUTREACH.uid || (cwd.mode & 0o077) !== 0)) {
+        return yield* failure(
+          allowlistId,
+          "unsafe-runtime-location",
+          "Outreach journal must remain private to the executor.",
         );
       }
       const rootIdentities = yield* Effect.forEach(
@@ -890,7 +1027,11 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
                 "git-common-dir",
               ),
             };
-      if (input.policy.access === "write" && gitMetadata === undefined) {
+      if (
+        input.policy.access === "write" &&
+        gitMetadata === undefined &&
+        outreachProfile === undefined
+      ) {
         return yield* failure(
           allowlistId,
           "invalid-policy",
@@ -1012,6 +1153,9 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
         rootIdentities,
         gitMetadata,
         maxProcesses,
+        ...(outreachProfile === undefined
+          ? {}
+          : { outreachProfile, outreachMounts: outreachMounts ?? [] }),
       } satisfies AdmittedScopedShellExecution;
     });
 
@@ -1024,6 +1168,9 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
           canonicalIdentity(admitted.policy.allowlistId, admitted.cwd.path, "cwd"),
           canonicalIdentity(admitted.policy.allowlistId, admitted.bwrap.path, "bwrap"),
           canonicalIdentity(admitted.policy.allowlistId, admitted.prlimit.path, "prlimit"),
+          ...(admitted.outreachMounts ?? []).map((mount) =>
+            canonicalIdentity(admitted.policy.allowlistId, mount.identity.path, "root"),
+          ),
           ...admitted.roots.map((root) =>
             canonicalIdentity(admitted.policy.allowlistId, root.canonicalPath, "root"),
           ),
@@ -1049,6 +1196,7 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
         admitted.cwd,
         admitted.bwrap,
         admitted.prlimit,
+        ...(admitted.outreachMounts ?? []).map((mount) => mount.identity),
         ...admitted.rootIdentities,
         ...(admitted.gitMetadata === undefined
           ? []
@@ -1424,6 +1572,17 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
             (root) => openStablePath(admitted, root, "root"),
             { concurrency: 1 },
           );
+          const openedOutreachMounts = yield* Effect.forEach(
+            admitted.outreachMounts ?? [],
+            (mount) =>
+              Effect.gen(function* () {
+                return {
+                  destination: mount.destination,
+                  opened: yield* openStablePath(admitted, mount.identity, "root"),
+                };
+              }),
+            { concurrency: 1 },
+          );
           const gitMetadata =
             admitted.gitMetadata === undefined
               ? undefined
@@ -1500,6 +1659,14 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
             argv: admitted.policy.argv,
             cwdFd: childCwdFd,
             access: admitted.policy.access,
+            ...(admitted.outreachProfile === undefined
+              ? {}
+              : {
+                  outreachMounts: openedOutreachMounts.map((mount, index) => ({
+                    destination: mount.destination,
+                    fd: 7 + index,
+                  })),
+                }),
             ...(gitMetadata === undefined
               ? {}
               : {
@@ -1515,6 +1682,7 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
             bwrapArguments,
             timeoutMs: admitted.policy.timeoutMs,
             maxProcesses: admitted.maxProcesses,
+            ...(admitted.outreachProfile === undefined ? {} : { outreachProfile: OUTREACH.name }),
           });
           const spawned = yield* spawnBubblewrap(
             admitted,
@@ -1524,7 +1692,7 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
             bwrap.handle.fd,
             prlimit.handle.fd,
             gitMetadata === undefined
-              ? []
+              ? openedOutreachMounts.map((mount) => mount.opened.handle.fd)
               : [gitMetadata.dotGit.handle.fd, gitMetadata.commonGitDir.handle.fd],
           );
           const filesystemFailure = yield* Ref.make<VerifiedScopedShellError | undefined>(

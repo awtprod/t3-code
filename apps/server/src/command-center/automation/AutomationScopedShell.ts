@@ -15,6 +15,14 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../../config.ts";
+import { ServerEnvironmentIdentity } from "../../environment/ServerEnvironment.ts";
+import {
+  OUTREACH,
+  OutreachExecutionProfile,
+  OUTREACH_PROFILE_KEYS,
+  outreachProfileIssue,
+  outreachCheckpointMatches,
+} from "./OutreachExecutionProfile.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { resolveCommandCenterManagedGitMetadata } from "../../provider/security/CommandCenterProviderIsolation.ts";
 import { unsafeHostGitConfigKey } from "../../vcs/HostGitSecurity.ts";
@@ -53,6 +61,7 @@ const ManifestEntry = Schema.Struct({
   retryable: Schema.Boolean,
   idempotent: Schema.Boolean,
   allowedRoots: Schema.Array(AllowedRoot),
+  executionProfile: Schema.optional(OutreachExecutionProfile),
 });
 const Manifest = Schema.Struct({
   schemaVersion: Schema.Literal(AUTOMATION_SCOPED_SHELL_MANIFEST_VERSION),
@@ -191,6 +200,7 @@ const ENTRY_KEYS = new Set([
   "retryable",
   "idempotent",
   "allowedRoots",
+  "executionProfile",
 ]);
 const ROOT_KEYS = new Set(["canonicalPath", "access"]);
 
@@ -206,6 +216,11 @@ function exactShapeIssue(value: unknown): string | undefined {
     if (entryKey !== undefined) {
       return `Manifest entry ${entryIndex} contains unsupported field '${entryKey}'.`;
     }
+    if (
+      isObject(candidate.executionProfile) &&
+      unsupportedKey(candidate.executionProfile, OUTREACH_PROFILE_KEYS) !== undefined
+    )
+      return "Unsupported outreach profile field.";
     if (!Array.isArray(candidate.allowedRoots)) continue;
     for (const [rootIndex, root] of candidate.allowedRoots.entries()) {
       if (!isObject(root)) continue;
@@ -242,6 +257,10 @@ function validateManifest(manifest: Manifest): string | undefined {
     seen.add(entry.allowlistId);
     if (entry.allowedRoots.length < 1 || entry.allowedRoots.length > 32) {
       return `Manifest entry '${entry.allowlistId}' must contain between 1 and 32 roots.`;
+    }
+    if (entry.executionProfile !== undefined) {
+      const issue = outreachProfileIssue(entry.executionProfile, entry);
+      if (issue !== undefined) return issue;
     }
     if (!entry.idempotent) {
       return `Manifest entry '${entry.allowlistId}' must be idempotent in v1.`;
@@ -819,7 +838,67 @@ export const makeAutomationScopedShell = Effect.gen(function* () {
         );
       }
 
-      const repositoryScope = yield* resolveRepositoryScope(entry, boundSpace);
+      const profile = entry.executionProfile;
+      if (profile !== undefined) {
+        const identity = yield* Effect.serviceOption(ServerEnvironmentIdentity);
+        if (
+          Option.isNone(identity) ||
+          String(yield* identity.value.getEnvironmentId) !== profile.environmentId ||
+          NodeProcess.geteuid?.() !== profile.uid ||
+          NodeProcess.getegid?.() !== profile.gid ||
+          input.nodeId !== profile.nodeId ||
+          !boundSpace.repositories.some(
+            (repository) => String(repository.id) === entry.repositoryId,
+          )
+        ) {
+          return yield* error(
+            "scope-denied",
+            "Outreach executor identity or protected repository binding does not match.",
+          );
+        }
+        const rows = yield* sql<{
+          readonly automationId: string;
+          readonly definitionDigest: string;
+          readonly definitionJson: string;
+        }>`
+          SELECT execution.automation_id AS "automationId", execution.definition_digest AS "definitionDigest",
+                 execution.definition_json AS "definitionJson"
+          FROM command_center_automation_executions execution
+          JOIN command_center_automation_node_checkpoints checkpoint ON checkpoint.execution_id = execution.id
+          WHERE execution.id = ${input.executionId} AND execution.space_id = ${input.spaceId} AND execution.state = 'running'
+            AND checkpoint.node_id = ${input.nodeId} AND checkpoint.node_kind = 'shell.scoped' AND checkpoint.state = 'running'
+          LIMIT 1
+        `.pipe(
+          Effect.mapError((cause) =>
+            error("scope-denied", "Outreach durable authority could not be verified.", { cause }),
+          ),
+        );
+        if (
+          rows[0] === undefined ||
+          !outreachCheckpointMatches(
+            profile,
+            {
+              ...rows[0],
+              snapshotDigest: `sha256:${NodeCrypto.createHash("sha256").update(rows[0].definitionJson).digest("hex")}`,
+            },
+            input.allowlistId,
+            input.spaceId,
+          )
+        ) {
+          return yield* error(
+            "scope-denied",
+            "Outreach definition or durable job binding is not owner-authorized.",
+          );
+        }
+      }
+      const repositoryScope =
+        profile === undefined
+          ? yield* resolveRepositoryScope(entry, boundSpace)
+          : {
+              canonicalCwd: OUTREACH.journal,
+              canonicalAllowedRoots: [OUTREACH.journal],
+              gitMetadata: undefined,
+            };
       const policyDigest = canonicalManifestEntryDigest(entry);
       // This compare-and-set commits the exact effective manifest entry before
       // any process starts. A crash may re-enter only the same idempotent policy;
@@ -842,6 +921,7 @@ export const makeAutomationScopedShell = Effect.gen(function* () {
             idempotencyKey,
           },
           runtime: {
+            ...(profile === undefined ? {} : { outreachProfile: profile }),
             allowedRoots: entry.allowedRoots.map((root, index) => ({
               ...root,
               canonicalPath: repositoryScope.canonicalAllowedRoots[index]!,

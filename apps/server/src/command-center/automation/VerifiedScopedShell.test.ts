@@ -15,6 +15,7 @@ import * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
 import * as TestClock from "effect/testing/TestClock";
 import { describe } from "vite-plus/test";
+import { OUTREACH } from "./OutreachExecutionProfile.ts";
 
 import {
   type VerifiedScopedShellPolicyEntry,
@@ -194,6 +195,106 @@ it.layer(NodeServices.layer)("Verified scoped shell admission", (it) => {
         })
         .pipe(Effect.flip);
       NodeAssert.equal(error.code, "unsupported-platform");
+    }),
+  );
+
+  it.effect("pins canonical outreach paths and narrowly admits the observed live hold parent", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const temp = yield* fs.makeTempDirectoryScoped({ prefix: "cc-outreach-admit-" });
+      const file = `${temp}/fixture`;
+      yield* fs.writeFileString(file, "fixture");
+      const directoryInfo = yield* fs.stat(temp);
+      const fileInfo = yield* fs.stat(file);
+      const inputPath = `${OUTREACH.journal}/approved.json`;
+      const credential = "/var/lib/example/existing-key.json";
+      const profile = {
+        name: OUTREACH.name,
+        automationId: "outreach",
+        nodeId: "send",
+        definitionDigest: `sha256:${"a".repeat(64)}`,
+        snapshotDigest: `sha256:${"b".repeat(64)}`,
+        environmentId: OUTREACH.environmentId,
+        uid: OUTREACH.uid,
+        gid: OUTREACH.gid,
+        inputPath,
+        credentialReferencePath: credential,
+      };
+      for (const scenario of [
+        "observed-hold",
+        "foreign-credential",
+        "controller-symlink",
+        "journal-symlink",
+      ] as const) {
+        const fakeFs = {
+          ...fs,
+          realPath: (target: string) =>
+            target === "/usr/bin/bwrap"
+              ? fs.realPath(`${temp}/missing-bwrap`)
+              : Effect.succeed(
+                  (scenario === "controller-symlink" && target === OUTREACH.controller) ||
+                    (scenario === "journal-symlink" && target === OUTREACH.journal)
+                    ? `${temp}/escaped`
+                    : target,
+                ),
+          stat: (target: string) => {
+            const isDirectory = [
+              OUTREACH.project,
+              OUTREACH.holdParent,
+              OUTREACH.journal,
+              "/etc/ssl/certs",
+            ].includes(target);
+            const foreign =
+              target === OUTREACH.holdParent ||
+              (scenario === "foreign-credential" && target === credential);
+            return Effect.succeed({
+              ...(isDirectory ? directoryInfo : fileInfo),
+              gid: Option.some(OUTREACH.gid),
+              uid: Option.some(
+                foreign
+                  ? 65534
+                  : target === OUTREACH.executable || target.startsWith("/etc/")
+                    ? 0
+                    : OUTREACH.uid,
+              ),
+              mode:
+                target === OUTREACH.controller
+                  ? 0o664
+                  : foreign
+                    ? 0o775
+                    : target === inputPath || target === credential || target === OUTREACH.journal
+                      ? 0o700
+                      : 0o755,
+            });
+          },
+        };
+        const service = yield* makeVerifiedLinuxScopedShell().pipe(
+          Effect.provideService(FileSystem.FileSystem, fakeFs),
+        );
+        const denied = yield* service
+          .execute({
+            policy: basePolicy({
+              executable: OUTREACH.executable,
+              argv: ["-I", "-S", "-B", OUTREACH.controller, "--input", inputPath],
+              cwd: OUTREACH.journal,
+              access: "write",
+              retryable: false,
+            }),
+            runtime: {
+              allowedRoots: [{ canonicalPath: OUTREACH.journal, access: "write" }],
+              outreachProfile: profile,
+            },
+          })
+          .pipe(Effect.flip);
+        NodeAssert.equal(
+          denied.code,
+          scenario === "observed-hold"
+            ? "bwrap-unavailable"
+            : scenario === "foreign-credential"
+              ? "unsafe-runtime-location"
+              : "path-not-canonical",
+        );
+      }
     }),
   );
 
