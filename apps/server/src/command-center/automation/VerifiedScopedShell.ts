@@ -411,7 +411,10 @@ export function buildVerifiedScopedShellBwrapArguments(input: {
   readonly argv: ReadonlyArray<string>;
   readonly cwdFd: number;
   readonly access: VerifiedScopedShellAccess;
-  readonly outreachMounts?: ReadonlyArray<{ readonly destination: string; readonly fd: number }>;
+  readonly outreach?: {
+    readonly journal: string;
+    readonly mounts: ReadonlyArray<{ readonly destination: string; readonly fd: number }>;
+  };
   readonly gitMetadata?: {
     readonly dotGitFd: number;
     readonly commonGitDirFd: number;
@@ -420,7 +423,7 @@ export function buildVerifiedScopedShellBwrapArguments(input: {
 }): ReadonlyArray<string> {
   return [
     "--unshare-all",
-    ...(input.outreachMounts === undefined ? [] : ["--share-net"]),
+    ...(input.outreach === undefined ? [] : ["--share-net"]),
     "--unshare-user",
     "--disable-userns",
     // Node already launches the resource controller as a detached session
@@ -434,7 +437,7 @@ export function buildVerifiedScopedShellBwrapArguments(input: {
     "command-center",
     "--clearenv",
     ...Object.entries(CLEAN_ENVIRONMENT).flatMap(([name, value]) => ["--setenv", name, value]),
-    ...(input.outreachMounts === undefined
+    ...(input.outreach === undefined
       ? []
       : ["--setenv", "NODE_OPTIONS", "--max-old-space-size=128"]),
     "--proc",
@@ -467,13 +470,13 @@ export function buildVerifiedScopedShellBwrapArguments(input: {
     "/command",
     "--dir",
     "/workspace",
-    ...(input.outreachMounts === undefined
+    ...(input.outreach === undefined
       ? [input.access === "write" ? "--bind-fd" : "--ro-bind-fd", String(input.cwdFd), "/workspace"]
       : [
           "--bind-fd",
           String(input.cwdFd),
-          OUTREACH.journal,
-          ...input.outreachMounts.flatMap((mount) => [
+          input.outreach.journal,
+          ...input.outreach.mounts.flatMap((mount) => [
             "--ro-bind-fd",
             String(mount.fd),
             mount.destination,
@@ -498,7 +501,7 @@ export function buildVerifiedScopedShellBwrapArguments(input: {
           "/workspace/.git",
         ]),
     "--chdir",
-    input.outreachMounts === undefined ? "/workspace" : OUTREACH.journal,
+    input.outreach === undefined ? "/workspace" : input.outreach.journal,
     "--remount-ro",
     "/",
     "--",
@@ -850,15 +853,14 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
       const outreachProfile = input.runtime.outreachProfile;
       if (
         outreachProfile !== undefined &&
-        (outreachProfile.name !== OUTREACH.name ||
-          NodeProcess.geteuid?.() !== OUTREACH.uid ||
-          NodeProcess.getegid?.() !== OUTREACH.gid ||
-          outreachProfileIssue(outreachProfile, {
-            ...input.policy,
-            spaceId: OUTREACH.spaceId,
-            repositoryId: OUTREACH.repositoryId,
-            allowedRoots: input.runtime.allowedRoots,
-          }) !== undefined ||
+        (outreachProfileIssue(outreachProfile, {
+          ...input.policy,
+          spaceId: outreachProfile.binding?.spaceId,
+          repositoryId: outreachProfile.binding?.repositoryId,
+          allowedRoots: input.runtime.allowedRoots,
+        }) !== undefined ||
+          NodeProcess.geteuid?.() !== outreachProfile.binding.uid ||
+          NodeProcess.getegid?.() !== outreachProfile.binding.gid ||
           input.runtime.gitMetadata !== undefined)
       ) {
         return yield* failure(
@@ -872,9 +874,9 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
           ? undefined
           : yield* Effect.forEach(
               [
-                OUTREACH.project,
-                OUTREACH.controller,
-                OUTREACH.holdParent,
+                outreachProfile.binding.project,
+                outreachProfile.binding.controller,
+                outreachProfile.binding.holdParent,
                 outreachProfile.inputPath,
                 outreachProfile.credentialReferencePath,
                 "/etc/resolv.conf",
@@ -901,17 +903,17 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
                     : destination;
                   const identity = yield* canonicalIdentity(allowlistId, target, "root");
                   const directory =
-                    destination === OUTREACH.project ||
-                    destination === OUTREACH.holdParent ||
+                    destination === outreachProfile.binding.project ||
+                    destination === outreachProfile.binding.holdParent ||
                     destination === "/etc/ssl/certs";
                   if (
                     identity.type !== (directory ? "Directory" : "File") ||
-                    (destination !== OUTREACH.holdParent &&
-                      destination !== OUTREACH.controller &&
+                    (destination !== outreachProfile.binding.holdParent &&
+                      destination !== outreachProfile.binding.controller &&
                       (identity.mode & 0o022) !== 0) ||
                     (!destination.startsWith("/etc/") &&
-                      destination !== OUTREACH.holdParent &&
-                      identity.uid !== OUTREACH.uid &&
+                      destination !== outreachProfile.binding.holdParent &&
+                      identity.uid !== outreachProfile.binding.uid &&
                       identity.uid !== 1000 &&
                       identity.uid !== 0)
                   ) {
@@ -922,9 +924,9 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
                     );
                   }
                   if (
-                    destination === OUTREACH.controller &&
-                    (identity.uid !== OUTREACH.uid ||
-                      identity.gid !== OUTREACH.gid ||
+                    destination === outreachProfile.binding.controller &&
+                    (identity.uid !== outreachProfile.binding.uid ||
+                      identity.gid !== outreachProfile.binding.gid ||
                       (identity.mode & 0o002) !== 0)
                   ) {
                     return yield* failure(
@@ -935,7 +937,7 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
                   }
                   if (
                     destination === outreachProfile?.inputPath &&
-                    (identity.uid !== OUTREACH.uid || (identity.mode & 0o077) !== 0)
+                    (identity.uid !== outreachProfile.binding.uid || (identity.mode & 0o077) !== 0)
                   ) {
                     return yield* failure(
                       allowlistId,
@@ -975,12 +977,38 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
           "Scoped shell cwd must be a directory.",
         );
       }
-      if (outreachProfile !== undefined && (cwd.uid !== OUTREACH.uid || (cwd.mode & 0o077) !== 0)) {
+      if (
+        outreachProfile !== undefined &&
+        (cwd.uid !== outreachProfile.binding.uid || (cwd.mode & 0o077) !== 0)
+      ) {
         return yield* failure(
           allowlistId,
           "unsafe-runtime-location",
           "Outreach journal must remain private to the executor.",
         );
+      }
+      if (outreachProfile !== undefined) {
+        const privateRoles = [
+          cwd,
+          ...(outreachMounts ?? [])
+            .filter((mount) => !mount.destination.startsWith("/etc/"))
+            .map((mount) => mount.identity),
+        ];
+        if (
+          privateRoles.some(
+            (current, index) =>
+              current.ino === undefined ||
+              privateRoles
+                .slice(0, index)
+                .some((previous) => previous.dev === current.dev && previous.ino === current.ino),
+          )
+        ) {
+          return yield* failure(
+            allowlistId,
+            "unsafe-runtime-location",
+            "Protected execution roles must not alias the same filesystem object.",
+          );
+        }
       }
       const rootIdentities = yield* Effect.forEach(
         input.runtime.allowedRoots,
@@ -1662,10 +1690,13 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
             ...(admitted.outreachProfile === undefined
               ? {}
               : {
-                  outreachMounts: openedOutreachMounts.map((mount, index) => ({
-                    destination: mount.destination,
-                    fd: 7 + index,
-                  })),
+                  outreach: {
+                    journal: admitted.outreachProfile.binding.journal,
+                    mounts: openedOutreachMounts.map((mount, index) => ({
+                      destination: mount.destination,
+                      fd: 7 + index,
+                    })),
+                  },
                 }),
             ...(gitMetadata === undefined
               ? {}

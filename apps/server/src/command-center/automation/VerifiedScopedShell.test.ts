@@ -27,6 +27,18 @@ import {
   verifiedScopedShellWritableFilesystemLimitExceeded,
 } from "./VerifiedScopedShell.ts";
 
+const binding = {
+  project: "/srv/example/project",
+  controller: "/srv/example/project/bin/guarded-campaign/guarded_outreach.py",
+  journal: "/srv/example/state/journal",
+  holdParent: "/srv/example/launch-state",
+  environmentId: "00000000-0000-4000-8000-000000000001",
+  spaceId: "example-space",
+  repositoryId: "example-repository",
+  uid: NodeProcess.geteuid?.() ?? 1,
+  gid: NodeProcess.getegid?.() ?? 1,
+} as const;
+
 const basePolicy = (
   overrides: Partial<VerifiedScopedShellPolicyEntry> = {},
 ): VerifiedScopedShellPolicyEntry => ({
@@ -198,7 +210,7 @@ it.layer(NodeServices.layer)("Verified scoped shell admission", (it) => {
     }),
   );
 
-  it.effect("pins canonical outreach paths and narrowly admits the observed live hold parent", () =>
+  it.effect("pins canonical outreach paths and narrowly admits the owner-bound hold parent", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const temp = yield* fs.makeTempDirectoryScoped({ prefix: "cc-outreach-admit-" });
@@ -206,23 +218,24 @@ it.layer(NodeServices.layer)("Verified scoped shell admission", (it) => {
       yield* fs.writeFileString(file, "fixture");
       const directoryInfo = yield* fs.stat(temp);
       const fileInfo = yield* fs.stat(file);
-      const inputPath = `${OUTREACH.journal}/approved.json`;
-      const credential = "/var/lib/example/existing-key.json";
+      const inputPath = `${binding.journal}/approved.json`;
+      const credential = "/srv/example/keys/authorized.json";
       const profile = {
         name: OUTREACH.name,
+        binding,
         automationId: "outreach",
         nodeId: "send",
         definitionDigest: `sha256:${"a".repeat(64)}`,
         snapshotDigest: `sha256:${"b".repeat(64)}`,
-        environmentId: OUTREACH.environmentId,
-        uid: OUTREACH.uid,
-        gid: OUTREACH.gid,
         inputPath,
         credentialReferencePath: credential,
       };
       for (const scenario of [
-        "observed-hold",
+        "owner-hold",
         "foreign-credential",
+        "wrong-identity",
+        "private-file-alias",
+        "missing-inode",
         "controller-symlink",
         "journal-symlink",
       ] as const) {
@@ -232,37 +245,57 @@ it.layer(NodeServices.layer)("Verified scoped shell admission", (it) => {
             target === "/usr/bin/bwrap"
               ? fs.realPath(`${temp}/missing-bwrap`)
               : Effect.succeed(
-                  (scenario === "controller-symlink" && target === OUTREACH.controller) ||
-                    (scenario === "journal-symlink" && target === OUTREACH.journal)
+                  (scenario === "controller-symlink" && target === binding.controller) ||
+                    (scenario === "journal-symlink" && target === binding.journal)
                     ? `${temp}/escaped`
                     : target,
                 ),
           stat: (target: string) => {
             const isDirectory = [
-              OUTREACH.project,
-              OUTREACH.holdParent,
-              OUTREACH.journal,
+              binding.project,
+              binding.holdParent,
+              binding.journal,
               "/etc/ssl/certs",
             ].includes(target);
             const foreign =
-              target === OUTREACH.holdParent ||
+              target === binding.holdParent ||
               (scenario === "foreign-credential" && target === credential);
             return Effect.succeed({
               ...(isDirectory ? directoryInfo : fileInfo),
-              gid: Option.some(OUTREACH.gid),
+              ino:
+                scenario === "missing-inode" && target === credential
+                  ? Option.none()
+                  : Option.some(
+                      scenario === "private-file-alias" && target === credential
+                        ? 10
+                        : [
+                            binding.project,
+                            binding.controller,
+                            binding.holdParent,
+                            binding.journal,
+                            inputPath,
+                            credential,
+                            "/etc/resolv.conf",
+                            "/etc/hosts",
+                            "/etc/nsswitch.conf",
+                            "/etc/ssl/certs",
+                            OUTREACH.executable,
+                          ].indexOf(target) + 6,
+                    ),
+              gid: Option.some(binding.gid),
               uid: Option.some(
                 foreign
                   ? 65534
                   : target === OUTREACH.executable || target.startsWith("/etc/")
                     ? 0
-                    : OUTREACH.uid,
+                    : binding.uid,
               ),
               mode:
-                target === OUTREACH.controller
+                target === binding.controller
                   ? 0o664
                   : foreign
                     ? 0o775
-                    : target === inputPath || target === credential || target === OUTREACH.journal
+                    : target === inputPath || target === credential || target === binding.journal
                       ? 0o700
                       : 0o755,
             });
@@ -275,24 +308,31 @@ it.layer(NodeServices.layer)("Verified scoped shell admission", (it) => {
           .execute({
             policy: basePolicy({
               executable: OUTREACH.executable,
-              argv: ["-I", "-S", "-B", OUTREACH.controller, "--input", inputPath],
-              cwd: OUTREACH.journal,
+              argv: ["-I", "-S", "-B", binding.controller, "--input", inputPath],
+              cwd: binding.journal,
               access: "write",
               retryable: false,
             }),
             runtime: {
-              allowedRoots: [{ canonicalPath: OUTREACH.journal, access: "write" }],
-              outreachProfile: profile,
+              allowedRoots: [{ canonicalPath: binding.journal, access: "write" }],
+              outreachProfile:
+                scenario === "wrong-identity"
+                  ? { ...profile, binding: { ...binding, uid: binding.uid + 1 } }
+                  : profile,
             },
           })
           .pipe(Effect.flip);
         NodeAssert.equal(
           denied.code,
-          scenario === "observed-hold"
+          scenario === "owner-hold"
             ? "bwrap-unavailable"
-            : scenario === "foreign-credential"
+            : scenario === "foreign-credential" ||
+                scenario === "private-file-alias" ||
+                scenario === "missing-inode"
               ? "unsafe-runtime-location"
-              : "path-not-canonical",
+              : scenario === "wrong-identity"
+                ? "invalid-policy"
+                : "path-not-canonical",
         );
       }
     }),

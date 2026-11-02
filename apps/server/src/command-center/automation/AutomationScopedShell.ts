@@ -17,9 +17,9 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerConfig from "../../config.ts";
 import { ServerEnvironmentIdentity } from "../../environment/ServerEnvironment.ts";
 import {
-  OUTREACH,
   OutreachExecutionProfile,
   OUTREACH_PROFILE_KEYS,
+  OUTREACH_BINDING_KEYS,
   outreachProfileIssue,
   outreachCheckpointMatches,
 } from "./OutreachExecutionProfile.ts";
@@ -221,6 +221,12 @@ function exactShapeIssue(value: unknown): string | undefined {
       unsupportedKey(candidate.executionProfile, OUTREACH_PROFILE_KEYS) !== undefined
     )
       return "Unsupported outreach profile field.";
+    if (
+      isObject(candidate.executionProfile) &&
+      isObject(candidate.executionProfile.binding) &&
+      unsupportedKey(candidate.executionProfile.binding, OUTREACH_BINDING_KEYS) !== undefined
+    )
+      return "Unsupported owner binding field.";
     if (!Array.isArray(candidate.allowedRoots)) continue;
     for (const [rootIndex, root] of candidate.allowedRoots.entries()) {
       if (!isObject(root)) continue;
@@ -843,9 +849,9 @@ export const makeAutomationScopedShell = Effect.gen(function* () {
         const identity = yield* Effect.serviceOption(ServerEnvironmentIdentity);
         if (
           Option.isNone(identity) ||
-          String(yield* identity.value.getEnvironmentId) !== profile.environmentId ||
-          NodeProcess.geteuid?.() !== profile.uid ||
-          NodeProcess.getegid?.() !== profile.gid ||
+          String(yield* identity.value.getEnvironmentId) !== profile.binding.environmentId ||
+          NodeProcess.geteuid?.() !== profile.binding.uid ||
+          NodeProcess.getegid?.() !== profile.binding.gid ||
           input.nodeId !== profile.nodeId ||
           !boundSpace.repositories.some(
             (repository) => String(repository.id) === entry.repositoryId,
@@ -895,8 +901,8 @@ export const makeAutomationScopedShell = Effect.gen(function* () {
         profile === undefined
           ? yield* resolveRepositoryScope(entry, boundSpace)
           : {
-              canonicalCwd: OUTREACH.journal,
-              canonicalAllowedRoots: [OUTREACH.journal],
+              canonicalCwd: profile.binding.journal,
+              canonicalAllowedRoots: [profile.binding.journal],
               gitMetadata: undefined,
             };
       const policyDigest = canonicalManifestEntryDigest(entry);

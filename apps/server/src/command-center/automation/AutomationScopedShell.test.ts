@@ -30,6 +30,18 @@ import {
   type VerifiedScopedShellExecuteInput,
 } from "./VerifiedScopedShell.ts";
 
+const binding = {
+  project: "/srv/example/project",
+  controller: "/srv/example/project/bin/guarded-campaign/guarded_outreach.py",
+  journal: "/srv/example/state/journal",
+  holdParent: "/srv/example/launch-state",
+  environmentId: "00000000-0000-4000-8000-000000000001",
+  spaceId: "example-space",
+  repositoryId: "example-repository",
+  uid: NodeProcess.geteuid?.() ?? 1,
+  gid: NodeProcess.getegid?.() ?? 1,
+} as const;
+
 const now = "2026-01-01T00:00:00.000Z";
 const repositoryARemote = "https://example.invalid/sample/repository-a.git";
 const repositoryBRemote = "https://example.invalid/sample/repository-b.git";
@@ -112,11 +124,11 @@ function testLayer(calls: VerifiedScopedShellExecuteInput[], outreach = false) {
               spaces: [
                 {
                   ...space,
-                  id: OUTREACH.spaceId as typeof space.id,
+                  id: binding.spaceId as typeof space.id,
                   repositories: [
                     {
                       ...space.repositories[0]!,
-                      id: OUTREACH.repositoryId as (typeof space.repositories)[number]["id"],
+                      id: binding.repositoryId as (typeof space.repositories)[number]["id"],
                     },
                   ],
                 },
@@ -186,7 +198,7 @@ function testLayer(calls: VerifiedScopedShellExecuteInput[], outreach = false) {
     ServerConfig.layerTest(NodeProcess.cwd(), { prefix: "cc-shell-manifest-" }),
     configLayer,
     Layer.succeed(ServerEnvironmentIdentity, {
-      getEnvironmentId: Effect.succeed(decodeEnvironmentId(OUTREACH.environmentId)),
+      getEnvironmentId: Effect.succeed(decodeEnvironmentId(binding.environmentId)),
     }),
     verifiedLayer,
     repositoryIdentityLayer,
@@ -825,7 +837,7 @@ it.effect(
         createdAt: now,
         updatedAt: now,
         edges: [],
-        spaceId: OUTREACH.spaceId,
+        spaceId: binding.spaceId,
         nodes: [
           {
             id: "send",
@@ -840,34 +852,33 @@ it.effect(
       const snapshotDigest = `sha256:${Array.from(hash, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
       const profile = {
         name: OUTREACH.name,
+        binding,
         automationId: "automation-a",
         nodeId: "send",
         definitionDigest: digest,
         snapshotDigest,
-        environmentId: OUTREACH.environmentId,
-        uid: OUTREACH.uid,
-        gid: OUTREACH.gid,
-        inputPath: `${OUTREACH.journal}/approved.json`,
-        credentialReferencePath: "/var/lib/example/existing-key.json",
+        inputPath: `${binding.journal}/approved.json`,
+        credentialReferencePath: "/srv/example/keys/authorized.json",
       };
       const entry = manifestEntry({
         allowlistId: "outreach",
-        spaceId: OUTREACH.spaceId,
-        repositoryId: OUTREACH.repositoryId,
+        spaceId: binding.spaceId,
+        repositoryId: binding.repositoryId,
         executable: OUTREACH.executable,
-        argv: ["-I", "-S", "-B", OUTREACH.controller, "--input", profile.inputPath],
+        argv: ["-I", "-S", "-B", binding.controller, "--input", profile.inputPath],
         access: "write",
-        cwd: OUTREACH.journal,
+        cwd: binding.journal,
         retryable: false,
-        allowedRoots: [{ canonicalPath: OUTREACH.journal, access: "write" }],
+        allowedRoots: [{ canonicalPath: binding.journal, access: "write" }],
         executionProfile: profile,
       });
       const initialShell = yield* makeAutomationScopedShell;
       for (const override of [
         { name: "foreign" },
-        { environmentId: "foreign" },
-        { uid: 0 },
-        { gid: 0 },
+        { binding: { ...binding, environmentId: "foreign" } },
+        { binding: { ...binding, uid: 0 } },
+        { binding: { ...binding, gid: 0 } },
+        { binding: { ...binding, arbitrary: true } },
         { arbitrary: true },
       ]) {
         yield* writeManifest({
@@ -878,23 +889,42 @@ it.effect(
           .execute({
             executionId: "uncreated",
             nodeId: "send",
-            spaceId: OUTREACH.spaceId,
+            spaceId: binding.spaceId,
             allowlistId: "outreach",
           })
           .pipe(Effect.flip);
         expect(denied.code).toBe("manifest-invalid");
       }
+      for (const changedBinding of [
+        { ...binding, uid: binding.uid + 1 },
+        { ...binding, gid: binding.gid + 1 },
+        { ...binding, environmentId: "00000000-0000-4000-8000-000000000002" },
+      ]) {
+        yield* writeManifest({
+          schemaVersion: 1,
+          entries: [{ ...entry, executionProfile: { ...profile, binding: changedBinding } }],
+        });
+        const denied = yield* initialShell
+          .execute({
+            executionId: "uncreated",
+            nodeId: "send",
+            spaceId: binding.spaceId,
+            allowlistId: "outreach",
+          })
+          .pipe(Effect.flip);
+        expect(denied.code).toBe("scope-denied");
+      }
       yield* writeManifest({ schemaVersion: 1, entries: [entry] });
       for (const executionId of ["fire-1", "fire-2"]) {
         yield* seedCheckpoint({ executionId, nodeId: "send" });
-        yield* sql`INSERT OR IGNORE INTO command_center_spaces (id, slug, name, kind, created_at, updated_at) VALUES (${OUTREACH.spaceId}, ${OUTREACH.spaceId}, 'ViewHook', 'business', ${now}, ${now})`;
-        yield* sql`UPDATE command_center_automation_executions SET space_id = ${OUTREACH.spaceId}, definition_json = ${json}, definition_digest = ${digest} WHERE id = ${executionId}`;
+        yield* sql`INSERT OR IGNORE INTO command_center_spaces (id, slug, name, kind, created_at, updated_at) VALUES (${binding.spaceId}, ${binding.spaceId}, 'Example', 'business', ${now}, ${now})`;
+        yield* sql`UPDATE command_center_automation_executions SET space_id = ${binding.spaceId}, definition_json = ${json}, definition_digest = ${digest} WHERE id = ${executionId}`;
         // Recreate the service each fire: authority is reloaded from owner manifest and durable DB, never a prior turn grant.
         const shell = yield* makeAutomationScopedShell;
         yield* shell.execute({
           executionId,
           nodeId: "send",
-          spaceId: OUTREACH.spaceId,
+          spaceId: binding.spaceId,
           allowlistId: "outreach",
         });
       }
@@ -902,13 +932,39 @@ it.effect(
       expect(calls.every((call) => call.runtime.outreachProfile?.name === OUTREACH.name)).toBe(
         true,
       );
+      const freshShell = yield* makeAutomationScopedShell;
+      const activeRequest = {
+        executionId: "fire-1",
+        nodeId: "send",
+        spaceId: binding.spaceId,
+        allowlistId: "outreach",
+      };
+      yield* writeManifest({
+        schemaVersion: 1,
+        entries: [
+          {
+            ...entry,
+            executionProfile: {
+              ...profile,
+              binding: { ...binding, holdParent: "/srv/example/other-hold" },
+            },
+          },
+        ],
+      });
+      const drift = yield* freshShell.execute(activeRequest).pipe(Effect.flip);
+      expect(drift.code).toBe("policy-drift");
+      yield* writeManifest({ schemaVersion: 1, entries: [entry] });
+      yield* sql`UPDATE command_center_automation_executions SET definition_json = ${json + " "} WHERE id = 'fire-1'`;
+      const mutated = yield* freshShell.execute(activeRequest).pipe(Effect.flip);
+      expect(mutated.code).toBe("scope-denied");
+      yield* sql`UPDATE command_center_automation_executions SET definition_json = ${json} WHERE id = 'fire-1'`;
       yield* sql`UPDATE command_center_automation_executions SET automation_id = 'foreign' WHERE id = 'fire-2'`;
       const shell = yield* makeAutomationScopedShell;
       const denied = yield* Effect.flip(
         shell.execute({
           executionId: "fire-2",
           nodeId: "send",
-          spaceId: OUTREACH.spaceId,
+          spaceId: binding.spaceId,
           allowlistId: "outreach",
         }),
       );
@@ -918,7 +974,7 @@ it.effect(
         shell.execute({
           executionId: "fire-1",
           nodeId: "send",
-          spaceId: OUTREACH.spaceId,
+          spaceId: binding.spaceId,
           allowlistId: "outreach",
         }),
       );

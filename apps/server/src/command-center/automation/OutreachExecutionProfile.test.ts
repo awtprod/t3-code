@@ -9,9 +9,21 @@ import {
   buildVerifiedScopedShellPrlimitArguments,
   VERIFIED_SCOPED_SHELL_RESOURCE_LIMITS,
 } from "./VerifiedScopedShell.ts";
+const binding = {
+  project: "/srv/example/project",
+  controller: "/srv/example/project/bin/guarded-campaign/guarded_outreach.py",
+  journal: "/srv/example/state/journal",
+  holdParent: "/srv/example/launch-state",
+  environmentId: "00000000-0000-4000-8000-000000000001",
+  spaceId: "example-space",
+  repositoryId: "example-repository",
+  uid: 1001,
+  gid: 1002,
+} as const;
+
 const definitionJson = JSON.stringify({
   id: "outreach",
-  spaceId: "viewhook",
+  spaceId: "example-space",
   name: "Outreach",
   version: 1,
   enabled: true,
@@ -32,25 +44,23 @@ const definitionJson = JSON.stringify({
 });
 const profile = {
   name: OUTREACH.name,
+  binding,
   automationId: "outreach",
   nodeId: "send",
   definitionDigest: `sha256:${"a".repeat(64)}`,
   snapshotDigest: `sha256:${"b".repeat(64)}`,
-  environmentId: OUTREACH.environmentId,
-  uid: OUTREACH.uid,
-  gid: OUTREACH.gid,
-  inputPath: `${OUTREACH.journal}/approved.json`,
-  credentialReferencePath: "/var/lib/example/existing-key.json",
+  inputPath: `${binding.journal}/approved.json`,
+  credentialReferencePath: "/srv/example/keys/authorized.json",
 } as const;
 const entry = {
-  spaceId: OUTREACH.spaceId,
-  repositoryId: OUTREACH.repositoryId,
+  spaceId: binding.spaceId,
+  repositoryId: binding.repositoryId,
   executable: OUTREACH.executable,
-  argv: ["-I", "-S", "-B", OUTREACH.controller, "--input", profile.inputPath],
-  cwd: OUTREACH.journal,
+  argv: ["-I", "-S", "-B", binding.controller, "--input", profile.inputPath],
+  cwd: binding.journal,
   access: "write",
   retryable: false,
-  allowedRoots: [{ canonicalPath: OUTREACH.journal, access: "write" }],
+  allowedRoots: [{ canonicalPath: binding.journal, access: "write" }],
 };
 const row = {
   automationId: profile.automationId,
@@ -73,9 +83,9 @@ describe("protected outreach execution", () => {
   });
   it("rejects path escapes, alternate roots, retries and legacy entrypoints", () => {
     for (const inputPath of [
-      `${OUTREACH.journal}/../x.json`,
-      `${OUTREACH.journal}//x.json`,
-      `${OUTREACH.journal}/sub/x.json`,
+      `${binding.journal}/../x.json`,
+      `${binding.journal}//x.json`,
+      `${binding.journal}/sub/x.json`,
       "/tmp/x.json",
     ])
       expect(outreachProfileIssue({ ...profile, inputPath }, entry)).toBeDefined();
@@ -86,22 +96,68 @@ describe("protected outreach execution", () => {
       }),
     ).toBeDefined();
     expect(outreachProfileIssue(profile, { ...entry, retryable: true })).toBeDefined();
-    expect(outreachProfileIssue(profile, { ...entry, spaceId: "ccn" })).toBeDefined();
+    expect(outreachProfileIssue(profile, { ...entry, spaceId: "other-space" })).toBeDefined();
     expect(outreachProfileIssue(profile, { ...entry, repositoryId: "foreign" })).toBeDefined();
     expect(
       outreachProfileIssue(profile, { ...entry, executable: "/usr/bin/python3" }),
     ).toBeDefined();
   });
+  it("rejects broad, overlapping, escaped and malformed owner bindings", () => {
+    const variants = [
+      { ...binding, project: "/", controller: "/bin/guarded-campaign/guarded_outreach.py" },
+      { ...binding, journal: "/srv/example/project/state" },
+      { ...binding, journal: "/srv/example" },
+      { ...binding, holdParent: binding.journal },
+      { ...binding, holdParent: `${binding.project}/hold` },
+      {
+        ...binding,
+        project: "/usr/example/project",
+        controller: "/usr/example/project/bin/guarded-campaign/guarded_outreach.py",
+      },
+      { ...binding, journal: "/srv/example/state/../journal" },
+      { ...binding, journal: "/srv/example/state//journal" },
+      { ...binding, journal: `${binding.journal}\n` },
+      { ...binding, controller: `${binding.project}/legacy.py` },
+      { ...binding, environmentId: `${binding.environmentId}\n` },
+      { ...binding, spaceId: "example-space\n" },
+      { ...binding, uid: 0 },
+      { ...binding, gid: -1 },
+      { ...binding, uid: 4_294_967_295 },
+      { ...binding, network: true },
+    ];
+    for (const candidate of variants) {
+      const inputPath = `${candidate.journal}/approved.json`;
+      const candidateProfile = { ...profile, binding: candidate, inputPath };
+      const candidateEntry = {
+        ...entry,
+        spaceId: candidate.spaceId,
+        cwd: candidate.journal,
+        allowedRoots: [{ canonicalPath: candidate.journal, access: "write" }],
+        argv: ["-I", "-S", "-B", candidate.controller, "--input", inputPath],
+      };
+      expect(outreachProfileIssue(candidateProfile, candidateEntry)).toBeDefined();
+    }
+    for (const credentialReferencePath of [
+      binding.project,
+      `${binding.journal}/key.json`,
+      binding.holdParent,
+      "/proc/self/environ",
+      "/srv/example",
+      `${profile.credentialReferencePath}\n`,
+    ])
+      expect(outreachProfileIssue({ ...profile, credentialReferencePath }, entry)).toBeDefined();
+  });
+
   it("binds protected digest, durable job, Space and node, surviving serialization", () => {
     const restored = JSON.parse(JSON.stringify(profile));
-    expect(outreachCheckpointMatches(restored, row, "outreach", "viewhook")).toBe(true);
-    const minimal = JSON.stringify({ id: "outreach", spaceId: "viewhook", nodes: [] });
+    expect(outreachCheckpointMatches(restored, row, "outreach", "example-space")).toBe(true);
+    const minimal = JSON.stringify({ id: "outreach", spaceId: "example-space", nodes: [] });
     expect(
       outreachCheckpointMatches(
         profile,
         { ...row, definitionJson: minimal },
         "outreach",
-        "viewhook",
+        "example-space",
       ),
     ).toBe(false);
     expect(
@@ -109,7 +165,7 @@ describe("protected outreach execution", () => {
         profile,
         { ...row, definitionJson: definitionJson.replace('"enabled":true', '"enabled":false') },
         "outreach",
-        "viewhook",
+        "example-space",
       ),
     ).toBe(false);
 
@@ -118,11 +174,16 @@ describe("protected outreach execution", () => {
       { ...row, definitionJson: definitionJson + " ", snapshotDigest: "sha256:" + "0".repeat(64) },
       { ...row, definitionDigest: "sha256:" + "0".repeat(64) },
     ])
-      expect(outreachCheckpointMatches(restored, changed, "outreach", "viewhook")).toBe(false);
-    expect(outreachCheckpointMatches(profile, row, "foreign", "viewhook")).toBe(false);
+      expect(outreachCheckpointMatches(restored, changed, "outreach", "example-space")).toBe(false);
+    expect(outreachCheckpointMatches(profile, row, "foreign", "example-space")).toBe(false);
     expect(outreachCheckpointMatches(profile, row, "outreach", "other-space")).toBe(false);
     expect(
-      outreachCheckpointMatches({ ...profile, nodeId: "foreign" }, row, "outreach", "viewhook"),
+      outreachCheckpointMatches(
+        { ...profile, nodeId: "foreign" },
+        row,
+        "outreach",
+        "example-space",
+      ),
     ).toBe(false);
   });
   it("keeps ordinary network and resource policy unchanged; mounts live hold parent readonly", () => {
@@ -131,18 +192,24 @@ describe("protected outreach execution", () => {
     expect(ordinary).not.toContain("--share-net");
     expect(ordinary).not.toContain("NODE_OPTIONS");
     const mounts = [
-      OUTREACH.project,
-      OUTREACH.controller,
-      OUTREACH.holdParent,
+      binding.project,
+      binding.controller,
+      binding.holdParent,
       profile.inputPath,
       profile.credentialReferencePath,
     ].map((destination, index) => ({ destination, fd: 7 + index }));
-    const outreach = buildVerifiedScopedShellBwrapArguments({ ...base, outreachMounts: mounts });
+    const outreach = buildVerifiedScopedShellBwrapArguments({
+      ...base,
+      outreach: { journal: binding.journal, mounts },
+    });
     expect(outreach).toContain("--share-net");
-    expect(outreach.join(" ")).toContain(`--ro-bind-fd 9 ${OUTREACH.holdParent}`);
-    expect(outreach).not.toContain(`${OUTREACH.holdParent}/OUTREACH_LAUNCH_HOLD`);
-    expect(outreach.join(" ")).toContain(`--bind-fd 4 ${OUTREACH.journal}`);
+    expect(outreach.join(" ")).toContain(`--ro-bind-fd 9 ${binding.holdParent}`);
+    expect(outreach).not.toContain(`${binding.holdParent}/OUTREACH_LAUNCH_HOLD`);
+    expect(outreach.join(" ")).toContain(`--bind-fd 4 ${binding.journal}`);
     expect(outreach).not.toContain("--bind");
+    expect(outreach.filter((arg) => arg === "--bind-fd")).toHaveLength(1);
+    expect(outreach.filter((arg) => arg === "--share-net")).toHaveLength(1);
+    expect(outreach).not.toContain("--unshare-pid-try");
     const limits = { bwrapFd: 5, bwrapArguments: ordinary, timeoutMs: 1000, maxProcesses: 16 };
     expect(buildVerifiedScopedShellPrlimitArguments(limits)).toContain(
       `--as=${VERIFIED_SCOPED_SHELL_RESOURCE_LIMITS.maxAddressSpaceBytes}:${VERIFIED_SCOPED_SHELL_RESOURCE_LIMITS.maxAddressSpaceBytes}`,
