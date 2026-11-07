@@ -33,11 +33,8 @@ export class DesktopUserDataInitializationError extends Schema.TaggedError<Deskt
 
 /**
  * Select Electron's profile independently of the server's Command Center home.
- *
- * Command Center keeps one profile across releases: the first legacy profile
- * that already exists is reused in place (so renamed installs keep their
- * cookies, IndexedDB and safeStorage keys), and otherwise the current
- * `userDataDirName` is used.
+ * The first existing legacy profile is reused in place (renamed installs keep
+ * cookies, IndexedDB and safeStorage keys); otherwise `userDataDirName` is used.
  */
 export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPath")(
   function* (input: {

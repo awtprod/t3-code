@@ -157,7 +157,7 @@ const makeHarness = Effect.fn(function* (
     }),
     Layer.mock(OrchestrationBridge.OrchestrationBridge)({
       getThreadShellById: () => Ref.get(threadRef),
-      getProjectShellById: () => Effect.succeed(Option.some(PROJECT)),
+      getProjectShellById: () => Effect.succeedSome(PROJECT),
       getShellSnapshot: () =>
         shellThreads().pipe(
           Effect.map((threads) => ({

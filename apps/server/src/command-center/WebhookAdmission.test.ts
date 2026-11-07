@@ -3,7 +3,6 @@ import { COMMAND_CENTER_WEBHOOK_MAX_PAYLOAD_BYTES } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 
 import { type AutomationTriggerCoordinatorShape } from "./automation/TriggerCoordinator.ts";
@@ -66,8 +65,8 @@ function testLayer(admissions: Array<Record<string, unknown>>) {
   const secrets = CommandCenterCredentialStore.of({
     get: (name) =>
       name === COMMAND_CENTER_WEBHOOK_SECRET_NAME
-        ? Effect.succeed(Option.some(credentialBytes))
-        : Effect.succeed(Option.none()),
+        ? Effect.succeedSome(credentialBytes)
+        : Effect.succeedNone,
     set: () => Effect.die("unused"),
     create: () => Effect.die("unused"),
     remove: () => Effect.die("unused"),

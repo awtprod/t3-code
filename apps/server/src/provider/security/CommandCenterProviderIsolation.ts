@@ -40,10 +40,10 @@ const MAX_LOCAL_GIT_CONFIG_BYTES = ByteSize.bytes(1024 * 1024);
 
 interface SecureControlFileIdentity {
   readonly type: FileSystem.File.Type;
-  readonly dev: number;
-  readonly ino: number | undefined;
+  readonly dev: bigint;
+  readonly ino: bigint | undefined;
   readonly mode: number;
-  readonly nlink: number | undefined;
+  readonly nlink: bigint | undefined;
   readonly uid: number | undefined;
   readonly size: string;
   readonly mtimeMs: number | undefined;
@@ -597,26 +597,20 @@ export const prepareCommandCenterCodexHome = Effect.fn(
 
   const optionalStat = (target: string) =>
     fileSystem.stat(target).pipe(
-      Effect.map(Option.some),
+      Effect.asSome,
       Effect.catchTags({
         PlatformError: (cause) =>
           isNotFound(cause)
-            ? Effect.succeed(Option.none())
+            ? Effect.succeedNone
             : Effect.fail(
                 codexHomeError("Command Center could not inspect its isolated Codex home.", cause),
               ),
       }),
     );
-  // Fail closed only on `config.toml`: Codex never writes one itself, so its
-  // presence in a reused isolated home is a genuine ambient-config injection
-  // signal. `plugins`/`marketplaces` are NOT tripwires — Codex 0.144.x syncs a
-  // curated-plugin cache into CODEX_HOME on startup even with
-  // `features.remote_plugin=false` / `plugins={}` set, so a reused home always
-  // contains `plugins/` after its first session. Plugin/marketplace *loading* is
-  // already disabled by the isolation appServerArgs and constrained by the
-  // sandbox permission profile (verified live by verifyCommandCenterCodexIsolation
-  // before every turn), so the on-disk cache is inert. (`skills/`, also created
-  // by Codex, has always been tolerated here for the same reason.)
+  // Fail closed only on `config.toml`: Codex never writes one, so its presence
+  // in a reused isolated home signals ambient-config injection. `plugins/`,
+  // `marketplaces` and `skills/` are Codex-written caches and inert (loading is
+  // disabled by the isolation args and the sandbox, verified before every turn).
   for (const forbiddenEntry of ["config.toml"] as const) {
     if (Option.isSome(yield* optionalStat(path.join(layout.homePath, forbiddenEntry)))) {
       return yield* codexHomeError(
@@ -846,11 +840,11 @@ export const prepareCommandCenterCodexHome = Effect.fn(
     );
   }
   const linkState = yield* fileSystem.readLink(targetAuthPath).pipe(
-    Effect.map(Option.some),
+    Effect.asSome,
     Effect.catchTags({
       PlatformError: (cause) =>
         isNotSymlink(cause)
-          ? Effect.succeed(Option.none())
+          ? Effect.succeedNone
           : Effect.fail(
               codexHomeError(
                 "Command Center could not verify isolated Codex authentication.",
@@ -874,12 +868,10 @@ export const prepareCommandCenterCodexHome = Effect.fn(
 });
 
 /**
- * Resolve the one extra filesystem grant needed by a linked Git worktree.
- *
- * Command Center only trusts worktrees under its runtime base directory and only
- * when their canonical Git metadata belongs to a managed checkout with the exact
- * shape `<baseDir>/repositories/<digest>/.git`. Any linked worktree outside this
- * topology is rejected instead of inheriting ambient repository access.
+ * Resolve the one extra filesystem grant a linked Git worktree needs. Only
+ * worktrees under the runtime base directory whose canonical Git metadata is a
+ * managed checkout `<baseDir>/repositories/<digest>/.git` are trusted; any
+ * other topology is rejected, never inheriting ambient repository access.
  */
 export const resolveCommandCenterManagedGitMetadata = Effect.fn(
   "CommandCenterProviderIsolation.resolveManagedGitMetadata",
@@ -895,11 +887,11 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
       .pipe(Effect.mapError((cause) => managedWorktreeError(issue, cause)));
   const statOptional = (target: string) =>
     fileSystem.stat(target).pipe(
-      Effect.map(Option.some),
+      Effect.asSome,
       Effect.catchTags({
         PlatformError: (cause) =>
           isNotFound(cause)
-            ? Effect.succeed(Option.none())
+            ? Effect.succeedNone
             : Effect.fail(
                 managedWorktreeError(
                   "Command Center could not inspect the workspace Git metadata.",
@@ -917,7 +909,7 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
     ]).pipe(Effect.mapError((cause) => managedWorktreeError(issue, cause)));
     if (
       info.type !== "File" ||
-      Option.getOrUndefined(info.nlink) !== 1 ||
+      Option.getOrUndefined(info.nlink) !== 1n ||
       !isSameResolvedPath(path, canonical, target)
     ) {
       return yield* managedWorktreeError(issue);
@@ -930,11 +922,11 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
       readonly required: boolean;
     }) {
       const canonical = yield* fileSystem.realPath(config.target).pipe(
-        Effect.map(Option.some),
+        Effect.asSome,
         Effect.catchTags({
           PlatformError: (cause) =>
             isNotFound(cause)
-              ? Effect.succeed(Option.none())
+              ? Effect.succeedNone
               : Effect.fail(
                   managedWorktreeError(
                     `Command Center could not canonicalize its ${config.description}.`,
@@ -966,7 +958,7 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
         );
       if (
         before.type !== "File" ||
-        Option.getOrUndefined(before.nlink) !== 1 ||
+        Option.getOrUndefined(before.nlink) !== 1n ||
         before.size > MAX_LOCAL_GIT_CONFIG_BYTES
       ) {
         return yield* managedWorktreeError(

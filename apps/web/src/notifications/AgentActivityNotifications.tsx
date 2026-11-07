@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useEffectEvent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
@@ -63,22 +63,20 @@ function isNotificationKindEnabled(
 }
 
 /**
- * Alerts for agent task transitions: the native OS banner on desktop, plus
- * the sidebar highlight and chime that work on both web and desktop and
- * survive OS Do Not Disturb (which silently swallows the banner and its
- * sound with no way for the app to detect it happened).
- *
- * Mounted globally, once. All three effects share one phase-transition
- * detector so a thread's completion is classified exactly once per batch.
+ * Mounted once: native OS banners on desktop, plus the sidebar highlight and chime, which survive
+ * OS Do Not Disturb (it swallows the banner undetectably). One phase-transition detector feeds all
+ * three so a thread's completion is classified exactly once per batch.
  */
 export function AgentActivityNotifications() {
   const navigate = useNavigate();
   const activeThreadRef = useActiveThreadRefFromRoute();
-  // Mirrored into a ref so the atom subscription below can read the current
-  // route without re-subscribing on every navigation.
-  const activeThreadRefMirror = useRef(activeThreadRef);
-  activeThreadRefMirror.current = activeThreadRef;
+  // An effect event, so the atom subscription reads the current route without re-subscribing.
+  const isRoutedThread = useEffectEvent(
+    (threadRef: ScopedThreadRef) =>
+      activeThreadRef !== null && sameThread(activeThreadRef, threadRef),
+  );
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to thread shell updates to raise native banners, alert highlights and the chime on phase transitions.
   useEffect(() => {
     // threadKey -> last observed phase. A miss means "never observed" (first
     // mount, newly created thread, or the environment just connected), which
@@ -117,10 +115,7 @@ export function AgentActivityNotifications() {
           environmentId: thread.environmentId,
           threadId: thread.id,
         };
-        const isActiveThread =
-          windowFocused &&
-          activeThreadRefMirror.current !== null &&
-          sameThread(activeThreadRefMirror.current, threadRef);
+        const isActiveThread = windowFocused && isRoutedThread(threadRef);
 
         if (kind === "completed" || kind === "failed") {
           // Marked before attempting the native banner: the highlight is
@@ -165,16 +160,15 @@ export function AgentActivityNotifications() {
   }, []);
 
   // Opening a thread is the user seeing it, so the highlight has done its job.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears the alert store's highlight when the router lands on a thread; navigation happens outside this component.
   useEffect(() => {
     if (activeThreadRef === null) return;
     clearThreadAlert(activeThreadRef);
   }, [activeThreadRef]);
 
-  // Highlights are bounded twice over: they fade shortly after the window
-  // has focus (the user is looking, so the signal has landed), and in any
-  // case never outlive the hard ceiling. A single timer drives both, rather
-  // than one per alert, and only runs while something is actually
-  // highlighted.
+  // Highlights fade shortly after the window has focus and never outlive the hard ceiling. One timer
+  // drives both, and only while something is highlighted.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the alert prune timer and window focus listeners in step with the alert store while mounted.
   useEffect(() => {
     const isFocused = () => document.hasFocus();
     let timeoutId: number | null = null;
@@ -236,6 +230,7 @@ export function AgentActivityNotifications() {
 
   // Focuses the app and opens the thread when a native notification is
   // clicked. Only fires on Electron (the bridge is absent on web).
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to the desktop bridge's notification clicks while mounted.
   useEffect(() => {
     const onNotificationActivated = window.desktopBridge?.onNotificationActivated;
     if (typeof onNotificationActivated !== "function") return;

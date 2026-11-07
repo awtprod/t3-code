@@ -267,20 +267,22 @@ it.layer(NodeServices.layer)("Verified scoped shell admission", (it) => {
                   ? Option.none()
                   : Option.some(
                       scenario === "private-file-alias" && target === credential
-                        ? 10
-                        : [
-                            binding.project,
-                            binding.controller,
-                            binding.holdParent,
-                            binding.journal,
-                            inputPath,
-                            credential,
-                            "/etc/resolv.conf",
-                            "/etc/hosts",
-                            "/etc/nsswitch.conf",
-                            "/etc/ssl/certs",
-                            OUTREACH.executable,
-                          ].indexOf(target) + 6,
+                        ? 10n
+                        : BigInt(
+                            [
+                              binding.project,
+                              binding.controller,
+                              binding.holdParent,
+                              binding.journal,
+                              inputPath,
+                              credential,
+                              "/etc/resolv.conf",
+                              "/etc/hosts",
+                              "/etc/nsswitch.conf",
+                              "/etc/ssl/certs",
+                              OUTREACH.executable,
+                            ].indexOf(target) + 6,
+                          ),
                     ),
               gid: Option.some(binding.gid),
               uid: Option.some(

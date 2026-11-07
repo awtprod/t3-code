@@ -18,18 +18,10 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
 /**
- * Stops a run wedged behind a live but silent provider session.
- *
- * A provider process that exits ends its run within seconds, but a live session
- * that simply stops streaming produces no signal at all, so without this sweep
- * the thread spins forever. The heartbeat is the thread shell's `updatedAt`,
- * which every streamed run, node and turn-item event bumps.
- *
- * The threshold comes from the fork's measurements of healthy turns: the
- * longest silence inside a turn was 7.2 minutes (p95 68 s), so 10 minutes leaves
- * headroom while bounding how long a user watches a false spinner. Worst case
- * to recovery is threshold + sweep interval. A run parked on an approval or a
- * question is never stopped: the user may legitimately be away.
+ * Stops a run wedged behind a live but silent provider session; the heartbeat is the thread shell's
+ * `updatedAt`, bumped by every streamed run, node and turn-item event. Threshold: the longest
+ * healthy silence measured 7.2 min (p95 68 s), so 10 min; worst case to recovery is threshold +
+ * sweep interval. A run parked on an approval or question is never stopped (the user may be away).
  */
 const STALLED_RUN_THRESHOLD = Duration.minutes(10);
 const STALLED_RUN_SWEEP_INTERVAL = Duration.seconds(60);
@@ -75,62 +67,61 @@ export class StalledRunWatchdog extends Context.Service<
   }
 >()("@awtprod/command-center/orchestration-v2/StalledRunWatchdog") {}
 
-export const make = (
+export const make = Effect.fn("StalledRunWatchdog.make")(function* (
   options: { readonly threshold?: Duration.Input; readonly interval?: Duration.Input } = {},
-) =>
-  Effect.gen(function* () {
-    const engine = yield* Orchestrator.OrchestratorV2;
-    const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const thresholdMs = Duration.toMillis(options.threshold ?? STALLED_RUN_THRESHOLD);
-    const interval = options.interval ?? STALLED_RUN_SWEEP_INTERVAL;
-    const minutes = Math.max(1, Math.round(thresholdMs / 60_000));
+) {
+  const engine = yield* Orchestrator.OrchestratorV2;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const thresholdMs = Duration.toMillis(options.threshold ?? STALLED_RUN_THRESHOLD);
+  const interval = options.interval ?? STALLED_RUN_SWEEP_INTERVAL;
+  const minutes = Math.max(1, Math.round(thresholdMs / 60_000));
 
-    const stop = (run: StalledRun) =>
-      engine
-        .dispatch({
-          type: "run.interrupt",
-          // One command per stall: a repeat sweep of the same silence is a receipt replay.
-          commandId: CommandId.make(`server:stalled-run:${run.runId}:${run.updatedAtMs}`),
-          threadId: run.threadId,
-          runId: run.runId,
-          reason: `No provider activity for ${minutes} minutes. Command Center stopped the turn so the thread can continue.`,
-        })
-        .pipe(
-          Effect.tap(() =>
-            Effect.logWarning("stopped a run with no provider activity", {
-              threadId: run.threadId,
-              runId: run.runId,
-              silentMs: run.silentMs,
-            }),
-          ),
-          Effect.as(true),
-          Effect.catchCause((cause) =>
-            Effect.logWarning("stopping a stalled run failed", {
-              threadId: run.threadId,
-              runId: run.runId,
-              cause,
-            }).pipe(Effect.as(false)),
-          ),
-        );
+  const stop = (run: StalledRun) =>
+    engine
+      .dispatch({
+        type: "run.interrupt",
+        // One command per stall: a repeat sweep of the same silence is a receipt replay.
+        commandId: CommandId.make(`server:stalled-run:${run.runId}:${run.updatedAtMs}`),
+        threadId: run.threadId,
+        runId: run.runId,
+        reason: `No provider activity for ${minutes} minutes. Command Center stopped the turn so the thread can continue.`,
+      })
+      .pipe(
+        Effect.tap(() =>
+          Effect.logWarning("stopped a run with no provider activity", {
+            threadId: run.threadId,
+            runId: run.runId,
+            silentMs: run.silentMs,
+          }),
+        ),
+        Effect.as(true),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("stopping a stalled run failed", {
+            threadId: run.threadId,
+            runId: run.runId,
+            cause,
+          }).pipe(Effect.as(false)),
+        ),
+      );
 
-    const sweep: StalledRunWatchdog["Service"]["sweep"] = Effect.gen(function* () {
-      const snapshot = yield* projections.getShellSnapshot();
-      const candidates = stalledRuns(snapshot.threads, yield* Clock.currentTimeMillis, thresholdMs);
-      const stopped: Array<StalledRun> = [];
-      for (const run of candidates) {
-        if (yield* stop(run)) stopped.push(run);
-      }
-      return stopped;
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("stalled run sweep failed", { cause }).pipe(Effect.as([])),
-      ),
-    );
+  const sweep: StalledRunWatchdog["Service"]["sweep"] = Effect.gen(function* () {
+    const snapshot = yield* projections.getShellSnapshot();
+    const candidates = stalledRuns(snapshot.threads, yield* Clock.currentTimeMillis, thresholdMs);
+    const stopped: Array<StalledRun> = [];
+    for (const run of candidates) {
+      if (yield* stop(run)) stopped.push(run);
+    }
+    return stopped;
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("stalled run sweep failed", { cause }).pipe(Effect.as([])),
+    ),
+  );
 
-    const start: StalledRunWatchdog["Service"]["start"] = () =>
-      forkParked(Effect.repeat(sweep, Schedule.spaced(interval)).pipe(Effect.asVoid));
+  const start: StalledRunWatchdog["Service"]["start"] = () =>
+    forkParked(Effect.repeat(sweep, Schedule.spaced(interval)).pipe(Effect.asVoid));
 
-    return { start, sweep } satisfies StalledRunWatchdog["Service"];
-  });
+  return { start, sweep } satisfies StalledRunWatchdog["Service"];
+});
 
 export const layer = Layer.effect(StalledRunWatchdog, make());

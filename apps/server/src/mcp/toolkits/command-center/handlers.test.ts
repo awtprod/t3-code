@@ -301,7 +301,7 @@ const invokeSpaceActivity = (
       });
     }).pipe(
       // Typed tool failures surface as a failed effect.
-      Effect.catch(() => Effect.succeed([true])),
+      Effect.orElseSucceed(() => [true]),
       Effect.provide(
         McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
           Layer.provideMerge(
@@ -547,7 +547,7 @@ const invokeWriteTool = (
       const stream = yield* toolkit.handle(name, input as never);
       return Array.from(yield* Stream.runCollect(stream)).map((output) => output.isFailure);
     }).pipe(
-      Effect.catch(() => Effect.succeed([true])),
+      Effect.orElseSucceed(() => [true]),
       Effect.provide(
         McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
           Layer.provideMerge(
@@ -878,7 +878,7 @@ const invokePhoneTool = (
       const stream = yield* toolkit.handle(name, input as never);
       return Array.from(yield* Stream.runCollect(stream)).map((output) => output.isFailure);
     }).pipe(
-      Effect.catch(() => Effect.succeed([true])),
+      Effect.orElseSucceed(() => [true]),
       Effect.provide(
         McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
           Layer.provideMerge(

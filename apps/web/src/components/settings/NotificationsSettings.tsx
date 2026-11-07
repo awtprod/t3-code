@@ -1,19 +1,14 @@
 import { isElectron } from "~/env";
-import { useClientSettings, useUpdateClientSettings } from "../../hooks/useSettings";
+import { updateClientSettings, useClientSettings } from "../../hooks/useSettings";
 import { Switch } from "../ui/switch";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { WebPushNotificationsRow } from "./WebPushNotificationsRow";
 
-// Desktop gets native OS notifications (own preferences, permission owned by
-// the OS); web gets Web Push (its own preferences live per-browser in
-// localStorage + relay registration, unchanged from apps/web/src/cloud/webPush.ts
-// — not folded into ClientSettings here, since that storage is already
-// shipped and tested). The sidebar highlight and chime work on both and share
-// one sound preference.
+// Desktop uses native OS notifications; web uses Web Push, whose per-browser preferences stay
+// in apps/web/src/cloud/webPush.ts storage. The sidebar highlight and chime share one sound setting.
 export function NotificationsSettingsPanel() {
   const settings = useClientSettings();
-  const updateSettings = useUpdateClientSettings();
   const desktopNotificationsDisabled = isElectron && !settings.desktopNotificationsEnabled;
 
   return (
@@ -27,7 +22,7 @@ export function NotificationsSettingsPanel() {
               <Switch
                 checked={settings.desktopNotificationsEnabled}
                 onCheckedChange={(checked) =>
-                  updateSettings({ desktopNotificationsEnabled: Boolean(checked) })
+                  updateClientSettings({ desktopNotificationsEnabled: Boolean(checked) })
                 }
                 aria-label="Enable desktop notifications"
               />
@@ -46,7 +41,7 @@ export function NotificationsSettingsPanel() {
                   checked={settings.desktopNotifyOnApproval}
                   disabled={desktopNotificationsDisabled}
                   onCheckedChange={(checked) =>
-                    updateSettings({ desktopNotifyOnApproval: Boolean(checked) })
+                    updateClientSettings({ desktopNotifyOnApproval: Boolean(checked) })
                   }
                   aria-label="Notify on approval needed"
                 />
@@ -60,7 +55,7 @@ export function NotificationsSettingsPanel() {
                   checked={settings.desktopNotifyOnInput}
                   disabled={desktopNotificationsDisabled}
                   onCheckedChange={(checked) =>
-                    updateSettings({ desktopNotifyOnInput: Boolean(checked) })
+                    updateClientSettings({ desktopNotifyOnInput: Boolean(checked) })
                   }
                   aria-label="Notify on input needed"
                 />
@@ -74,7 +69,7 @@ export function NotificationsSettingsPanel() {
                   checked={settings.desktopNotifyOnCompletion}
                   disabled={desktopNotificationsDisabled}
                   onCheckedChange={(checked) =>
-                    updateSettings({ desktopNotifyOnCompletion: Boolean(checked) })
+                    updateClientSettings({ desktopNotifyOnCompletion: Boolean(checked) })
                   }
                   aria-label="Notify on completion"
                 />
@@ -88,7 +83,7 @@ export function NotificationsSettingsPanel() {
                   checked={settings.desktopNotifyOnFailure}
                   disabled={desktopNotificationsDisabled}
                   onCheckedChange={(checked) =>
-                    updateSettings({ desktopNotifyOnFailure: Boolean(checked) })
+                    updateClientSettings({ desktopNotifyOnFailure: Boolean(checked) })
                   }
                   aria-label="Notify on failure"
                 />
@@ -103,7 +98,7 @@ export function NotificationsSettingsPanel() {
             <Switch
               checked={settings.notificationSoundEnabled}
               onCheckedChange={(checked) =>
-                updateSettings({ notificationSoundEnabled: Boolean(checked) })
+                updateClientSettings({ notificationSoundEnabled: Boolean(checked) })
               }
               aria-label="Play notification sound"
             />

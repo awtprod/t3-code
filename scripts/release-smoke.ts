@@ -17,6 +17,7 @@ const workspaceFiles = [
   "apps/desktop/package.json",
   "apps/web/package.json",
   "apps/mobile/package.json",
+  "apps/mobile/modules/t3-highlights/package.json",
   "apps/mobile/modules/t3-source-text/package.json",
   "apps/mobile/modules/t3-review-diff/package.json",
   "apps/mobile/modules/t3-terminal/package.json",
@@ -35,12 +36,14 @@ const workspaceFiles = [
   "packages/provider-acp/package.json",
   "packages/provider-acp-registry/package.json",
   "packages/provider-cursor/package.json",
+  "packages/provider-fx/package.json",
   "packages/provider-grok/package.json",
   "packages/provider-muse/package.json",
   "packages/provider-opencode/package.json",
   "packages/source-control-azure-devops/package.json",
   "packages/source-control-bitbucket/package.json",
   "packages/source-control-core/package.json",
+  "packages/source-control-definitions/package.json",
   "packages/source-control-forgejo/package.json",
   "packages/source-control-gitcafe/package.json",
   "packages/source-control-github/package.json",
@@ -243,9 +246,8 @@ async function assertNoCaseInsensitiveTrackedPathCollisions(): Promise<void> {
     }
     canonicalPaths.set(canonicalPath, trackedPath);
 
-    // .repos/ holds read-only upstream reference checkouts that nothing imports or builds
-    // (vendored Alchemy ships Runner.ts beside runner.mjs). Test files are never import
-    // targets, and upstream keeps sibling suites such as X.test.ts beside X.test.tsx.
+    // .repos/ holds read-only upstream checkouts that nothing imports or builds, and
+    // test files are never import targets (upstream keeps X.test.ts beside X.test.tsx).
     // Exact-path collisions above still cover both; only the module-resolution check
     // skips them.
     if (

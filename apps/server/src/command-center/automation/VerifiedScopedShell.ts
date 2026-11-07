@@ -149,8 +149,8 @@ export class VerifiedScopedShellError extends Schema.TaggedError<VerifiedScopedS
 interface FileIdentity {
   readonly path: string;
   readonly type: FileSystem.File.Type;
-  readonly dev: number;
-  readonly ino: number | undefined;
+  readonly dev: bigint;
+  readonly ino: bigint | undefined;
   readonly mode: number;
   readonly uid: number | undefined;
   readonly gid: number | undefined;
@@ -310,7 +310,7 @@ function identity(path: string, info: FileSystem.File.Info): FileIdentity {
   };
 }
 
-function nodeIdentity(path: string, info: NodeFS.Stats): FileIdentity {
+function nodeIdentity(path: string, info: NodeFS.BigIntStats): FileIdentity {
   return {
     path,
     type: info.isFile()
@@ -320,11 +320,12 @@ function nodeIdentity(path: string, info: NodeFS.Stats): FileIdentity {
         : info.isSymbolicLink()
           ? "SymbolicLink"
           : "Unknown",
-    dev: info.dev,
-    ino: info.ino,
-    mode: info.mode,
-    uid: info.uid,
-    gid: info.gid,
+    // Unsigned, as Effect's FileSystem reports them (Node returns values >= 2^63 as negative).
+    dev: BigInt.asUintN(64, info.dev),
+    ino: BigInt.asUintN(64, info.ino),
+    mode: Number(info.mode),
+    uid: Number(info.uid),
+    gid: Number(info.gid),
   };
 }
 
@@ -1262,10 +1263,11 @@ const makeVerifiedLinuxScopedShellWithOptions = Effect.fn("VerifiedLinuxScopedSh
               cause,
             ),
         }),
-        (opened) => Effect.tryPromise(() => opened.close()).pipe(Effect.catch(() => Effect.void)),
+        (opened) => Effect.tryPromise(() => opened.close()).pipe(Effect.ignore),
       );
       const current = yield* Effect.tryPromise({
-        try: () => handle.stat(),
+        // bigint, like Effect's FileSystem stat the admitted identity came from.
+        try: () => handle.stat({ bigint: true }),
         catch: (cause) =>
           failure(
             admitted.policy.allowlistId,

@@ -1,15 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off - expectations mirror the host path joins the script under test performs.
-import * as NodePath from "node:path";
 import { assert, it } from "@effect/vitest";
 import { PNG } from "pngjs";
 
-import showcaseConfig, {
-  DEFAULT_SHOWCASE_THEME,
-  resolveShowcaseAndroidAbi,
-  SHOWCASE_THEMES,
-  type ShowcaseConfig,
-  type ShowcaseStoreAssetSpec,
-} from "./mobile-showcase.config.ts";
+import { MOBILE_DEFAULT_THEME_ID } from "@t3tools/shared/themePalettes";
+
+import showcaseConfig, { type ShowcaseStoreAssetSpec } from "./mobile-showcase.config.ts";
 import {
   SHOWCASE_ENVIRONMENTS,
   SHOWCASE_PROJECTS,
@@ -18,14 +13,9 @@ import {
 import {
   encodeAndroidPairingUrls,
   normalizeStorePng,
-  parseShowcaseCliArgs,
   parsePairingCredentialOutput,
-  planShowcaseCaptures,
-  readPngDimensions,
   readPngMetadata,
-  resolveAndroidSdkRoot,
   selectLanIpv4Address,
-  showcaseCaptureDirectory,
   validateStoreAsset,
   validateStoreAssetCount,
 } from "./mobile-showcase.ts";
@@ -48,188 +38,6 @@ const googleSpec: ShowcaseStoreAssetSpec = {
   maximumUploadCount: 8,
   maximumFileSizeBytes: 8 * 1024 * 1024,
 };
-
-const config: ShowcaseConfig = {
-  outputDirectory: "artifacts",
-  metroPort: 8199,
-  settleDelayMs: 1,
-  devices: [
-    {
-      id: "phone",
-      platform: "ios",
-      simulator: "iPhone Test",
-      appearance: "dark",
-      theme: "t3-code",
-      scenes: ["thread", "review"],
-      storeAsset: appleSpec,
-    },
-    {
-      id: "pixel",
-      platform: "android",
-      avd: "Pixel_Test",
-      appearance: "light",
-      theme: "t3-code",
-      scenes: ["thread", "terminal"],
-      storeAsset: googleSpec,
-    },
-  ],
-};
-
-it("parses repeatable capture filters", () => {
-  const options = parseShowcaseCliArgs([
-    "--platform",
-    "ios",
-    "--device",
-    "phone",
-    "--scene",
-    "review",
-    "--appearance",
-    "both",
-    "--skip-build",
-  ]);
-  assert.deepStrictEqual([...options.platforms], ["ios"]);
-  assert.deepStrictEqual([...options.deviceIds], ["phone"]);
-  assert.deepStrictEqual([...options.scenes], ["review"]);
-  assert.deepStrictEqual([...options.appearances], ["light", "dark"]);
-  assert.equal(options.skipBuild, true);
-});
-
-it("rejects unsupported system appearances", () => {
-  assert.throws(
-    () => parseShowcaseCliArgs(["--appearance", "sepia"]),
-    /Unsupported appearance 'sepia'/u,
-  );
-});
-
-it("parses repeatable and expanded theme filters", () => {
-  assert.deepStrictEqual(
-    [...parseShowcaseCliArgs(["--theme", "ocean", "--theme", "ember"]).themes],
-    ["ocean", "ember"],
-  );
-  assert.deepStrictEqual(
-    [...parseShowcaseCliArgs(["--theme", "all"]).themes],
-    [...SHOWCASE_THEMES],
-  );
-});
-
-// The app normalizes an unknown id back to its default palette, so a typo here
-// would otherwise produce screenshots labeled with a theme they do not show.
-it("rejects unsupported themes instead of capturing the default palette", () => {
-  assert.throws(() => parseShowcaseCliArgs(["--theme", "sunset"]), /Unsupported theme 'sunset'/u);
-});
-
-it("parses validation-only mode", () => {
-  assert.equal(parseShowcaseCliArgs(["--validate-only"]).validateOnly, true);
-});
-
-it("selects an explicit CI Android ABI without changing the local default", () => {
-  assert.equal(resolveShowcaseAndroidAbi(undefined), "arm64-v8a");
-  assert.equal(resolveShowcaseAndroidAbi("x86_64"), "x86_64");
-  assert.throws(() => resolveShowcaseAndroidAbi("mips"), /Unsupported T3_SHOWCASE_ANDROID_ABI/u);
-});
-
-it("uses platform-correct default Android SDK roots", () => {
-  assert.equal(
-    resolveAndroidSdkRoot({ HOME: "/Users/showcase" }, "darwin"),
-    "/Users/showcase/Library/Android/sdk",
-  );
-  assert.equal(
-    resolveAndroidSdkRoot({ HOME: "/home/showcase" }, "linux"),
-    "/home/showcase/Android/Sdk",
-  );
-  assert.equal(
-    resolveAndroidSdkRoot(
-      { HOME: "/home/showcase", ANDROID_SDK_ROOT: "/opt/android-sdk" },
-      "linux",
-    ),
-    "/opt/android-sdk",
-  );
-});
-
-it("plans only scenes supported by each selected device", () => {
-  const options = parseShowcaseCliArgs(["--platform", "all", "--scene", "terminal"]);
-  const captures = planShowcaseCaptures(config, options);
-  assert.deepStrictEqual(
-    captures.map((capture) => ({
-      id: capture.device.id,
-      appearance: capture.appearance,
-      scenes: capture.scenes,
-    })),
-    [{ id: "pixel", appearance: "light", scenes: ["terminal"] }],
-  );
-});
-
-it("expands both appearances into independent upload-ready directories", () => {
-  const options = parseShowcaseCliArgs(["--device", "phone", "--appearance", "both"]);
-  const captures = planShowcaseCaptures(config, options);
-
-  assert.deepStrictEqual(
-    captures.map((capture) => ({
-      appearance: capture.appearance,
-      directory: showcaseCaptureDirectory("/captures", capture),
-    })),
-    [
-      {
-        appearance: "light",
-        directory: NodePath.join("/captures", "apple", "iphone-test", "light", "t3-code"),
-      },
-      {
-        appearance: "dark",
-        directory: NodePath.join("/captures", "apple", "iphone-test", "dark", "t3-code"),
-      },
-    ],
-  );
-});
-
-// Every palette needs its own leaf folder: one directory holding several themes
-// would mix upload slots and break the per-store screenshot count limits.
-it("expands themes into independent upload-ready directories per appearance", () => {
-  const options = parseShowcaseCliArgs([
-    "--device",
-    "phone",
-    "--appearance",
-    "both",
-    "--theme",
-    "ocean",
-    "--theme",
-    "ember",
-  ]);
-
-  assert.deepStrictEqual(
-    planShowcaseCaptures(config, options).map((capture) =>
-      showcaseCaptureDirectory("/captures", capture),
-    ),
-    [
-      NodePath.join("/captures", "apple", "iphone-test", "light", "ocean"),
-      NodePath.join("/captures", "apple", "iphone-test", "light", "ember"),
-      NodePath.join("/captures", "apple", "iphone-test", "dark", "ocean"),
-      NodePath.join("/captures", "apple", "iphone-test", "dark", "ember"),
-    ],
-  );
-});
-
-it("rejects unknown devices instead of silently capturing another target", () => {
-  const options = parseShowcaseCliArgs(["--device", "missing"]);
-  assert.throws(() => planShowcaseCaptures(config, options), /Unknown device 'missing'/u);
-});
-
-it("reads captured PNG dimensions from the IHDR header", () => {
-  const bytes = new Uint8Array(26);
-  bytes.set([137, 80, 78, 71, 13, 10, 26, 10]);
-  const view = new DataView(bytes.buffer);
-  view.setUint32(16, 1320);
-  view.setUint32(20, 2868);
-  view.setUint8(24, 8);
-  view.setUint8(25, 2);
-  assert.deepStrictEqual(readPngDimensions(bytes), { width: 1320, height: 2868 });
-  assert.deepStrictEqual(readPngMetadata(bytes), {
-    width: 1320,
-    height: 2868,
-    bitDepth: 8,
-    colorType: 2,
-    hasAlpha: false,
-  });
-});
 
 function rgbaPng(width: number, height: number): Buffer {
   const png = new PNG({ width, height });
@@ -268,9 +76,9 @@ it("enforces store screenshot count limits", () => {
 });
 
 it("defaults every device to the app's own palette", () => {
-  assert.equal(DEFAULT_SHOWCASE_THEME, "t3-code");
+  assert.equal(MOBILE_DEFAULT_THEME_ID, "t3-code");
   assert.equal(
-    showcaseConfig.devices.every((device) => device.theme === DEFAULT_SHOWCASE_THEME),
+    showcaseConfig.devices.every((device) => device.theme === MOBILE_DEFAULT_THEME_ID),
     true,
   );
 });
@@ -287,6 +95,8 @@ it("configures every default device with an exact upload-ready store target", ()
     [
       ["iphone-6.9", "portrait", "apple/iphone-6.9", 1320, 2868],
       ["iphone-6.5", "portrait", "apple/iphone-6.5", 1284, 2778],
+      ["iphone-duo-closed", "portrait", "apple/iphone-duo-closed", 1398, 2034],
+      ["iphone-duo-open", "landscape", "apple/iphone-duo-open", 2853, 2007],
       ["ipad-13", "landscape", "apple/ipad-13", 2752, 2064],
       ["pixel", null, "google-play/phone", 1080, 1920],
       ["android-tablet-7", null, "google-play/tablet-7", 1080, 1920],

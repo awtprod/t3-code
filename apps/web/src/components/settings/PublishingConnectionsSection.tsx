@@ -1,10 +1,7 @@
 /**
- * Settings > Connections > Publishing accounts. One row per publishing provider (YouTube,
- * Instagram) for the primary environment: connect, see which account is connected and when its
- * token expires, and disconnect. Credentials are pasted once and stay on the environment; this
- * component only ever sees the browser-safe `CommandCenterPublishConnection` summary.
- *
- * @module PublishingConnectionsSection
+ * Settings > Connections > Publishing accounts: one row per publishing provider
+ * for the primary environment. Credentials stay on the environment; this
+ * component only sees the browser-safe `CommandCenterPublishConnection` summary.
  */
 import type {
   CommandCenterPublishConnection,

@@ -1737,13 +1737,14 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
           while (true) {
             const renewed = yield* renewLease({ ...input, ttlMs: leaseTtlMs }).pipe(
               Effect.map((lease) => lease.expiresAt),
-              Effect.catch((error) =>
-                error._tag === "AutomationRuntimeError" && error.code === "lease-lost"
-                  ? Effect.fail(error)
-                  : Effect.logWarning("command-center.automation.lease-renew-retry", {
-                      executionId: input.executionId,
-                      cause: error,
-                    }).pipe(Effect.as(null)),
+              Effect.catchIf(
+                (error) =>
+                  !(error._tag === "AutomationRuntimeError" && error.code === "lease-lost"),
+                (error) =>
+                  Effect.logWarning("command-center.automation.lease-renew-retry", {
+                    executionId: input.executionId,
+                    cause: error,
+                  }).pipe(Effect.as(null)),
               ),
             );
             if (renewed !== null) {

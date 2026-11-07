@@ -1,19 +1,8 @@
 /**
- * Command Center isolation for Codex app-server sessions on orchestration v2.
- *
- * A `cc:` thread runs Codex with an isolated `CODEX_HOME`, an allowlisted
- * environment, locked app-server arguments and a permission profile that
- * denies the host root, disables network and limits writes to the workspace
- * (`provider/security/CommandCenterProviderIsolation.ts` builds those). This
- * module adds the runtime half the v1 session runtime used to own:
- *
- * - `verifyCommandCenterCodexIsolation`: a live `command/exec` probe through
- *   the same app-server command path Codex tools use, run before any model
- *   turn. Anything but the exact success marker fails the session closed.
- * - `ensureCommandCenterWindowsSandbox`: on Windows the elevated native
- *   sandbox must be ready, or its setup must complete successfully, first.
- * - `commandCenterPermissionProfileMismatch`: Codex reporting a different
- *   active permission profile than the one requested is an error.
+ * Runtime half of Command Center isolation for Codex app-server sessions on v2.
+ * A `cc:` thread runs with an isolated `CODEX_HOME`, allowlisted environment,
+ * locked app-server args and a profile that denies the host root, disables network
+ * and limits writes to the workspace (`provider/security/CommandCenterProviderIsolation.ts`).
  */
 import * as NodeNet from "node:net";
 
@@ -117,6 +106,7 @@ const ActivePermissionProfileEcho = Schema.Struct({
 });
 const isActivePermissionProfileEcho = Schema.is(ActivePermissionProfileEcho);
 
+/** Codex reporting a different active permission profile than the one requested is an error. */
 export function commandCenterPermissionProfileMismatch(
   expected: string,
   response: unknown,
@@ -331,7 +321,8 @@ const releaseCommandCenterNetworkProbe = (probe: {
 
 /**
  * Exercise the admitted profile through the same app-server command path used
- * by Codex tools before any untrusted model turn can run.
+ * by Codex tools before any untrusted model turn can run. Anything but the exact
+ * success marker fails the session closed.
  */
 export const verifyCommandCenterCodexIsolation = Effect.fn("CodexCommandCenterIsolation.verify")(
   function* (input: {
@@ -411,6 +402,7 @@ interface CodexWindowsSandboxSetupClient {
   ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
 }
 
+/** On Windows the elevated native sandbox must be ready, or its setup must succeed, first. */
 export const ensureCommandCenterWindowsSandbox = Effect.fn(
   "CodexCommandCenterIsolation.ensureWindowsSandbox",
 )(function* (input: {

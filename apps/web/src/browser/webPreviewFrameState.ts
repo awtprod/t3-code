@@ -1,12 +1,7 @@
 /**
- * Pure state for the preview surface used outside Electron.
- *
- * In the desktop app a preview is an out-of-process `<webview>` positioned over
- * the panel. A plain browser has no such element, so there the preview is an
- * iframe. That is only viable because the preview gateway is mounted at the
- * **root** of its own origin: the framed dev server sees itself at `/`, so its
- * absolute URLs and HMR socket resolve exactly as they would if the page had
- * been opened directly.
+ * Pure state for the iframe preview used outside Electron. Viable only because
+ * the preview gateway is mounted at the root of its own origin, so the framed
+ * dev server's absolute URLs and HMR socket resolve as if opened directly.
  */
 
 import type { PreviewNavStatus } from "@t3tools/contracts";

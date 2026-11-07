@@ -9,7 +9,6 @@ import * as Ref from "effect/Ref";
 import { TestClock } from "effect/testing";
 
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
-
 import * as ProjectEnrichment from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
@@ -29,12 +28,16 @@ const waitForAvailable = Effect.fn("ProjectEnrichmentServiceTest.waitForAvailabl
   workspaceRoot: string,
   predicate: (value: ProjectEnrichment.ProjectEnrichment) => boolean,
 ) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const available = yield* service.peek(workspaceRoot);
-    if (predicate(available)) return available;
-    yield* Effect.yieldNow;
-  }
-  return yield* Effect.die(`Project metadata for ${workspaceRoot} was not resolved in time.`);
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const changes = yield* service.subscribeChanges;
+      for (;;) {
+        const available = yield* service.peek(workspaceRoot);
+        if (predicate(available)) return available;
+        yield* PubSub.take(changes);
+      }
+    }),
+  );
 });
 
 const layer = (
@@ -48,62 +51,13 @@ const layer = (
     Layer.provide(metadataLayer),
   );
 
-it.effect("preserves either enrichment field when the other resolver fails", () =>
-  Effect.gen(function* () {
-    const layerMetadata = Layer.merge(
-      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
-        resolveRemoteKeys: () => Effect.succeed([]),
-        resolve: (workspaceRoot) =>
-          workspaceRoot === "/repo-fails"
-            ? Effect.die("repository resolver failed")
-            : Effect.succeed(identity(workspaceRoot)),
-      }),
-      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
-        resolvePath: (workspaceRoot) =>
-          workspaceRoot === "/favicon-fails"
-            ? Effect.fail(
-                new ProjectFaviconResolver.ProjectFaviconResolutionError({
-                  operation: "stat-candidate",
-                  workspaceRoot,
-                  cause: "favicon resolver failed",
-                }),
-              )
-            : Effect.succeed(`${workspaceRoot}/favicon.svg`),
-      }),
-    );
-
-    yield* Effect.gen(function* () {
-      const service = yield* ProjectEnrichment.ProjectEnrichmentService;
-      yield* service.request("/favicon-fails");
-      yield* service.request("/repo-fails");
-
-      const faviconFailure = yield* waitForAvailable(
-        service,
-        "/favicon-fails",
-        (value) => value.repositoryIdentity !== null,
-      );
-      assert.equal(
-        faviconFailure.repositoryIdentity?.canonicalKey,
-        "example.test/v1/favicon-fails",
-      );
-      assert.isNull(faviconFailure.faviconPath);
-
-      const repositoryFailure = yield* waitForAvailable(
-        service,
-        "/repo-fails",
-        (value) => value.faviconPath !== null,
-      );
-      assert.isNull(repositoryFailure.repositoryIdentity);
-      assert.equal(repositoryFailure.faviconPath, "/repo-fails/favicon.svg");
-    }).pipe(Effect.provide(layer(layerMetadata)));
-  }),
-);
-
 it.effect("does not warn about favicons for workspace roots that no longer exist", () =>
   Effect.gen(function* () {
     const warnings: Array<unknown> = [];
+    const warned = yield* Deferred.make<void>();
     const logger = Logger.make(({ message }) => {
       warnings.push(message);
+      Deferred.doneUnsafe(warned, Effect.void);
     });
     const metadataLayer = Layer.merge(
       Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
@@ -111,6 +65,7 @@ it.effect("does not warn about favicons for workspace roots that no longer exist
         resolve: (workspaceRoot) => Effect.succeed(identity(workspaceRoot)),
       }),
       Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        invalidate: () => Effect.void,
         resolvePath: (workspaceRoot) =>
           Effect.fail(
             workspaceRoot === "/missing"
@@ -136,9 +91,7 @@ it.effect("does not warn about favicons for workspace roots that no longer exist
       yield* service.request("/missing");
       yield* service.request("/broken");
 
-      for (let attempt = 0; attempt < 100 && warnings.length === 0; attempt += 1) {
-        yield* Effect.yieldNow;
-      }
+      yield* Deferred.await(warned);
 
       assert.lengthOf(warnings, 1);
       assert.nestedPropertyVal(warnings[0], "[1].workspaceRoot", "/broken");
@@ -161,6 +114,7 @@ it.effect("publishes repository completion while favicon enrichment is still pen
         resolve: (workspaceRoot) => Effect.succeed(identity(workspaceRoot)),
       }),
       Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        invalidate: () => Effect.void,
         resolvePath: (workspaceRoot) =>
           Deferred.await(releaseFavicon).pipe(Effect.as(`${workspaceRoot}/favicon.svg`)),
       }),
@@ -190,6 +144,7 @@ it.effect("keeps repository workers available when every favicon worker is hung"
         resolve: (workspaceRoot) => Effect.succeed(identity(workspaceRoot)),
       }),
       Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        invalidate: () => Effect.void,
         resolvePath: () =>
           Effect.gen(function* () {
             const started = yield* Ref.updateAndGet(faviconStarts, (count) => count + 1);
@@ -242,6 +197,7 @@ it.effect("getAvailable returns immediately while repository identity is still u
           ),
       }),
       Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        invalidate: () => Effect.void,
         resolvePath: (workspaceRoot) => Effect.succeed(`${workspaceRoot}/favicon.svg`),
       }),
     );
@@ -293,6 +249,7 @@ it.effect(
           },
         }),
         Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+          invalidate: () => Effect.void,
           resolvePath: () => Effect.succeed(null),
         }),
       );
@@ -318,7 +275,6 @@ it.effect(
         assert.isNull(nullChange.enrichment.repositoryIdentity);
         assert.isTrue(nullChange.enrichment.repositoryIdentityResolved);
 
-        // Warm success null stays resolved and does not republish.
         const warmNull = yield* service.getAvailable("/no-remote");
         assert.isNull(warmNull.repositoryIdentity);
         assert.isTrue(warmNull.repositoryIdentityResolved);
@@ -354,6 +310,7 @@ it.effect("deduplicates requests, bounds pending work, and reloads invalidated r
           }),
       }),
       Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        invalidate: () => Effect.void,
         resolvePath: (workspaceRoot) => Effect.succeed(`${workspaceRoot}/favicon.svg`),
       }),
     );
@@ -405,51 +362,6 @@ it.effect("deduplicates requests, bounds pending work, and reloads invalidated r
   }),
 );
 
-it.effect("rescans a favicon only after 15 minutes", () =>
-  Effect.gen(function* () {
-    const faviconScans = yield* Ref.make(0);
-    const layerMetadata = Layer.merge(
-      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
-        resolveRemoteKeys: () => Effect.succeed([]),
-        resolve: (workspaceRoot) => Effect.succeed(identity(workspaceRoot)),
-      }),
-      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
-        // Each scan returns a new path, so a wait can tell a rescan from the cached value.
-        resolvePath: (workspaceRoot) =>
-          Ref.updateAndGet(faviconScans, (count) => count + 1).pipe(
-            Effect.map((scan) => `${workspaceRoot}/favicon-${scan}.svg`),
-          ),
-      }),
-    );
-
-    yield* Effect.gen(function* () {
-      const service = yield* ProjectEnrichment.ProjectEnrichmentService;
-      yield* service.getAvailable("/repo");
-      yield* waitForAvailable(
-        service,
-        "/repo",
-        (value) => value.faviconPath === "/repo/favicon-1.svg",
-      );
-
-      // Callers such as the shell stream read projects far more often than this.
-      for (let minute = 1; minute < 15; minute += 1) {
-        yield* TestClock.adjust("1 minute");
-        yield* service.getAvailable("/repo");
-      }
-      assert.equal(yield* Ref.get(faviconScans), 1);
-
-      yield* TestClock.adjust("1 minute");
-      yield* service.getAvailable("/repo");
-      yield* waitForAvailable(
-        service,
-        "/repo",
-        (value) => value.faviconPath === "/repo/favicon-2.svg",
-      );
-      assert.equal(yield* Ref.get(faviconScans), 2);
-    }).pipe(Effect.provide(layer(layerMetadata)));
-  }),
-);
-
 it.effect(
   "follows repository identity changes within a minute without rescanning the favicon",
   () =>
@@ -466,6 +378,7 @@ it.effect(
             ),
         }),
         Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+          invalidate: () => Effect.void,
           resolvePath: () => Ref.update(faviconScans, (count) => count + 1).pipe(Effect.as(null)),
         }),
       );

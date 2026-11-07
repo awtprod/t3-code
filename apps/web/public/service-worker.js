@@ -89,11 +89,9 @@ self.addEventListener("fetch", (event) => {
   );
 });
 
-// Deep links from push payloads open in-app but originate from the relay;
-// accept exactly /threads/{environmentId}/{threadId} (the contract shared with
-// the mobile app's normalizeThreadDeepLink) and fall back to the app root.
-// The web router serves threads at /{environmentId}/{threadId} (no /threads
-// prefix), so the validated link is rewritten to the web route.
+// Push deep links come from the relay: accept exactly /threads/{environmentId}/{threadId}
+// (shared with mobile's normalizeThreadDeepLink), else the app root. The web router has
+// no /threads prefix, so a valid link is rewritten to /{environmentId}/{threadId}.
 function threadDeepLinkFromPayload(data) {
   const deepLink = typeof data?.deepLink === "string" ? data.deepLink : "";
   if (

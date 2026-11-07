@@ -1,17 +1,8 @@
 /**
- * Manager/worker model guardrail for Claude sessions, plus the generic SDK
- * hook plumbing it rides on.
- *
- * No subagent may run on a manager-tier model (the Fable family). An `Agent`
- * (formerly `Task`) spawn that would inherit or request one is downgraded to
- * the worker fallback, and a `Bash` command that dispatches a headless worker
- * (`claude -p --model …`, `codex exec -m …`) has manager models rewritten.
- * It runs as a `PreToolUse` hook because the SDK never consults `canUseTool`
- * for auto-allowed tools, and `Agent` is auto-allowed in every mode.
- *
- * `mergeClaudeSdkHooks` is the one place hook sets are combined, so other
- * features (the S4 tool-result sieve's `PostToolUse`) add matchers without
- * replacing the guardrail.
+ * Manager/worker model guardrail for Claude sessions: no subagent may run on a manager-tier model
+ * (the Fable family). An `Agent` (formerly `Task`) spawn that would inherit or request one is
+ * downgraded to the worker fallback, and a `Bash` headless-worker dispatch (`claude -p --model …`,
+ * `codex exec -m …`) has manager models rewritten.
  */
 import type {
   CanUseTool,
@@ -72,8 +63,9 @@ export function maybeDowngradeBashWorkerModel(toolName: string, toolInput: ToolI
 }
 
 /**
- * The guardrail's `PreToolUse` hooks. `sessionModel` is read at call time so a
- * live model switch is honoured.
+ * The guardrail's `PreToolUse` hooks: the SDK never consults `canUseTool` for auto-allowed tools,
+ * and `Agent` is auto-allowed in every mode. `sessionModel` is read at call time so a live model
+ * switch is honoured.
  */
 export function makeClaudeModelGuardrailHooks(input: {
   readonly sessionModel: () => string | undefined;
@@ -103,7 +95,11 @@ export function makeClaudeModelGuardrailHooks(input: {
   };
 }
 
-/** Concatenates hook matchers per event; earlier sets run first. */
+/**
+ * Concatenates hook matchers per event; earlier sets run first. The one place hook sets are
+ * combined, so other features (the S4 tool-result sieve's `PostToolUse`) add matchers without
+ * replacing the guardrail.
+ */
 export function mergeClaudeSdkHooks(
   ...sets: ReadonlyArray<ClaudeSdkHooks | undefined>
 ): ClaudeSdkHooks {

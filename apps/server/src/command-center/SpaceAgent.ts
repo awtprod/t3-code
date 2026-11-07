@@ -410,7 +410,7 @@ const make = Effect.gen(function* () {
 
   const resolveScope: SpaceAgentShape["resolveScope"] = (threadId) => {
     const spaceId = spaceIdFromSpaceAgentThreadId(threadId);
-    if (spaceId === undefined) return Effect.succeed(undefined);
+    if (spaceId === undefined) return Effect.undefined;
     return service.getConfiguredSpace(spaceId).pipe(
       Effect.map(spaceAgentScope),
       // An unknown, archived, or unreadable Space grants nothing.

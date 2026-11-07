@@ -4,11 +4,7 @@ import { memo } from "react";
 
 import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import {
-  ComposerControlIcon,
-  ComposerControlSeparator,
-  ComposerSelectControl,
-} from "./ComposerControl";
+import { ComposerControlIcon, ComposerSelectControl } from "./ComposerControl";
 import { useComposerMenuProps } from "./composerEventScope";
 import { useComposerMenuState } from "./useComposerMenuState";
 
@@ -63,7 +59,6 @@ export const EfficiencyRoutingControl = memo(function EfficiencyRoutingControl(p
 
   return (
     <>
-      <ComposerControlSeparator size={size} />
       <Tooltip>
         <Select
           open={open}

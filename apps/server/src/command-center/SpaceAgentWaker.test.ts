@@ -56,7 +56,7 @@ const makeAgentDouble = () => {
   const service = SpaceAgent.SpaceAgent.of({
     list: Effect.succeed([]),
     ensureThread: () => Effect.die("unused"),
-    resolveScope: () => Effect.succeed(undefined),
+    resolveScope: () => Effect.undefined,
     sendTurn: (spaceId, input) =>
       Effect.suspend(() => {
         if (control.failWith !== undefined) {

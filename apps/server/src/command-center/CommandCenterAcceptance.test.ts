@@ -524,6 +524,7 @@ const unusedProviderRegistry = ProviderRegistry.ProviderRegistry.of({
   getProviders: Effect.die("Provider lookup is not used by this acceptance path."),
   refresh: () => Effect.die("Provider refresh is not used by this acceptance path."),
   refreshInstance: () => Effect.die("Provider refresh is not used by this acceptance path."),
+  refreshAfterUpdate: () => Effect.die("Provider refresh is not used by this acceptance path."),
   refreshWorkspaceSnapshot: () =>
     Effect.die("Provider refresh is not used by this acceptance path."),
   getProviderMaintenanceCapabilitiesForInstance: () =>

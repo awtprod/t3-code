@@ -104,7 +104,7 @@ export class ElectronDialog extends Context.Service<
   }
 >()("@t3tools/desktop/electron/ElectronDialog") {}
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = ElectronDialog.of({
   pickFolder: Effect.fn("desktop.electron.dialog.pickFolder")(function* (input) {
     const ownerWindowId = Option.match(input.owner, {
@@ -140,15 +140,8 @@ export const make = ElectronDialog.of({
     }
     return Option.fromNullishOr(result.filePaths[0]);
   }),
-  // KEPT HEAD VERSION — needs human review. origin/main also declared a
-  // `confirm` dialog method here, but its body in the diff3 conflict was
-  // textually identical/misaligned with `pickFiles`'s open-file-dialog body
-  // (using ElectronDialogPickFilesError and openFile dialog options for a
-  // function that should return a boolean from a message box). That looked
-  // like a merge/rebase artifact rather than real confirm() logic, and
-  // `confirm` has no callers anywhere in apps/desktop, so it was dropped
-  // here to match HEAD. If a real confirm() dialog is needed, it should be
-  // reimplemented from scratch using showMessageBox.
+  // No `confirm` method: it has no callers in apps/desktop. If one is needed,
+  // build it on showMessageBox, not on pickFiles' open-file-dialog body.
   pickFiles: Effect.fn("desktop.electron.dialog.pickFiles")(function* (input) {
     const ownerWindowId = Option.match(input.owner, {
       onNone: () => null,
@@ -175,8 +168,8 @@ export const make = ElectronDialog.of({
     });
     return result.canceled ? [] : result.filePaths;
   }),
-  showMessageBox: (options, owner) =>
-    Effect.tryPromise({
+  showMessageBox: Effect.fn("ElectronDialog.showMessageBox")(function (options, owner) {
+    return Effect.tryPromise({
       try: () =>
         owner === undefined
           ? Electron.dialog.showMessageBox(options)
@@ -190,9 +183,10 @@ export const make = ElectronDialog.of({
           buttonCount: options.buttons?.length ?? 0,
           cause,
         }),
-    }),
-  showErrorBox: (title, content) =>
-    Effect.try({
+    });
+  }),
+  showErrorBox: Effect.fn("ElectronDialog.showErrorBox")(function (title, content) {
+    return Effect.try({
       try: () => Electron.dialog.showErrorBox(title, content),
       catch: (cause) =>
         new ElectronDialogShowErrorBoxError({
@@ -200,7 +194,8 @@ export const make = ElectronDialog.of({
           contentLength: content.length,
           cause,
         }),
-    }).pipe(Effect.orDie),
+    }).pipe(Effect.orDie);
+  }),
 });
 
 export const layer = Layer.succeed(ElectronDialog, make);

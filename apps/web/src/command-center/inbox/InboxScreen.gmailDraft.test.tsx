@@ -33,7 +33,7 @@ vi.mock("../../state/use-atom-command", () => ({
 
 const { InboxDetailPane } = await import("./InboxScreen");
 
-const space = Schema.decodeUnknownSync(Space)({
+const space = Schema.decodeSync(Space)({
   id: GMAIL_DRAFT_DETAIL.state.spaceId,
   slug: "qa-space",
   displayName: "QA Space",

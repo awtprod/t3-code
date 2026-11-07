@@ -121,7 +121,7 @@ describe("describeCodexPermissionRequest", () => {
       ),
     );
 
-    NodeAssert.equal(detail, "read: /a — inspect the workspace");
+    NodeAssert.equal(detail, "read: /a (inspect the workspace)");
   });
 
   it("collapses long path lists instead of rendering an unreadable prompt", () => {

@@ -398,6 +398,7 @@ export function buildAnswersFromTypesafe(
 const RETRYABLE_STATUSES = new Set([429, 529]);
 const RETRY_BACKOFF = Duration.millis(1000);
 /** No price tables: every judge call stays unpriced (null cost, never $0). */
+// @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
 const NO_RATE_TABLES: Effect.Effect<UsageRateTables | undefined> = Effect.succeed(undefined);
 
 interface RawHttpResult {
@@ -699,10 +700,9 @@ const runRequestWithRetry = (
 ): Effect.Effect<RequestOutcome, JudgeError> => {
   const once = runRequestOnce(config, fetchImpl, request, stateString);
   return once.pipe(
-    Effect.catch((error) =>
-      error.reason === "rate-limited"
-        ? Effect.sleep(RETRY_BACKOFF).pipe(Effect.andThen(once))
-        : Effect.fail(error),
+    Effect.catchIf(
+      (error) => error.reason === "rate-limited",
+      () => Effect.sleep(RETRY_BACKOFF).pipe(Effect.andThen(once)),
     ),
   );
 };
@@ -937,7 +937,7 @@ const make = Effect.gen(function* () {
     ),
     // Swallow inside the fiber so a settings-stream fault leaves `enabled`
     // pinned at its last value rather than killing the forked fiber.
-    Effect.catchCause(() => Effect.void),
+    Effect.ignoreCause,
     Effect.forkScoped,
   );
 

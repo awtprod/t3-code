@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off - Exercises the non-Effect launcher-boundary guard with real OS processes.
+// @effect-diagnostics nodeBuiltinImport:off - Exercises the non-Effect launcher-boundary guard with real OS processes.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -18,19 +18,6 @@ import {
   writeLock,
   type DevRunnerLock,
 } from "./dev-process-guard.ts";
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
-const waitForDeath = async (pid: number, timeoutMs = 3000): Promise<boolean> => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!isProcessAlive(pid)) {
-      return true;
-    }
-    await sleep(50);
-  }
-  return !isProcessAlive(pid);
-};
 
 describe("dev-process-guard lock file", () => {
   it("round-trips a lock and reports missing/garbage as undefined", () => {
@@ -128,18 +115,23 @@ describe("dev-process-guard reaper", () => {
       { detached: true, stdio: ["ignore", "pipe", "ignore"] },
     );
     child.unref();
+    // The grandchild inherits the stdout pipe, so `close` fires only once leader and grandchild are gone.
+    const closed = new Promise<NodeJS.Signals | null>((resolve) =>
+      child.once("close", (_code, signal) => resolve(signal)),
+    );
 
     const leaderPid = child.pid;
     assert.ok(leaderPid !== undefined && leaderPid > 1);
 
     const grandchildPid = await new Promise<number>((resolve, reject) => {
       let buffer = "";
-      const timer = setTimeout(() => reject(new Error("no grandchild pid")), 3000);
+      child.once("exit", () =>
+        reject(new Error("leader exited before printing the grandchild pid")),
+      );
       child.stdout?.on("data", (chunk: Buffer) => {
         buffer += chunk.toString("utf8");
         const line = buffer.split("\n")[0]?.trim();
         if (line && /^\d+$/.test(line)) {
-          clearTimeout(timer);
           resolve(Number(line));
         }
       });
@@ -153,8 +145,11 @@ describe("dev-process-guard reaper", () => {
       const signalled = await reapProcessGroup(leaderPid as number, { graceMs: 1500 });
       assert.strictEqual(signalled, true);
 
-      assert.ok(await waitForDeath(leaderPid as number), "leader must be reaped");
-      assert.ok(await waitForDeath(grandchildPid), "grandchild must be reaped via the group");
+      const leaderSignal = await closed;
+      assert.ok(
+        leaderSignal === "SIGTERM" || leaderSignal === "SIGKILL",
+        `leader must be reaped by a group signal, got ${String(leaderSignal)}`,
+      );
     } finally {
       // Belt-and-suspenders: ensure nothing survives a failed assertion.
       try {

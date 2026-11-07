@@ -162,6 +162,7 @@ pnpm dist:desktop:artifact -- --platform linux --target AppImage --arch arm64
 Install Visual Studio 2022 Build Tools with **Desktop development with C++**, Python 3, and Rust's
 MSVC toolchain. In PowerShell, add the desired Rust target and build the installer:
 
+- [FAQ](./docs/user/faq.md)
 - [Install and first run](./docs/user/install.md)
 - [Permission modes](./docs/user/permission-modes.md)
 - [Keyboard shortcuts](./docs/user/keybindings.md)

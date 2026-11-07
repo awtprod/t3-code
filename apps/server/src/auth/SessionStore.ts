@@ -1,11 +1,11 @@
 import {
   AuthSessionId,
-  AuthAdministrativeScopes,
   AuthStandardClientScopes,
   AuthEnvironmentScopes,
   type AuthClientMetadata,
   type AuthClientSession,
   type AuthEnvironmentScope,
+  AuthWebSocketTicketUse,
   type ClientSurface,
   RuntimeMode,
   type ServerAuthSessionMethod,
@@ -61,8 +61,13 @@ export interface VerifiedSession {
   readonly subject: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
-  /** The most an MCP client approved through OAuth may hand to the threads it drives. */
   readonly runtimeModeCeiling?: RuntimeMode;
+  /** An MCP client that is another T3 Code environment's peer link. */
+  readonly peerLink?: true;
+}
+
+export interface VerifiedWebSocketTicket extends VerifiedSession {
+  readonly audience?: AuthWebSocketTicketUse;
 }
 
 export type SessionCredentialChange =
@@ -380,12 +385,8 @@ export class SessionStore extends Context.Service<
       readonly client?: AuthClientMetadata;
       readonly proofKeyThumbprint?: string;
       readonly runtimeModeCeiling?: RuntimeMode;
-      /**
-       * Atomically revoke active sessions with the same subject and method
-       * before storing this session.
-       */
+      readonly peerLink?: boolean;
       readonly replaceActiveForSubjectAndMethod?: boolean;
-      /** Replace only this session, of the same method, in the issuance transaction. */
       readonly replaceSessionId?: AuthSessionId;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
     /**
@@ -400,6 +401,9 @@ export class SessionStore extends Context.Service<
         readonly subject: string;
         readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
         readonly client: AuthClientMetadata;
+        // Signed limits of the previous session; a successor must not shed them.
+        readonly runtimeModeCeiling?: RuntimeMode;
+        readonly peerLink?: boolean;
       },
     ) => Effect.Effect<Option.Option<IssuedSession>, SessionCredentialInternalError>;
     readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
@@ -407,6 +411,8 @@ export class SessionStore extends Context.Service<
       sessionId: AuthSessionId,
       input?: {
         readonly ttl?: Duration.Duration;
+        readonly audience?: AuthWebSocketTicketUse;
+        readonly proofKeyThumbprint?: string;
       },
     ) => Effect.Effect<
       {
@@ -417,7 +423,7 @@ export class SessionStore extends Context.Service<
     >;
     readonly verifyWebSocketToken: (
       token: string,
-    ) => Effect.Effect<VerifiedSession, SessionCredentialError>;
+    ) => Effect.Effect<VerifiedWebSocketTicket, SessionCredentialError>;
     readonly listActive: () => Effect.Effect<
       ReadonlyArray<AuthClientSession>,
       SessionCredentialInternalError
@@ -460,6 +466,8 @@ const SessionClaims = Schema.Struct({
   method: Schema.Literals(["browser-session-cookie", "bearer-access-token", "dpop-access-token"]),
   jkt: Schema.optionalKey(Schema.String),
   rtc: Schema.optionalKey(RuntimeMode),
+  /** Signed, so a client cannot shed its peer link's limits. */
+  plk: Schema.optionalKey(Schema.Literal(1)),
   iat: Schema.Number,
   exp: Schema.Number,
 });
@@ -469,6 +477,8 @@ const WebSocketClaims = Schema.Struct({
   v: Schema.Literal(1),
   kind: Schema.Literal("websocket"),
   sid: AuthSessionId,
+  aud: Schema.optionalKey(AuthWebSocketTicketUse),
+  jkt: Schema.optionalKey(Schema.String),
   iat: Schema.Number,
   exp: Schema.Number,
 });
@@ -591,7 +601,7 @@ export const make = Effect.gen(function* () {
       .createIfAbsent({
         sessionId: devAuth.sessionId,
         subject: "reusable-dev-token",
-        scopes: AuthAdministrativeScopes,
+        scopes: AuthStandardClientScopes,
         method: "browser-session-cookie",
         client: {
           label: "Reusable dev token",
@@ -628,31 +638,32 @@ export const make = Effect.gen(function* () {
    * live session, connected if a client is still on any live session of the
    * chain. `hiddenSessionIds` are the chain's older live sessions it stands for.
    */
-  const resolveVisibleSession = (sessionId: AuthSessionId) =>
-    Effect.gen(function* () {
-      const lineage = yield* authSessions.listLineage({ sessionId });
-      const connectedSessions = yield* Ref.get(connectedSessionsRef);
-      const now = yield* DateTime.now;
-      const live = lineage.filter(
-        (row) =>
-          row.revokedAt === null &&
-          (connectedSessions.has(row.sessionId) ||
-            row.expiresAt.epochMilliseconds > now.epochMilliseconds),
-      );
-      const newest = live.at(-1);
-      if (newest === undefined) {
-        return {
-          visible: Option.none<AuthClientSession>(),
-          hiddenSessionIds: [] as ReadonlyArray<AuthSessionId>,
-        };
-      }
+  const resolveVisibleSession = Effect.fn("SessionStore.resolveVisibleSession")(function* (
+    sessionId: AuthSessionId,
+  ) {
+    const lineage = yield* authSessions.listLineage({ sessionId });
+    const connectedSessions = yield* Ref.get(connectedSessionsRef);
+    const now = yield* DateTime.now;
+    const live = lineage.filter(
+      (row) =>
+        row.revokedAt === null &&
+        (connectedSessions.has(row.sessionId) ||
+          row.expiresAt.epochMilliseconds > now.epochMilliseconds),
+    );
+    const newest = live.at(-1);
+    if (newest === undefined) {
       return {
-        visible: Option.some(toCollapsedClientSession(newest, live, connectedSessions)),
-        hiddenSessionIds: live
-          .filter((row) => row.sessionId !== newest.sessionId)
-          .map((row) => row.sessionId),
+        visible: Option.none<AuthClientSession>(),
+        hiddenSessionIds: [] as ReadonlyArray<AuthSessionId>,
       };
-    });
+    }
+    return {
+      visible: Option.some(toCollapsedClientSession(newest, live, connectedSessions)),
+      hiddenSessionIds: live
+        .filter((row) => row.sessionId !== newest.sessionId)
+        .map((row) => row.sessionId),
+    };
+  });
 
   const publishLineage = (
     sessionId: AuthSessionId,
@@ -757,6 +768,7 @@ export const make = Effect.gen(function* () {
       method: input?.method ?? "browser-session-cookie",
       ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
       ...(input?.runtimeModeCeiling ? { rtc: input.runtimeModeCeiling } : {}),
+      ...(input?.peerLink === true ? { plk: 1 as const } : {}),
       iat: issuedAt.epochMilliseconds,
       exp: expiresAt.epochMilliseconds,
     };
@@ -982,6 +994,7 @@ export const make = Effect.gen(function* () {
         scopes: claims.scopes,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
         ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
+        ...(claims.plk === 1 ? { peerLink: true as const } : {}),
       } satisfies VerifiedSession;
     },
   );
@@ -998,6 +1011,8 @@ export const make = Effect.gen(function* () {
       v: 1,
       kind: "websocket",
       sid: sessionId,
+      ...(input?.audience ? { aud: input.audience } : {}),
+      ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
       iat: issuedAt.epochMilliseconds,
       exp: expiresAt.epochMilliseconds,
     };
@@ -1090,7 +1105,9 @@ export const make = Effect.gen(function* () {
       expiresAt: row.value.expiresAt,
       subject: row.value.subject,
       scopes: row.value.scopes,
-    } satisfies VerifiedSession;
+      ...(claims.aud ? { audience: claims.aud } : {}),
+      ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
+    } satisfies VerifiedWebSocketTicket;
   });
 
   const listActive: SessionStore["Service"]["listActive"] = Effect.fn("SessionStore.listActive")(

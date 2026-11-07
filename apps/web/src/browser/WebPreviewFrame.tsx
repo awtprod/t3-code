@@ -7,7 +7,7 @@
 "use client";
 
 import type { PreviewNavStatus, ScopedThreadRef } from "@t3tools/contracts";
-import { useCallback, useRef } from "react";
+import { useRef } from "react";
 
 import { previewEnvironment } from "~/state/preview";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -15,19 +15,10 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { resolveWebPreviewFrameState } from "./webPreviewFrameState";
 
 /**
- * The preview surface for a plain browser, where there is no Electron
- * `<webview>` to position over the panel.
- *
- * This is an iframe rather than a popped-out tab because the preview panel is
- * the point: the user wants the running app beside the thread that is changing
- * it. Framing only works because the gateway is mounted at the root of its own
- * origin, so the dev server inside the frame sees itself at `/`.
- *
- * What the desktop surface has and this one does not, honestly: no in-frame URL
- * tracking, no history, no screenshot/element-pick, no device viewport. All of
- * those need to read or drive the guest document, which the same-origin policy
- * forbids for a cross-origin frame. The affordances that depend on them are
- * already gated on the desktop bridge at their call sites.
+ * Preview surface for a plain browser (no Electron `<webview>`): an iframe onto
+ * the gateway, which is mounted at its own origin root. URL tracking, history,
+ * screenshots, element-pick and device viewport are unavailable because they
+ * need to read the cross-origin guest document.
  */
 export function WebPreviewFrame(props: {
   readonly threadRef: ScopedThreadRef;
@@ -41,12 +32,10 @@ export function WebPreviewFrame(props: {
   const frame = resolveWebPreviewFrameState({ navStatus, reloadNonce });
   const reportedRef = useRef<string | null>(null);
 
-  const handleLoad = useCallback(() => {
+  const handleLoad = () => {
     if (!frame) return;
-    // `load` is the only navigation signal a cross-origin frame gives us, and
-    // it fires again on every reload, so dedupe on the URL we last reported.
-    // Without this the server's snapshot would stay `Loading` forever and the
-    // chrome row would show a permanent progress bar.
+    // `load` is the only navigation signal a cross-origin frame gives, and it
+    // refires on every reload, so dedupe on the last reported URL.
     if (reportedRef.current === frame.key) return;
     reportedRef.current = frame.key;
     void reportStatus({
@@ -61,7 +50,7 @@ export function WebPreviewFrame(props: {
         canGoForward: false,
       },
     });
-  }, [frame, reportStatus, tabId, threadRef]);
+  };
 
   if (!frame) return null;
 
@@ -72,16 +61,9 @@ export function WebPreviewFrame(props: {
       onLoad={handleLoad}
       title="Preview"
       className={className}
-      /*
-       * Deliberately unsandboxed. The guest is the user's own app under test,
-       * reached through their own authenticated gateway — it needs scripts,
-       * storage, workers, and its own origin, and a sandbox that grants all of
-       * those (`allow-scripts allow-same-origin`) is equivalent to none while
-       * additionally breaking service-worker registration.
-       *
-       * It is not our origin either way: the gateway always answers on a
-       * different port from the app, so the frame cannot reach this document.
-       */
+      // Deliberately unsandboxed: a sandbox granting what the guest needs
+      // (`allow-scripts allow-same-origin`) is equivalent to none and breaks
+      // service-worker registration. The gateway is a different origin anyway.
       referrerPolicy="no-referrer"
       data-web-preview-frame={tabId}
     />

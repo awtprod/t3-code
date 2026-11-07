@@ -7,28 +7,7 @@ import {
   codexAppServerArgs,
   codexExecLaunchArgs,
   codexRequestUserInputFeatureArgs,
-  resolveCodexLaunchArgs,
 } from "./codexLaunchArgs.ts";
-
-describe("resolveCodexLaunchArgs", () => {
-  it("uses T3CODE_CODEX_LAUNCH_ARGS before configured settings", () => {
-    NodeAssert.equal(
-      resolveCodexLaunchArgs(" --strict-config ", { T3CODE_CODEX_LAUNCH_ARGS: "--enable foo" }),
-      "--enable foo",
-    );
-  });
-
-  it("uses configured settings when T3CODE_CODEX_LAUNCH_ARGS is empty", () => {
-    NodeAssert.equal(
-      resolveCodexLaunchArgs(" --strict-config ", { T3CODE_CODEX_LAUNCH_ARGS: "   " }),
-      "--strict-config",
-    );
-  });
-
-  it("ignores whitespace-only environment values", () => {
-    NodeAssert.equal(resolveCodexLaunchArgs("", { T3CODE_CODEX_LAUNCH_ARGS: "   " }), "");
-  });
-});
 
 describe("codexAppServerArgs", () => {
   it("returns the app-server command for empty launch args", () => {
@@ -48,6 +27,20 @@ describe("codexAppServerArgs", () => {
       "-c",
       `features.${CODEX_REQUEST_USER_INPUT_FEATURE}=true`,
     ]);
+  });
+
+  it("preserves escaped TOML quotes in config values", () => {
+    NodeAssert.deepStrictEqual(
+      codexAppServerArgs(String.raw`--config model=\"gpt-6.1-sol\" --strict-config`),
+      [
+        "app-server",
+        "--config",
+        'model="gpt-6.1-sol"',
+        "--strict-config",
+        "-c",
+        `features.${CODEX_REQUEST_USER_INPUT_FEATURE}=true`,
+      ],
+    );
   });
 
   it("skips the request-user-input default when launch args configure it", () => {

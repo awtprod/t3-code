@@ -2,7 +2,9 @@ import {
   AntigravitySettings,
   ClaudeSettings,
   CodexSettings,
+  EasDeviceHostConfig,
   type ServerSettings,
+  SimlockDeviceHostConfig,
   UsageLimitSourceConfig,
   secretSettingsFields,
 } from "@t3tools/contracts";
@@ -31,6 +33,8 @@ const providerSecretFields = new Map([
   ),
 ]);
 const usageLimitSecretFields = secretSettingsFields(UsageLimitSourceConfig);
+const easDeviceHostSecretFields = secretSettingsFields(EasDeviceHostConfig);
+const simlockDeviceHostSecretFields = secretSettingsFields(SimlockDeviceHostConfig);
 const encode = (value: string) => Buffer.from(value, "utf8").toString("base64url");
 
 export interface SettingsSecret {
@@ -46,10 +50,6 @@ export interface SettingsSecret {
 
 type SecretValue = Pick<SettingsSecret, "value" | "redacted">;
 
-/**
- * Visits credential fields declared by schemas and dynamically sensitive environment variables.
- * Store keys and client representations stay here; callers supply only the secret operation.
- */
 export function mapSettingsSecrets(
   settings: ServerSettings,
   map: (secret: SettingsSecret) => SecretValue,
@@ -147,6 +147,29 @@ export function mapSettingsSecrets(
     ]),
   ) as ServerSettings["usageLimitSources"];
 
+  const easDeviceHosts = settings.easDeviceHosts.map(
+    (host) =>
+      mapFields(
+        host,
+        easDeviceHostSecretFields,
+        (field, serverHost) =>
+          `device-host-${encode(host.id)}-${encode(field)}` +
+          (serverHost === null ? "" : `-${encode(serverHost)}`),
+      ) as EasDeviceHostConfig,
+  );
+
+  // Its own prefix: an EAS and a Simlock host may share an id.
+  const simlockDeviceHosts = settings.simlockDeviceHosts.map(
+    (host) =>
+      mapFields(
+        host,
+        simlockDeviceHostSecretFields,
+        (field, serverHost) =>
+          `simlock-device-host-${encode(host.id)}-${encode(field)}` +
+          (serverHost === null ? "" : `-${encode(serverHost)}`),
+      ) as SimlockDeviceHostConfig,
+  );
+
   // Database connection access tokens keep the fork's on-disk shape (empty
   // token + `accessTokenRedacted`) and store key, so tokens saved before the
   // V2 re-platform stay readable.
@@ -177,6 +200,8 @@ export function mapSettingsSecrets(
     providerInstances,
     sourceControlHosts,
     usageLimitSources,
+    easDeviceHosts,
+    simlockDeviceHosts,
     databaseConnections,
   };
 }

@@ -1,4 +1,3 @@
-import { autoAnimate } from "@formkit/auto-animate";
 import { useAtomValue } from "@effect/atom-react";
 import {
   canSnooze,
@@ -6,6 +5,7 @@ import {
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
 import {
+  formatWorkingDurationLabel,
   threadRuntimeCanArchive,
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/models";
@@ -16,6 +16,7 @@ import {
 } from "@t3tools/client-runtime/environment";
 import {
   AuthOrchestrationOperateScope,
+  type EnvironmentId,
   type ScopedThreadRef,
   type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
@@ -80,10 +81,10 @@ import { isMacPlatform } from "~/lib/utils";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { readLocalApi } from "../localApi";
 import {
-  deriveProjectGroupingOverrideKey,
+  derivePhysicalProjectKey,
   getProjectOrderKey,
   selectProjectGroupingSettings,
-} from "../logicalProject";
+} from "@t3tools/client-runtime/state/project-grouping";
 import {
   buildSidebarProjectSnapshots,
   type SidebarProjectGroupMember,
@@ -95,7 +96,7 @@ import { useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { openCommandPalette } from "../commandPaletteBus";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
-import { useClientSettings, useUpdateClientSettings } from "../hooks/useSettings";
+import { updateClientSettings, useClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { useThreadPlanProgress } from "../command-center/threadPlanProgress";
@@ -113,13 +114,16 @@ import {
   resolveActiveThreadRouteRef,
   resolveThreadRouteTarget,
 } from "../threadRoutes";
-import { formatRelativeTimeLabel, parseTimestampDate } from "../timestampFormat";
+import {
+  formatRelativeTimeLabel,
+  formatShortTimestamp,
+  parseTimestampDate,
+} from "../timestampFormat";
 import type { SidebarThreadSummary } from "../types";
 import { cn } from "~/lib/utils";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
 import {
   buildBulkTitleRegenerationContextMenuItem,
-  formatWorkingDurationLabel,
   firstValidTimestampMs,
   hasUnseenCompletion,
   isTrailingDoubleClick,
@@ -137,20 +141,15 @@ import {
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
   prStatusIndicator,
-  resolveThreadPr,
+  resolveDisplayedThreadPr,
   terminalStatusFromRunningIds,
   type TerminalStatusIndicator,
   type ThreadPr,
 } from "./ThreadStatusIndicators";
-import {
-  resolveSnoozePresets,
-  snoozeWakeDescription,
-  snoozeWakeLabel,
-  type SnoozePreset,
-} from "./Sidebar.snooze";
+import { resolveSnoozePresets, snoozeWakeLabel, type SnoozePreset } from "./Sidebar.snooze";
 import { ProjectFavicon, type ProjectFaviconProject } from "./ProjectFavicon";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
-import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
+import { getTriggerDisplayModelName } from "./chat/providerIconUtils";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
 import { primaryServerProvidersAtom } from "../state/server";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
@@ -178,6 +177,7 @@ import {
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { useComposerDraftStore } from "../composerDraftStore";
+import { createSidebarListMotion } from "./Sidebar.motion";
 
 // Settled-tail paging: recent history is the common lookup; the deep tail
 // stays behind an explicit Show more.
@@ -188,6 +188,28 @@ const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> =
   repository_path: "Group by repository path",
   separate: "Keep separate",
 };
+
+const DAY_MS = 24 * 60 * 60 * 1_000;
+
+/** Human wake time for toasts: "17:30" (today), "tomorrow 9:00", "Mon 9:00". */
+function snoozeWakeDescription(
+  snoozedUntil: string,
+  now: Date,
+  timestampFormat: TimestampFormat,
+): string {
+  const wake = parseTimestampDate(snoozedUntil);
+  if (wake === null) return "";
+  const time = formatShortTimestamp(wake.toISOString(), timestampFormat);
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const dayDelta = Math.floor((wake.getTime() - startOfToday.getTime()) / DAY_MS);
+  if (dayDelta === 0) return time;
+  if (dayDelta === 1) return `tomorrow ${time}`;
+  const weekday = wake.toLocaleDateString(undefined, { weekday: "short" });
+  if (dayDelta < 7) return `${weekday} ${time}`;
+  const date = wake.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return `${date}, ${time}`;
+}
 
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
@@ -248,7 +270,6 @@ function terminalProcessLabel(count: number): string {
 function SidebarV2ThreadTooltip({
   thread,
   projectTitle,
-  projectCwd,
   projectFavicon,
   environmentLabel,
   driverKind,
@@ -362,13 +383,14 @@ function SnoozePopoverButton(props: {
   onOpenChange: (open: boolean) => void;
   onSnooze: (preset: SnoozePreset) => void;
   timestampFormat: TimestampFormat;
+  environmentId: EnvironmentId;
 }) {
-  const { open, onOpenChange, onSnooze, timestampFormat } = props;
+  const { open, onOpenChange, onSnooze, timestampFormat, environmentId } = props;
   // Presets resolve at open time so "In 1 hour" is relative to the click,
   // not to when the row mounted.
   const presets = useMemo(
-    () => (open ? resolveSnoozePresets(new Date(), timestampFormat) : []),
-    [open, timestampFormat],
+    () => (open ? resolveSnoozePresets(new Date(), timestampFormat, environmentId) : []),
+    [environmentId, open, timestampFormat],
   );
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
@@ -519,7 +541,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
         })
       : null,
   );
-  const pr = resolveThreadPr({
+  const pr = resolveDisplayedThreadPr({
     threadBranch: thread.branch,
     gitStatus: gitStatus.data,
   });
@@ -628,7 +650,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
     (model) => model.slug === thread.modelSelection.model,
   );
   const modelLabel = selectedModel
-    ? getTriggerDisplayModelLabel(selectedModel)
+    ? getTriggerDisplayModelName(selectedModel, driverKind)
     : thread.modelSelection.model;
 
   const isRemote =
@@ -1140,6 +1162,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                         onOpenChange={setSnoozeMenuOpen}
                         onSnooze={handleSnoozePreset}
                         timestampFormat={props.timestampFormat}
+                        environmentId={thread.environmentId}
                       />
                     ) : null}
                     {props.settlementSupported ? (
@@ -1266,7 +1289,7 @@ const SidebarV2SearchResultRow = memo(function SidebarV2SearchResultRow(props: {
     (model) => model.slug === thread.modelSelection.model,
   );
   const modelLabel = selectedModel
-    ? getTriggerDisplayModelLabel(selectedModel)
+    ? getTriggerDisplayModelName(selectedModel, driverKind)
     : thread.modelSelection.model;
   const runningTerminalIds = useThreadRunningTerminalIds({
     environmentId: thread.environmentId,
@@ -1362,7 +1385,6 @@ export default function SidebarV2() {
   const updateProject = useAtomCommand(projectEnvironment.update, {
     reportFailure: false,
   });
-  const updateSettings = useUpdateClientSettings();
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({
@@ -1718,16 +1740,16 @@ export default function SidebarV2() {
 
   const updateProjectGroupingPreference = useCallback(
     (member: SidebarProjectGroupMember, selection: SidebarProjectGroupingMode | "inherit") => {
-      const overrideKey = deriveProjectGroupingOverrideKey(member);
+      const overrideKey = derivePhysicalProjectKey(member);
       const nextOverrides = { ...projectGroupingSettings.sidebarProjectGroupingOverrides };
       if (selection === "inherit") {
         delete nextOverrides[overrideKey];
       } else {
         nextOverrides[overrideKey] = selection;
       }
-      updateSettings({ sidebarProjectGroupingOverrides: nextOverrides });
+      void updateClientSettings({ sidebarProjectGroupingOverrides: nextOverrides });
     },
-    [projectGroupingSettings.sidebarProjectGroupingOverrides, updateSettings],
+    [projectGroupingSettings.sidebarProjectGroupingOverrides],
   );
 
   const handleProjectActions = useCallback(
@@ -1747,7 +1769,6 @@ export default function SidebarV2() {
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
   const { pinnedThreads, activeThreads, snoozedThreads, settledThreads, snoozeNow } =
     useMemo(() => {
-      const now = `${nowMinute}:00.000Z`;
       // Snooze classification uses a REAL clock, not the quantized minute:
       // wake times are second-precise and a woken thread must not linger on
       // the shelf for the rest of the minute. snoozeWakeTick re-runs this
@@ -1774,8 +1795,6 @@ export default function SidebarV2() {
           true;
         const supportsSnooze =
           serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSnooze === true;
-        const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-        const changeRequestState = changeRequestStateByKey.get(threadKey) ?? null;
         // Snooze outranks everything, including a pin: "hide until Tuesday"
         // temporarily suspends "keep on top". The pin survives underneath —
         // pinned cards are creation-ordered, so on wake the thread reappears
@@ -1827,10 +1846,13 @@ export default function SidebarV2() {
     () => [...pinnedThreads, ...activeThreads, ...snoozedThreads, ...settledThreads],
     [activeThreads, pinnedThreads, settledThreads, snoozedThreads],
   );
-  const threadSearchResults = useMemo(
-    () => searchSidebarThreads(searchableThreads, threadSearchQuery),
-    [searchableThreads, threadSearchQuery],
-  );
+  const threadSearchResults = useMemo(() => {
+    const { titleMatches, contentMatches } = searchSidebarThreads(
+      searchableThreads,
+      threadSearchQuery,
+    );
+    return [...titleMatches, ...contentMatches];
+  }, [searchableThreads, threadSearchQuery]);
   const threadSearchResultOrderKey = threadSearchResults
     .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))
     .join("\0");
@@ -2380,7 +2402,12 @@ export default function SidebarV2() {
         supportedCount: titleRegenerationThreads.length,
         actionableCount: regeneratableTitleThreads.length,
       });
-      const snoozePresets = resolveSnoozePresets(new Date(), timestampFormat);
+      // Presets sync across environments, so the first selected thread's stand for all.
+      const snoozePresets = resolveSnoozePresets(
+        new Date(),
+        timestampFormat,
+        selectedThreads[0]!.environmentId,
+      );
       const clicked = await settlePromise(() =>
         api.contextMenu.show(
           [
@@ -2602,7 +2629,11 @@ export default function SidebarV2() {
         const isSnoozed = snoozedThreadKeysRef.current.has(threadKey);
         const isPinned = thread.pinnedAt != null;
         // Presets resolve at menu-open time (same as the popover).
-        const snoozePresets = resolveSnoozePresets(new Date(), timestampFormat);
+        const snoozePresets = resolveSnoozePresets(
+          new Date(),
+          timestampFormat,
+          thread.environmentId,
+        );
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
@@ -2836,9 +2867,20 @@ export default function SidebarV2() {
     setShowJumpHints(shouldShowJumpHintsNow);
   }, [shouldShowJumpHintsNow]);
 
-  const attachListAutoAnimateRef = useCallback((node: HTMLUListElement | null) => {
-    if (!node) return;
-    autoAnimate(node, { duration: 150, easing: "ease-out" });
+  // Rows render from many sources, so animate on any child insert, removal, or reorder.
+  const attachListMotionRef = useCallback((node: HTMLUListElement) => {
+    const motion = createSidebarListMotion(node);
+    motion.update(false);
+    const observer = new MutationObserver(() => {
+      motion.update(true);
+      // Drop the records for fade clones that update() itself just appended.
+      observer.takeRecords();
+    });
+    observer.observe(node, { childList: true });
+    return () => {
+      observer.disconnect();
+      motion.dispose();
+    };
   }, []);
 
   // New thread defaults to the project you're in (active thread's project,
@@ -3113,7 +3155,7 @@ export default function SidebarV2() {
               closeDelay={0}
               timeout={400}
             >
-              <ul ref={attachListAutoAnimateRef} role="list" className="flex flex-col gap-px">
+              <ul ref={attachListMotionRef} role="list" className="relative flex flex-col gap-px">
                 {(() => {
                   const renderThreadRow = (
                     thread: EnvironmentThreadShell,
@@ -3415,7 +3457,7 @@ export default function SidebarV2() {
                       <Select
                         value={
                           projectGroupingSettings.sidebarProjectGroupingOverrides?.[
-                            deriveProjectGroupingOverrideKey(member)
+                            derivePhysicalProjectKey(member)
                           ] ?? "inherit"
                         }
                         onValueChange={(value) => {
@@ -3437,7 +3479,7 @@ export default function SidebarV2() {
                             {(() => {
                               const selection =
                                 projectGroupingSettings.sidebarProjectGroupingOverrides?.[
-                                  deriveProjectGroupingOverrideKey(member)
+                                  derivePhysicalProjectKey(member)
                                 ] ?? "inherit";
                               return selection === "inherit"
                                 ? `Default (${PROJECT_GROUPING_MODE_LABELS[projectGroupingSettings.sidebarProjectGroupingMode]})`

@@ -96,7 +96,7 @@ export function makeClaudeToolResultSieveHooks(
             return outcome.updatedToolOutput;
           }).pipe(
             Effect.timeout(SIEVE_HOOK_HARD_TIMEOUT),
-            Effect.catchCause(() => Effect.succeed(undefined)),
+            Effect.catchCause(() => Effect.void),
           ),
         );
         if (updatedToolOutput === undefined) return {};

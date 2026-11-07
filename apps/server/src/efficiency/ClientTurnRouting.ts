@@ -693,6 +693,7 @@ export const readsLayer = Layer.effect(
               ? { thread: records.thread, runs: records.runs }
               : undefined,
           ),
+          // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
           Effect.catchCause(() => Effect.succeed(undefined)),
         ),
       messageText: (messageId) =>
@@ -702,6 +703,7 @@ export const readsLayer = Layer.effect(
           WHERE message_id = ${messageId}
         `.pipe(
           Effect.map((rows) => rows[0]?.text ?? undefined),
+          // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
           Effect.catchCause(() => Effect.succeed(undefined)),
         ),
       recentConversation: (threadId, limit) =>

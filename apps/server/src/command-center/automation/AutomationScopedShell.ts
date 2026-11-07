@@ -125,10 +125,10 @@ export class AutomationScopedShell extends Context.Service<
 
 interface SecureFileIdentity {
   readonly type: FileSystem.File.Type;
-  readonly dev: number;
-  readonly ino: number | undefined;
+  readonly dev: bigint;
+  readonly ino: bigint | undefined;
   readonly mode: number;
-  readonly nlink: number | undefined;
+  readonly nlink: bigint | undefined;
   readonly uid: number | undefined;
   readonly size: string;
   readonly mtimeMs: number | undefined;
@@ -508,11 +508,11 @@ export const makeAutomationScopedShell = Effect.gen(function* () {
       readonly required: boolean;
     }) {
       const canonical = yield* fs.realPath(input.configPath).pipe(
-        Effect.map(Option.some),
+        Effect.asSome,
         Effect.catchTags({
           PlatformError: (cause) =>
             cause.reason._tag === "NotFound"
-              ? Effect.succeed(Option.none())
+              ? Effect.succeedNone
               : Effect.fail(
                   error(
                     "scope-denied",
@@ -544,7 +544,7 @@ export const makeAutomationScopedShell = Effect.gen(function* () {
       );
       if (
         before.type !== "File" ||
-        Option.getOrUndefined(before.nlink) !== 1 ||
+        Option.getOrUndefined(before.nlink) !== 1n ||
         before.size > MAX_LOCAL_GIT_CONFIG_BYTES
       ) {
         return yield* error(

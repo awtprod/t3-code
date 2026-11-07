@@ -20,7 +20,7 @@ import { layer as runtimeLayer } from "./Runtime.ts";
 const now = "2026-07-20T12:00:00.000Z";
 const commitSha = "1234567890abcdef1234567890abcdef12345678";
 const definitionDigest = `sha256:${"a".repeat(64)}`;
-const automation = Schema.decodeUnknownSync(Automation)({
+const automation = Schema.decodeSync(Automation)({
   id: "gate",
   spaceId: "space-a",
   name: "gate",

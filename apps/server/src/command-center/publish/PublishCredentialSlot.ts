@@ -43,7 +43,7 @@ export const makePublishCredentialSlot = Effect.fn("PublishCredentialSlot.make")
         onNone: () => Effect.succeed(Option.none<A>()),
         onSome: (bytes) =>
           decode(textDecoder.decode(bytes)).pipe(
-            Effect.map(Option.some),
+            Effect.asSome,
             Effect.mapError((cause) =>
               storageError(
                 `The stored ${input.label} credential is unreadable. Disconnect and connect again.`,

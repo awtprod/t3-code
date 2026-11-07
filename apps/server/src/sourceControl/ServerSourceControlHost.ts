@@ -1,9 +1,3 @@
-/**
- * The server's implementation of `SourceControlHost.SourceControlHost`, the only server surface
- * source control provider packages may use.
- *
- * @module sourceControl/ServerSourceControlHost
- */
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -21,7 +15,7 @@ export const layer = Layer.effect(
     const git = yield* GitVcsDriver.GitVcsDriver;
     const vcsRegistry = yield* VcsDriverRegistry.VcsDriverRegistry;
     return SourceControlHost.SourceControlHost.of({
-      settings: { get: serverSettings.getSettings },
+      settings: { get: serverSettings.getSettings, update: serverSettings.updateSettings },
       process: { run: process.run },
       git: {
         execute: git.execute,
@@ -35,6 +29,8 @@ export const layer = Layer.effect(
         fetchRemoteBranch: git.fetchRemoteBranch,
         fetchRemoteTrackingBranch: git.fetchRemoteTrackingBranch,
         setBranchUpstream: git.setBranchUpstream,
+        createBranch: git.createBranch,
+        writeConfigValue: git.writeConfigValue,
         switchRef: git.switchRef,
       },
     });

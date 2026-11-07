@@ -2,21 +2,10 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 /**
- * Fork-owned efficiency routing side channel for orchestration V2.
- *
- * V2 thread shells and start-turn commands carry no routing fields, and they
- * stay that way (upstream core types are not extended). Routing lives here:
- *
- * - `efficiency_thread_routing`: the composer's per-thread routing mode and
- *   tier, plus a one-shot "retry one tier higher" marker.
- * - `efficiency_run_decisions`: one routing decision per routed V2 run (the
- *   user-facing turn), read by the usage report's tier columns and by sticky
- *   routing.
- * - `efficiency_delegations`: child threads auto-routing forked for a parent.
- *
- * Threads keep their V1 ids through the legacy importer, so V1 routing state
- * (`projection_threads.routing_mode` / `efficiency_tier`, migration 54) is
- * carried over for threads that were not plain manual.
+ * Fork-owned efficiency routing side channel for orchestration V2, whose thread
+ * shells and start-turn commands carry no routing fields. Routing lives in
+ * `efficiency_thread_routing`, `efficiency_run_decisions` (read by the usage
+ * report and sticky routing) and `efficiency_delegations` (auto-routed children).
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -65,6 +54,9 @@ export default Effect.gen(function* () {
     ON efficiency_delegations(child_thread_id)
   `;
 
+  // Threads keep their V1 ids through the legacy importer, so V1 routing state
+  // (`projection_threads.routing_mode` / `efficiency_tier`, migration 54) is
+  // carried over for threads that were not plain manual.
   const legacyThreadColumns = yield* sql<{ readonly name: string }>`
     PRAGMA table_info(projection_threads)
   `;

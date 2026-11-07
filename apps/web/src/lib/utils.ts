@@ -5,9 +5,10 @@ import * as Hex from "effect/encoding/Hex";
 import { extendTailwindMerge } from "tailwind-merge";
 import { DraftId } from "../composerDraftStore";
 
-// The theme's extra font sizes and other tokens (index.css). Unregistered,
-// tailwind-merge reads text-2xs as a colour and drops it next to
-// text-muted-foreground; the cc-* shadows would likewise read as shadow colours.
+// The theme's extra font sizes, tokens, and composer-seam background images
+// (index.css). Unregistered, tailwind-merge reads text-2xs or
+// bg-composer-seam-below as colours and drops them; the cc-* shadows would
+// likewise read as shadow colours.
 const twMerge = extendTailwindMerge({
   extend: {
     theme: {
@@ -16,6 +17,7 @@ const twMerge = extendTailwindMerge({
       tracking: ["cc-heading"],
       shadow: ["cc-composer", "cc-composer-focus"],
     },
+    classGroups: { "bg-image": [{ bg: ["composer-seam-below", "composer-seam-above"] }] },
   },
 });
 

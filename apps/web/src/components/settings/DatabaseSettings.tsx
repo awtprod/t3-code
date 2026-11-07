@@ -8,7 +8,7 @@ import {
   StarIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
   DatabaseConnectionId,
   ProjectId,
@@ -171,10 +171,7 @@ export function validateConnectionLabel(
 export function DatabaseSettingsPanel() {
   const { environments, isReady } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const options = useMemo(
-    () => buildProviderEnvironmentOptions(environments, primaryEnvironmentId),
-    [environments, primaryEnvironmentId],
-  );
+  const options = buildProviderEnvironmentOptions(environments, primaryEnvironmentId);
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<EnvironmentId | null>(
     primaryEnvironmentId,
   );
@@ -242,36 +239,21 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
   const settings = useEnvironmentSettings(environmentId);
   const updateSettings = useUpdateEnvironmentSettings(environmentId);
   const allProjects = useProjects();
-  const projects = useMemo(
-    () =>
-      allProjects
-        .filter((project) => project.environmentId === environmentId)
-        .sort((left, right) => left.title.localeCompare(right.title)),
-    [allProjects, environmentId],
-  );
-  const projectsById = useMemo(
-    () => new Map(projects.map((project) => [project.id, project])),
-    [projects],
-  );
+  const projects = allProjects
+    .filter((project) => project.environmentId === environmentId)
+    .sort((left, right) => left.title.localeCompare(right.title));
+  const projectsById = new Map(projects.map((project) => [project.id, project]));
   const connections = settings.databaseConnections;
   const connectionCount = Object.keys(connections).length;
-  const projectSections = useMemo(
-    () =>
-      projects
-        .map((project) => ({
-          project,
-          connections: connectionsForProject(connections, project.id),
-        }))
-        .filter((section) => section.connections.length > 0),
-    [projects, connections],
-  );
-  const orphanedConnections = useMemo(
-    () =>
-      Object.entries(connections)
-        .filter(([, connection]) => !projectsById.has(connection.projectId))
-        .map(([id, connection]) => [DatabaseConnectionId.make(id), connection] as const),
-    [connections, projectsById],
-  );
+  const projectSections = projects
+    .map((project) => ({
+      project,
+      connections: connectionsForProject(connections, project.id),
+    }))
+    .filter((section) => section.connections.length > 0);
+  const orphanedConnections = Object.entries(connections)
+    .filter(([, connection]) => !projectsById.has(connection.projectId))
+    .map(([id, connection]) => [DatabaseConnectionId.make(id), connection] as const);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingConnectionId, setEditingConnectionId] = useState<DatabaseConnectionId | null>(null);
@@ -667,7 +649,7 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
                 onChange={(event) => setAccessToken(event.target.value)}
                 placeholder={
                   existingConnection?.accessTokenRedacted
-                    ? "Stored securely — enter a new token to replace it"
+                    ? "Stored securely. Enter a new token to replace it."
                     : "sbp_..."
                 }
                 autoComplete="off"

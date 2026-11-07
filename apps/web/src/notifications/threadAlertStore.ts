@@ -1,17 +1,7 @@
 /**
- * Sidebar highlights for threads that changed while the user was away.
- *
- * OS Do Not Disturb silently swallows the notification banner (and its
- * sound), with no way for the app to detect that it happened. So the alert
- * has to survive being missed entirely: when a thread completes or fails
- * without the user watching it, its sidebar row is marked, and the mark
- * stays until they open the thread. Coming back from another app, another
- * desktop, or a Focus mode, the sidebar itself says what happened — even if
- * nothing was ever shown or heard.
- *
- * State is deliberately in-memory, not persisted. A highlight answers "what
- * happened while I was away just now"; restoring week-old marks on launch
- * would be noise.
+ * Sidebar highlights for threads that completed or failed while unwatched.
+ * Do Not Disturb can swallow the banner undetectably, so the mark stays until
+ * the thread is opened. In-memory on purpose: restored stale marks are noise.
  */
 import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";

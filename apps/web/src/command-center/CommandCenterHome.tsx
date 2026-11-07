@@ -1,5 +1,6 @@
 "use client";
 
+import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -13,7 +14,8 @@ import {
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import * as DateTime from "effect/DateTime";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { Atom } from "effect/reactivity";
+import type { EnvironmentId, ServerProvider, ThreadId } from "@t3tools/contracts";
 
 import { SidebarInset } from "~/components/ui/sidebar";
 import { newMessageId, newThreadId, randomUUID } from "~/lib/utils";
@@ -21,6 +23,7 @@ import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useProjects, useThreadShell } from "~/state/entities";
 import { useEnvironmentQuery } from "~/state/query";
 import { useThreadDetail } from "~/state/queries";
+import { EMPTY_SERVER_PROVIDERS, providersIgnoringCheckedAtAtom } from "~/state/server";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { commandCenterEnvironment } from "~/state/commandCenter";
@@ -67,6 +70,18 @@ const EMPTY_BOOTSTRAP_PROJECTION = {
     connections: [],
   },
 } as const;
+
+const noEnvironmentProvidersAtom = Atom.make<ReadonlyArray<ServerProvider>>(EMPTY_SERVER_PROVIDERS);
+
+function useEnvironmentProviders(
+  environmentId: EnvironmentId | null,
+): ReadonlyArray<ServerProvider> {
+  return useAtomValue(
+    environmentId === null
+      ? noEnvironmentProvidersAtom
+      : providersIgnoringCheckedAtAtom(environmentId),
+  );
+}
 
 function currentTimeLabel(): string {
   return new Date().toLocaleTimeString(undefined, {
@@ -144,11 +159,12 @@ export function CommandCenterHome({
   const routerEnvironment = environments.find(
     (environment) => environment.environmentId === environmentId,
   );
-  const providers = routerEnvironment?.serverConfig?.providers ?? [];
+  const providers = useEnvironmentProviders(routerEnvironment?.environmentId ?? null);
   const desktopEnvironment = resolveDesktopExecutionEnvironment(
     environmentCandidates,
     environmentId,
   );
+  const desktopProviders = useEnvironmentProviders(desktopEnvironment?.id ?? null);
   const [routeSelection, setRouteSelection] = useState<CommandCenterRouteSelection>({});
   const [conversationRoute, setConversationRoute] = useState<CommandCenterRouteSelection>({});
   const [spaceFilterId, setSpaceFilterId] = useState<string>();
@@ -701,9 +717,6 @@ export function CommandCenterHome({
           projects: environmentProjects,
           ...(selectedProject === undefined ? {} : { selectedProject }),
         });
-        const desktopProviders =
-          environments.find((environment) => environment.environmentId === desktopEnvironment.id)
-            ?.serverConfig?.providers ?? [];
         const modelSelection =
           workerProject === null
             ? null
@@ -922,8 +935,8 @@ export function CommandCenterHome({
       conversationRoute,
       createThread,
       desktopEnvironment,
+      desktopProviders,
       environmentProjects,
-      environments,
       bootstrapQuery,
       environmentId,
       isSubmitting,

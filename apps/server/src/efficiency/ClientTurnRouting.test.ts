@@ -25,6 +25,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 import * as ServerConfig from "../config.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 import type { OrchestratorV2DispatchResult } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
@@ -217,6 +218,7 @@ const makeLayer = (input: {
         ClientTurnRoutingReadsService,
         ClientTurnRoutingReadsService.of({
           thread: (threadId) => Effect.succeed(input.threads.get(threadId)),
+          // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
           messageText: () => Effect.succeed(undefined),
           recentConversation: () => Effect.succeed(input.conversation ?? []),
         }),
@@ -348,7 +350,7 @@ describe("auto routing on V2 client turns", () => {
           Effect.provideService(ThreadManagement.ThreadManagementService, intake),
           Effect.provide(
             ServerConfig.layerTest(process.cwd(), { prefix: "s4-routing-ws-" }).pipe(
-              Layer.provideMerge(NodeServices.layer),
+              Layer.provideMerge(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
             ),
           ),
         );

@@ -44,13 +44,13 @@ describe("AuthSessionRepository renewal lineage", () => {
       const sessions = yield* AuthSessions.AuthSessionRepository;
       yield* sessions.create(session("original"));
 
-      const results = yield* Effect.all(
-        ["successor-a", "successor-b", "successor-c"].map((sessionId) =>
+      const results = yield* Effect.forEach(
+        ["successor-a", "successor-b", "successor-c"],
+        (sessionId) =>
           sessions.createRenewal({
             previousSessionId: AuthSessionId.make("original"),
             session: successor(sessionId),
           }),
-        ),
         { concurrency: "unbounded" },
       );
 

@@ -73,23 +73,10 @@ const codexModelSelection = {
 };
 
 /**
- * A V1 database as it exists on disk before a V2 server first opens it. The
- * fork renumbered upstream's migrations (see persistence/Migrations.ts):
- * upstream 40 (ProjectFaviconPath) is 63 here, upstream 41
- * (AuthSessionClientConnection) is 65, and upstream's 42-49 tail is 66-67 plus
- * 83-88, with the fork's own 68-82 interleaved. The schema runs through 64,
- * slot 65 carries a site-local `ThreadSummaryTimeline` migration (matching
- * production databases where local builds recorded extra names under the
- * shared id sequence), and the tail runs through `throughMigration`. The V2
- * runner only applies migrations past the recorded maximum id:
- *
- * - 88 mirrors upstream's test: the cutover applies 089-102 (upstream 050-062)
- *   on top of the untouched copy, the path an upstream V1 database takes.
- * - 94 is the fork's last pre-V2 migration, the exact state of Command Center
- *   production databases: the cutover applies only 095-102.
- *
- * The seed rows are identical in both; they are inserted after the schema
- * reaches `throughMigration`.
+ * A V1 database as it exists on disk before a V2 server first opens it; the V2 runner only applies
+ * migrations past the recorded maximum id. 88 mirrors upstream's test (the cutover applies 089-102
+ * on the untouched copy); 94 is the fork's last pre-V2 migration, the exact state of Command Center
+ * production databases (the cutover applies only 095-102). Seed rows are identical in both.
  */
 type SeedThroughMigration = 88 | 94;
 
@@ -104,6 +91,9 @@ const seedV1Database = (
       yield* sql`PRAGMA busy_timeout = 5000;`;
       yield* sql`PRAGMA foreign_keys = ON;`;
       yield* sql`PRAGMA journal_mode = WAL;`;
+      // The fork renumbered upstream's migrations (see persistence/Migrations.ts). Slot 65 carries a
+      // site-local `ThreadSummaryTimeline` migration, matching production databases where local
+      // builds recorded extra names under the shared id sequence.
       yield* runMigrations({ toMigrationInclusive: 64 });
       yield* sql`
         INSERT INTO effect_sql_migrations (migration_id, name)
@@ -561,18 +551,29 @@ const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =
 
 const waitForIdle = Effect.fn("LegacyV1Cutover.waitForIdle")(function* (threadId: ThreadId) {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
-  for (let attempt = 0; attempt < 1_000; attempt += 1) {
-    const projection = yield* orchestrator.getThreadProjection(threadId);
-    if (
-      projection.runs.every(
-        (run) => !["queued", "starting", "running", "waiting"].includes(run.status),
-      )
-    ) {
-      return projection;
-    }
-    yield* Effect.sleep("5 millis");
+  const eventSink = yield* EventSink.EventSinkV2;
+  const isIdle = (projection: OrchestrationV2ThreadProjection) =>
+    projection.runs.every(
+      (run) => !["queued", "starting", "running", "waiting"].includes(run.status),
+    );
+  const afterSequence = yield* eventSink.latestSequence();
+  const current = yield* orchestrator.getThreadProjection(threadId);
+  if (isIdle(current)) {
+    return current;
   }
-  return yield* Effect.die(new Error("Cutover test timed out waiting for idle"));
+  // Projections commit with their events, so each later event is the only time to re-read.
+  const [idle] = yield* eventSink.stream({ afterSequence }).pipe(
+    Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
+    Stream.filter(isIdle),
+    Stream.take(1),
+    Stream.runCollect,
+  );
+  if (idle === undefined) {
+    return yield* Effect.die(
+      new Error("Cutover test event stream ended before the thread went idle"),
+    );
+  }
+  return idle;
 });
 
 const layerBoot = (input: {

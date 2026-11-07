@@ -28,13 +28,10 @@ export interface InlineImageAttachment {
 }
 
 /**
- * Writes inline images into the thread's attachment store and returns their
- * persisted references. The one implementation behind the WS
- * `assets.persistChatAttachments` RPC and Command Center Run launches.
- *
- * Each payload must be a base64 data URL whose MIME type and decoded size
- * match the declared ones. Ids are deterministic per thread, message, index
- * and bytes, so a retried persist rewrites the same file.
+ * Writes inline images into the thread's attachment store and returns their persisted references;
+ * the one implementation behind the WS `assets.persistChatAttachments` RPC and Run launches. Each
+ * payload must be a base64 data URL whose MIME type and decoded size match the declared ones. Ids
+ * are deterministic per thread, message, index and bytes, so a retried persist rewrites the same file.
  */
 export const persistInlineImageAttachments = Effect.fn("attachments.persistInlineImages")(
   function* (input: {

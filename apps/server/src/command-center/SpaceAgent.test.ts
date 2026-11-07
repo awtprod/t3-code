@@ -152,8 +152,8 @@ const makeHarness = (
         getThreadShellById: (threadId) =>
           Effect.succeed(Option.fromNullishOr(threads.get(threadId))),
         getShellSnapshot: () => Effect.succeed({ snapshotSequence: 0, projects: [], threads: [] }),
-        getProjectShellById: () => Effect.succeed(Option.none()),
-        getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+        getProjectShellById: () => Effect.succeedNone,
+        getActiveProjectByWorkspaceRoot: () => Effect.succeedNone,
         dispatchCommand: (command) =>
           Effect.sync(() => {
             dispatched.push(command);
@@ -331,7 +331,7 @@ describe("Space agent", () => {
               Effect.andThen(Deferred.await(gate.release)),
               Effect.as(undefined),
             )
-          : Effect.succeed(undefined),
+          : Effect.undefined,
     );
     harness.seedThread();
     const turnThreads = () =>

@@ -59,6 +59,7 @@ import {
   isCommandCenterThreadId,
 } from "../provider/security/CommandCenterProviderIsolation.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 
 /** A V2 read the bridge performed on a caller's behalf failed. */
 export class OrchestrationBridgeReadError extends Schema.TaggedError<OrchestrationBridgeReadError>()(
@@ -318,7 +319,6 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectStoreV2;
   const projections = yield* ProjectionStoreV2;
   const threads = yield* ThreadManagementService;
-  const launches = yield* ThreadLaunchService;
   const projectService = yield* ProjectService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const sql = yield* SqlClient.SqlClient;
@@ -330,6 +330,7 @@ const make = Effect.gen(function* () {
     | Path.Path
     | ServerConfig.ServerConfig
     | ServerSettings.ServerSettingsService
+    | DocumentText.DocumentText
   >();
 
   const getProjectShellById: OrchestrationBridgeShape["getProjectShellById"] = (projectId) =>

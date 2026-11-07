@@ -1,0 +1,8 @@
+# The repository reads behind publishing a checkout to an existing GitHub repository.
+
+# Publishing only resumes into a repository that has no commits yet.
+query RepositoryEmpty($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    isEmpty
+  }
+}

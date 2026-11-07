@@ -61,10 +61,8 @@ describe("playAlertChime", () => {
   });
 
   it("never throws when AudioContext construction fails", () => {
-    class ThrowingAudioContext {
-      constructor() {
-        throw new Error("no audio device");
-      }
+    function ThrowingAudioContext(): never {
+      throw new Error("no audio device");
     }
     vi.stubGlobal("window", { AudioContext: ThrowingAudioContext });
     expect(() => playAlertChime()).not.toThrow();

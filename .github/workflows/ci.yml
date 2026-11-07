@@ -20,7 +20,9 @@ jobs:
   public_safety:
     name: Public repository safety
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The boundary scan reads every revision in the PR; upstream sync PRs carry
+    # dozens of large revisions and need well over ten minutes.
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
@@ -115,7 +117,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Main already ran 8-13 minutes here with web included; web now has its own job.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -172,7 +175,36 @@ jobs:
         run: node --test .github/scripts/check-nightly-release.test.cjs
 
       - name: Test
-        run: vp run --parallel --concurrency-limit 4 --filter '!@awtprod/command-center' --filter '!@t3tools/monorepo' test
+        run: vp run --parallel --concurrency-limit 4 --filter '!@awtprod/command-center' --filter '!@t3tools/monorepo' --filter '!@t3tools/web' test
+
+  # Web runs alone, as upstream does: its unit and headless-Chromium browser
+  # projects time out when they share a 4 vCPU runner with every other package.
+  test_web:
+    name: Test Web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Install Chromium for web browser tests
+        run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
+
+      - name: Test
+        run: vp run --filter @t3tools/web test
+
+      # Browser tests run source modules; this boots the production chunk graph.
+      - name: Boot the built web client
+        run: |
+          vp run --filter @t3tools/web build
+          node apps/web/scripts/verify-built-boot.ts
 
   # apps/server sets `fileParallelism: false`, so its 239 files run strictly
   # one at a time. Sharding spreads them over separate runners instead of
@@ -333,7 +365,9 @@ jobs:
           github.head_ref == vars.MACOS_CI_BRANCH &&
           vars.MACOS_CI_RUNNER_LABEL != '' &&
           vars.MACOS_CI_RUNNER_LABEL || 'macos-26' }}
-    timeout-minutes: 10
+    # A cold dependency cache (any lockfile change) adds minutes to install and
+    # to the post-job cache save.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6

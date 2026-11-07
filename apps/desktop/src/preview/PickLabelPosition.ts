@@ -1,15 +1,8 @@
 /**
- * Pure clamp/flip math for the floating label that follows the cursor while
- * the user is picking an element in the in-app browser. Lives in its own
- * electron-free module so the geometry can be unit-tested without spinning
- * up an Electron preload context (`PickPreload.ts` itself imports
- * `electron` and `react-grab/primitives`, which can't load under vitest).
- *
- * - Horizontally pins the label to `targetLeft`, clamped into
- *   `[VIEWPORT_MARGIN, viewportWidth - labelWidth - VIEWPORT_MARGIN]`.
- * - Vertically prefers above the target. If the label would overflow the
- *   top, flips below; if THAT also overflows the bottom, pins to the
- *   bottom margin (better to overlap the highlight than disappear).
+ * Pure clamp/flip math for the pick label that follows the cursor, kept electron-free
+ * so it unit-tests (`PickPreload.ts` imports `electron` and `react-grab/primitives`,
+ * which can't load under vitest). Horizontally clamped into the viewport margins;
+ * vertically above the target, flipped below on overflow, else pinned to the bottom margin.
  */
 
 /** Distance in CSS pixels between the highlight and the floating label. */

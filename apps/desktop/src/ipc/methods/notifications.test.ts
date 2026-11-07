@@ -47,24 +47,24 @@ function makeLayer(input: {
 describe("notifications.showNotification", () => {
   it.effect("shows a notification with the decoded title, body, and silent flag", () => {
     const shown: unknown[] = [];
-    return Effect.gen(function* () {
-      yield* showNotification.handler({
+    return showNotification
+      .handler({
         kind: "completed",
         title: "Thread finished",
         body: "Completed: My Project",
         silent: false,
         threadRef,
-      });
-    }).pipe(
-      Effect.provide(
-        makeLayer({
-          onShow: () => shown.push("shown"),
-          sends: [],
-          revealed: { count: 0 },
-        }),
-      ),
-      Effect.tap(() => Effect.sync(() => assert.equal(shown.length, 1))),
-    );
+      })
+      .pipe(
+        Effect.provide(
+          makeLayer({
+            onShow: () => shown.push("shown"),
+            sends: [],
+            revealed: { count: 0 },
+          }),
+        ),
+        Effect.tap(() => Effect.sync(() => assert.equal(shown.length, 1))),
+      );
   });
 
   it.effect("reveals the window and sends the activation on click", () =>

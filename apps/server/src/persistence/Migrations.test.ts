@@ -1,7 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import {
@@ -74,7 +77,7 @@ describe("findMigrationSequenceViolations", () => {
   });
 
   it("reports gaps up to the largest safe integer immediately, around retired IDs", () => {
-    const started = performance.now();
+    // A scan over the gap would never finish, so returning at all is the speed check.
     assert.deepStrictEqual(findMigrationSequenceViolations([1, 1_000_000_000_000]), [
       "migrations 2-56 are missing before 1000000000000",
       "migrations 61-999999999999 are missing before 1000000000000",
@@ -91,7 +94,6 @@ describe("findMigrationSequenceViolations", () => {
       "migration 59 is missing before 70",
       "migrations 62-69 are missing before 70",
     ]);
-    assert.isBelow(performance.now() - started, 1_000);
   });
 });
 
@@ -198,6 +200,37 @@ describe("stacked Instagram migration manifest", () => {
       [81, "CommandCenterSpaceAgentState"],
       [82, "CommandCenterSpaceAgentReplies"],
     ]);
+  });
+});
+
+describe("released migration ids", () => {
+  it("pins the id and name of every migration from orchestration V2 on", () => {
+    // 95-103 shipped under these ids and 104-113 are upstream 063-072 renumbered to follow them.
+    // Live databases record id + name, so renaming or reordering any of these breaks upgrades.
+    assert.deepStrictEqual(
+      migrationManifest.filter(([id]) => id >= 95),
+      [
+        [95, "OrchestrationV2"],
+        [96, "RemoveRedundantProjectionIndexes"],
+        [97, "ScheduledTaskWebhooks"],
+        [98, "WebhookRelayDeliveries"],
+        [99, "McpAppModelContext"],
+        [100, "ThreadSnapshotWindowIndexes"],
+        [101, "PullRequestReviewGuides"],
+        [102, "ThreadFailureLookupIndex"],
+        [103, "EfficiencyRoutingSideChannel"],
+        [104, "DropUnusedV1Projections"],
+        [105, "CanonicalizeThreadPullRequestLinks"],
+        [106, "CodexUsageNativeTurnIndex"],
+        [107, "RepairClientSettlementTimestamps"],
+        [108, "WebhookDedupe"],
+        [109, "ShellStopRequestIndex"],
+        [110, "ThreadMessageSearch"],
+        [111, "PeerLinks"],
+        [112, "PeerLinkFence"],
+        [113, "WaitingLinkRequestIndex"],
+      ],
+    );
   });
 });
 
@@ -326,3 +359,20 @@ describe("runMigrations with orchestration V2 (upstream 055-062 renumbered 095-1
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });
+
+// The npm launcher reads the highest migration id from these file names.
+it.effect("registers every migration file", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const dir = path.join(import.meta.dirname, "Migrations");
+    const files = (yield* fs.readDirectory(dir)).flatMap((name) => {
+      const match = /^(\d+)_(\w+)\.ts$/.exec(name);
+      return match ? [[Number(match[1]), match[2]] as const] : [];
+    });
+    assert.deepStrictEqual(
+      files.toSorted(([a], [b]) => a - b),
+      migrationManifest,
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);

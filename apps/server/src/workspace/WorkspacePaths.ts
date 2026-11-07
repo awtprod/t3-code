@@ -1,12 +1,3 @@
-/**
- * WorkspacePaths - Effect service contract for workspace path handling.
- *
- * Owns normalization and validation of workspace roots plus safe resolution of
- * workspace-root-relative paths.
- *
- * @module WorkspacePaths
- */
-
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -86,15 +77,10 @@ export class WorkspacePathOutsideRootError extends Schema.TaggedError<WorkspaceP
 }
 
 /**
- * The directory exists, but this server process cannot actually work inside it.
- *
- * Raised while a workspace root is being *chosen* so the operator learns the
- * directory is unusable at the point of the mistake, rather than hours later
- * when a provider turn dies with an opaque "Git status failed".
- *
- * The uids are carried on the error because the dominant cause is a repository
- * created by a human under their own account while the server runs as a
- * dedicated service account; the two numbers are what make that diagnosable.
+ * The directory exists, but this server process cannot actually work inside it. Raised while a
+ * workspace root is being *chosen*, so the operator learns at the point of the mistake rather than
+ * when a provider turn dies with an opaque "Git status failed". The uids are carried because the
+ * dominant cause is a repo created under a human account while the server runs as a service account.
  */
 export class WorkspaceRootUnusableError extends Schema.TaggedError<WorkspaceRootUnusableError>()(
   "WorkspaceRootUnusableError",
@@ -126,19 +112,14 @@ export const WorkspacePathsError = Schema.Union([
 ]);
 export type WorkspacePathsError = typeof WorkspacePathsError.Type;
 
-/** Service tag for workspace path normalization and resolution. */
 export class WorkspacePaths extends Context.Service<
   WorkspacePaths,
   {
     /**
      * Normalize a user-provided workspace root and verify it exists as a directory.
-     *
-     * With `verifyUsable`, additionally prove this process can actually work in
-     * the directory before accepting it. That probe spawns Git, so it is opt-in:
-     * interactive directory browsing runs this function on every keystroke and
-     * must stay a bare `stat`. Enable it on the paths that *commit* to a
-     * workspace root (project create / update), where one subprocess is cheap
-     * relative to being wrong.
+     * With `verifyUsable`, also prove this process can work in it. That probe spawns Git, so it is
+     * opt-in: interactive browsing runs this on every keystroke and must stay a bare `stat`; enable
+     * it only on paths that commit to a workspace root (project create / update).
      */
     readonly normalizeWorkspaceRoot: (
       workspaceRoot: string,
@@ -151,11 +132,6 @@ export class WorkspacePaths extends Context.Service<
       | WorkspaceRootNotDirectoryError
       | WorkspaceRootUnusableError
     >;
-    /**
-     * Resolve a relative path within a validated workspace root.
-     *
-     * Rejects absolute paths and traversal attempts outside the workspace root.
-     */
     readonly resolveRelativePathWithinRoot: (input: {
       workspaceRoot: string;
       relativePath: string;
@@ -171,12 +147,9 @@ function toPosixRelativePath(input: string): string {
 }
 
 /**
- * Recognize Git's refusal to operate on a directory it does not trust.
- *
- * Git reports this on stderr and exits non-zero; there is no machine-readable
- * code for it, so the wording is the only signal available. Both the modern
- * ("detected dubious ownership") and older ("unsafe repository") phrasings are
- * matched.
+ * Recognize Git's refusal to operate on a directory it does not trust. Git exits non-zero with no
+ * machine-readable code, so the stderr wording is the only signal; both the modern ("detected
+ * dubious ownership") and older ("unsafe repository") phrasings are matched.
  */
 function isGitOwnershipRefusal(stderr: string): boolean {
   const normalized = stderr.toLowerCase();
@@ -216,22 +189,10 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * Prove this process can actually work in `normalizedWorkspaceRoot`.
-   *
-   * Cheaper filesystem-only checks are unsound, which is why this spawns Git:
-   *
-   *   - Comparing the directory's owner against our uid gives false positives.
-   *     The Git process boundary trusts this exact workspace for the command,
-   *     so an ACL-accessible repo works despite the uid mismatch.
-   *   - Checking read access to `.git/*` gives false negatives. Git refuses
-   *     untrusted directories even when every file in them is readable.
-   *
-   * Only Git can answer the question Git will be asked, so ask it — under the
-   * same hardened arguments and environment the VCS driver uses, or the probe
-   * would be measuring a different command than the one that later runs.
-   *
-   * A non-repository is deliberately *accepted*: an empty directory is a valid
-   * place to start a project. This rejects only unusable directories.
+   * Prove this process can actually work in `normalizedWorkspaceRoot`. Only Git can answer the
+   * question Git will be asked, so ask it under the same hardened arguments and environment the VCS
+   * driver uses, or the probe would measure a different command than the one that later runs.
+   * A non-repository is deliberately *accepted*: an empty directory is a valid place to start.
    */
   const verifyWorkspaceRootUsable = Effect.fn("WorkspacePaths.verifyWorkspaceRootUsable")(
     function* (workspaceRoot: string, normalizedWorkspaceRoot: string) {
@@ -266,6 +227,10 @@ export const make = Effect.gen(function* () {
           ),
         );
 
+      // Git is the probe because filesystem-only checks are unsound: comparing the owner to our uid
+      // gives false positives (the Git process boundary trusts this exact workspace, so an
+      // ACL-accessible repo works despite a mismatch), and checking read access to `.git/*` gives
+      // false negatives (Git refuses untrusted directories even when every file is readable).
       const probe = yield* vcsProcess
         .run({
           operation: "WorkspacePaths.verifyUsable.status",

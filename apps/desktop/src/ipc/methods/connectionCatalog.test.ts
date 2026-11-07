@@ -1,7 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 
 import * as DesktopConnectionCatalogStore from "../../app/DesktopConnectionCatalogStore.ts";
 import * as DesktopLocalEnvironmentAuth from "../../backend/DesktopLocalEnvironmentAuth.ts";
@@ -12,7 +11,7 @@ describe("connection catalog IPC", () => {
     const events: Array<string> = [];
     const layer = Layer.mergeAll(
       Layer.mock(DesktopConnectionCatalogStore.DesktopConnectionCatalogStore, {
-        get: Effect.succeed(Option.none()),
+        get: Effect.succeedNone,
         set: (catalog) =>
           Effect.sync(() => {
             events.push(`set:${catalog}`);

@@ -1,21 +1,7 @@
 /**
- * Pure target resolution for the authenticated preview gateway.
- *
- * The gateway forwards requests to a dev server bound on loopback inside this
- * environment. That makes it the one route in the server that can be pointed at
- * an arbitrary address, so everything it will accept is decided here, in pure
- * code that is cheap to test exhaustively.
- *
- * Two rules, both non-negotiable:
- *
- * 1. **Loopback only.** The forward target host is never taken from the request.
- *    It is always `127.0.0.1`; only the *port* is caller-supplied. Without this
- *    the route is an open forward proxy sitting behind the user's Tailscale
- *    identity — anything on the tailnet could reach anything the server can.
- * 2. **Port-bounded.** Only unprivileged ports (>= 1024) are reachable, the
- *    server's own port is excluded so the gateway can never be aimed back at
- *    itself (a request loop that would consume a connection slot per hop), and
- *    a set of well-known control-plane ports is refused outright.
+ * Pure target resolution for the authenticated preview gateway. It is the one
+ * route that can be pointed at an address, so everything it will accept is
+ * decided here: a fixed loopback host and a bounded, filtered port.
  */
 
 /** Lowest port the gateway will forward to. Privileged ports are never dev servers. */
@@ -23,72 +9,56 @@ export const MIN_GATEWAY_PORT = 1024;
 /** Highest valid TCP port. */
 export const MAX_GATEWAY_PORT = 65_535;
 
-/** The only host the gateway ever connects to. Deliberately not caller-supplied. */
+/**
+ * The only host the gateway ever connects to; never taken from the request. A
+ * caller-supplied host would make the route an open forward proxy behind the
+ * user's Tailscale identity, reaching anything the server can.
+ */
 export const GATEWAY_TARGET_HOST = "127.0.0.1";
 
 /**
- * Loopback ports the gateway refuses to forward to even for an authenticated
- * caller.
- *
- * Loopback is where processes put the interfaces they believe nobody can reach:
- * debuggers that evaluate arbitrary code, container daemons that start
- * privileged containers, databases and secret stores that skip authentication
- * *because* they are bound to 127.0.0.1. The gateway makes loopback reachable
- * from the tailnet, so it inherits responsibility for that assumption.
- *
- * Two honest limits on what this buys, both deliberate:
- *
- * - **It is a deny-list, so it is incomplete by construction.** A service on a
- *   port not listed here is still reachable. The real boundary remains the
- *   session auth on every gateway route; this narrows the blast radius of a
- *   stolen or misused session rather than replacing that check.
- * - **An allow-list was considered and rejected.** The obvious source is
- *   `PortDiscovery`, but it shells to `lsof -iTCP -sTCP:LISTEN`, which
- *   enumerates *every* listener — a Chrome debug port and a Docker socket are
- *   discovered exactly as readily as a Vite server. Gating on "was discovered"
- *   would add ceremony without excluding a single dangerous port, since a port
- *   nothing is listening on has nothing to reach in the first place.
- *
- * The Chrome/Node debugger range is the sharpest of these: `9229` speaks the
- * inspector protocol, which is remote code execution by design.
+ * Loopback ports refused even for an authenticated caller: loopback holds
+ * interfaces assumed unreachable (debuggers, container daemons, unauthenticated
+ * databases and secret stores) and the gateway exposes it to the tailnet. This
+ * deny-list is incomplete by construction; the real boundary is session auth.
  */
 const BLOCKED_GATEWAY_PORTS: ReadonlySet<number> = new Set([
   2049, // NFS
-  2375, // Docker daemon, plaintext — container create is root on the host
-  2376, // Docker daemon, TLS
-  2379, // etcd client
-  2380, // etcd peer
+  2375,
+  2376, // Docker daemon (plaintext: container create is root on the host)
+  2379,
+  2380, // etcd client, peer
   3306, // MySQL / MariaDB
-  4646, // Nomad HTTP
-  4647, // Nomad RPC
-  4648, // Nomad Serf
-  5432, // PostgreSQL
-  5433, // PostgreSQL, common alternate
+  4646,
+  4647,
+  4648, // Nomad HTTP, RPC, Serf
+  5432,
+  5433, // PostgreSQL
   5984, // CouchDB
-  6379, // Redis — loopback Redis is conventionally unauthenticated
+  6379, // Redis, conventionally unauthenticated on loopback
   6443, // Kubernetes API server
-  8200, // HashiCorp Vault
-  8500, // Consul HTTP
-  9200, // Elasticsearch / OpenSearch HTTP
-  9300, // Elasticsearch transport
+  8200,
+  8500, // HashiCorp Vault, Consul HTTP
+  9200,
+  9300, // Elasticsearch / OpenSearch HTTP, transport
   10_250, // kubelet
   11_211, // memcached
-  27_017, // MongoDB
-  27_018, // MongoDB shard
-  27_019, // MongoDB config server
+  27_017,
+  27_018,
+  27_019, // MongoDB, shard, config server
 ]);
 
 /**
- * Inclusive port range used by Chrome DevTools and the Node inspector.
- *
- * Ranged rather than enumerated because `--inspect` and `--remote-debugging-port`
- * are routinely given an offset (`9223`, `9230`) when several processes debug at
- * once, and every port in the range speaks a protocol that evaluates arbitrary
- * code in the target process.
+ * Inclusive port range of Chrome DevTools and the Node inspector (9229 is remote
+ * code execution by design). Ranged because `--inspect` and `--remote-debugging-port`
+ * take offsets (`9223`, `9230`) and every port in the range evaluates arbitrary code.
  */
 const BLOCKED_DEBUGGER_PORT_RANGE = { first: 9222, last: 9239 } as const;
 
-/** Whether a port hosts a service the gateway must never expose. */
+/**
+ * Whether a port hosts a service the gateway must never expose. Not an allow-list
+ * on `PortDiscovery`: `lsof` lists every listener, so "discovered" excludes nothing.
+ */
 function isBlockedGatewayPort(port: number): boolean {
   if (BLOCKED_GATEWAY_PORTS.has(port)) return true;
   return port >= BLOCKED_DEBUGGER_PORT_RANGE.first && port <= BLOCKED_DEBUGGER_PORT_RANGE.last;
@@ -106,11 +76,10 @@ export type GatewayPortResolution =
   | { readonly ok: false; readonly reason: GatewayPortRejection };
 
 /**
- * Validate a caller-supplied preview port.
- *
- * `selfPorts` are ports this server itself listens on (its HTTP port, and the
- * gateway port when they differ). Forwarding to one of those would make the
- * gateway proxy itself.
+ * Validate a caller-supplied preview port. `selfPorts` are ports this server
+ * listens on (its HTTP port, and the gateway port when they differ); forwarding
+ * to one would make the gateway proxy itself, a request loop that consumes a
+ * connection slot per hop.
  */
 export function resolveGatewayPort(
   rawPort: string | number | undefined,
@@ -160,17 +129,10 @@ export function describeGatewayPortRejection(reason: GatewayPortRejection): stri
 }
 
 /**
- * Build the upstream URL for a forwarded request.
- *
- * The path and query come from the incoming request untouched — the dev server
- * behind the gateway sees itself at the origin root, which is the whole point of
- * mounting the gateway at a root rather than under a `/preview/<port>/` prefix.
- * A prefix would break every absolute URL the dev server emits (`/@vite/client`,
- * `/src/main.tsx`) and its HMR socket along with them.
- *
- * `pathAndQuery` is used verbatim rather than parsed and re-serialised so that
- * the upstream receives byte-identical encoding; re-encoding would corrupt
- * requests that rely on a specific escaping of `%2F` and friends.
+ * Build the upstream URL for a forwarded request. Path and query pass through
+ * untouched: the gateway is root-mounted so the dev server sees itself at the
+ * origin root. `pathAndQuery` is used verbatim, not re-serialised, because
+ * re-encoding would corrupt requests that rely on `%2F`-style escaping.
  */
 export function buildGatewayUpstreamUrl(port: number, pathAndQuery: string): string {
   return `http://${GATEWAY_TARGET_HOST}:${port}${normalizePathAndQuery(pathAndQuery)}`;
@@ -191,17 +153,10 @@ function normalizePathAndQuery(pathAndQuery: string): string {
 }
 
 /**
- * Headers that must not be copied verbatim between the client and the upstream.
- *
- * `host` is rewritten to the upstream authority; hop-by-hop headers are
- * connection-scoped per RFC 9110 and forwarding them corrupts keep-alive and
- * upgrade handling. `accept-encoding` is dropped on the way up so the upstream
- * responds uncompressed and we never have to re-encode a body we are streaming.
- *
- * `authorization` and `dpop` are dropped for the same reason the session cookie
- * is: they are live credentials for *this* environment, and the dev server on
- * the far side is arbitrary user code. A bearer token handed to it is reusable
- * against the control plane.
+ * Headers not copied verbatim upstream: `host` is rewritten, hop-by-hop headers
+ * are connection-scoped (RFC 9110), `accept-encoding` is dropped so bodies stream
+ * uncompressed. `authorization` and `dpop` are live credentials; a token handed to
+ * the dev server (arbitrary user code) would be reusable against the control plane.
  */
 const GATEWAY_STRIPPED_REQUEST_HEADERS: ReadonlySet<string> = new Set([
   "host",
@@ -229,11 +184,8 @@ const GATEWAY_STRIPPED_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
 
 /**
  * Copy request headers for the upstream, dropping the ones that must not travel
- * and rewriting `host` to the upstream authority.
- *
- * The session cookie is deliberately *not* forwarded: the dev server has no use
- * for it, and handing a credential to arbitrary user code on a loopback port is
- * a needless way to lose it.
+ * and rewriting `host`. The session cookie is deliberately not forwarded: handing
+ * a credential to arbitrary user code on a loopback port is a needless way to lose it.
  */
 export function buildGatewayRequestHeaders(
   incoming: Readonly<Record<string, string | undefined>>,
@@ -257,25 +209,10 @@ export function buildGatewayRequestHeaders(
 }
 
 /**
- * Copy response headers back downstream, dropping the connection-scoped ones.
- *
- * `content-length` goes too: the body is relayed as a stream and the framing is
- * decided by the downstream server, so a stale length would truncate or hang the
- * response.
- *
- * `content-encoding` goes for a subtler reason. The HTTP client negotiates its
- * own `accept-encoding` and hands back a *decoded* body stream, but leaves the
- * upstream's `content-encoding: gzip` on the response headers. Relaying that
- * header would tell the browser to gunzip bytes that are already plain, and
- * every response from a compressing dev server would fail to decode. (Measured:
- * a gzipping loopback server read back through `fetch` yields
- * `content-encoding: gzip` alongside a 16-byte plaintext stream.)
- *
- * `set-cookie` goes because it is relayed through the response's cookie channel
- * instead. This map is a `Record`, so it only ever holds the *last* of several
- * `Set-Cookie` values; leaving it in would emit that one cookie a second time
- * alongside the complete set. (Effect's own `fromClientResponse` removes it here
- * for the same reason.)
+ * Copy response headers downstream, dropping connection-scoped ones, plus
+ * `content-length` (body is streamed; a stale length hangs), `content-encoding`
+ * (the client already decoded the body, so relaying it breaks gunzip) and
+ * `set-cookie` (relayed via the cookie channel; this Record keeps only the last).
  */
 export function buildGatewayResponseHeaders(
   incoming: Readonly<Record<string, string | undefined>>,

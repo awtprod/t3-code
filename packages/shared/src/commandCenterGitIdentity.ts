@@ -1,10 +1,8 @@
 /**
- * The one identity Command Center commits under: checkpoints, scaffolded
- * repositories, automation definitions and stack rebases. It reaches Git only
- * through the allowlisted `GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment, never
- * through `-c user.*` or `GIT_CONFIG_*`, so a commit never depends on the
- * user's global config. `example.com` is reserved (RFC 2606): it receives no
- * mail and cannot be verified by, so attributed to, any GitHub account.
+ * The one identity Command Center commits under. It reaches Git only through the
+ * allowlisted `GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment, never `-c user.*` or
+ * `GIT_CONFIG_*`, so a commit never depends on the user's global config. `example.com`
+ * is reserved (RFC 2606): it receives no mail, so no GitHub account can verify or claim it.
  */
 const COMMAND_CENTER_GIT_IDENTITY = {
   name: "Command Center",

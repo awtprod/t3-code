@@ -968,11 +968,10 @@ export type CommandCenterMemoryRememberInput = typeof CommandCenterMemoryRemembe
 const JSON_NUMBER_TEXT = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
 
 /**
- * A number in an MCP tool input. The tool list advertises exactly `schema`'s
- * JSON Schema, and decoding also accepts the number written as a string
- * (`"0.9"`), which models send when they replay a cached tool list. Pass a
- * finite schema (`Schema.Finite`, `Schema.Int`): `Schema.Number` advertises
- * `"NaN"`/`"Infinity"` string literals, which taught models to send strings.
+ * A number in an MCP tool input. The tool list advertises exactly `schema`'s JSON
+ * Schema; decoding also accepts a numeric string (`"0.9"`, sent by models replaying
+ * a cached tool list). Pass a finite schema (`Schema.Finite`, `Schema.Int`):
+ * `Schema.Number` advertises `"NaN"`/`"Infinity"` literals, which taught models to send strings.
  */
 const NumericToolInput = <S extends Schema.Codec<number>>(schema: S) =>
   Schema.Json.check(

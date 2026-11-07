@@ -43,7 +43,9 @@ layer("103_EfficiencyRoutingSideChannel", (it) => {
       yield* insertThread("thread:manual-tier", "manual", "balanced");
       yield* insertThread("thread:manual", "manual", null);
 
-      assert.deepStrictEqual(yield* runMigrations(), [[103, "EfficiencyRoutingSideChannel"]]);
+      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 103 }), [
+        [103, "EfficiencyRoutingSideChannel"],
+      ]);
 
       const rows = yield* sql<{
         readonly threadId: string;

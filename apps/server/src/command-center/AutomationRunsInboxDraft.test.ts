@@ -45,7 +45,7 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const spaceId = SpaceId.make("space-a");
 const itemId = ItemId.make("item-a");
 
-const space = Schema.decodeUnknownSync(Space)({
+const space = Schema.decodeSync(Space)({
   id: spaceId,
   slug: "space-a",
   displayName: "Space A",
@@ -154,7 +154,7 @@ function testLayer(state: FakeState, clock: "frozen" | "live" = "frozen") {
   const config = (): LoadedCommandCenterConfig => ({
     spaces: [space],
     connections: [
-      Schema.decodeUnknownSync(Connection)({
+      Schema.decodeSync(Connection)({
         id: "google-a",
         spaceId,
         kind: "google",
@@ -345,15 +345,15 @@ bothClocks(
       yield* seed;
       const runs = yield* AutomationRuns;
       // Three clicks race the first approval through the runtime and audit.
-      const racing = yield* Effect.all(
-        [1, 2, 3].map(() =>
+      const racing = yield* Effect.forEach(
+        [1, 2, 3],
+        () =>
           runs.approveInboxDraft(approval(), "andrew").pipe(
             Effect.match({
               onFailure: (error) => ({ ok: false as const, error }),
               onSuccess: (value) => ({ ok: true as const, value }),
             }),
           ),
-        ),
         { concurrency: "unbounded" },
       );
       const succeeded = racing.flatMap((result) => (result.ok ? [result.value] : []));

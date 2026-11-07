@@ -78,6 +78,7 @@ const makeHarness = Effect.fn("test.bearerRenewal.makeHarness")(function* (input
     networkStatus: yield* SubscriptionRef.make<"unknown" | "offline" | "online">("online"),
     start: Effect.void,
     register: () => Effect.die("unused"),
+    assertKnownAddress: () => Effect.die("unused"),
     registerPlatform: () => Effect.die("unused"),
     reconcilePlatform: () => Effect.die("unused"),
     remove: () => Effect.die("unused"),
@@ -143,7 +144,7 @@ const settle = Effect.gen(function* () {
   for (let index = 0; index < 20; index++) {
     // The fake fetch resolves on the macrotask queue, outside the test clock.
     // @effect-diagnostics-next-line globalTimers:off
-    yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+    yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 0))); // oxlint-disable-line t3code/no-real-time-wait-in-tests -- a zero-delay macrotask boundary, not a wait for time
     yield* Effect.yieldNow;
   }
 });
@@ -334,7 +335,7 @@ describe("bearer session renewal", () => {
       yield* SubscriptionRef.set(harness.state, CONNECTED);
       yield* settle;
       yield* Queue.offer(harness.wakeups, "application-active");
-      yield* Queue.offer(harness.wakeups, "application-active-reconnect");
+      yield* Queue.offer(harness.wakeups, "application-active-long");
       yield* settle;
       expect(harness.calls).toHaveLength(1);
 

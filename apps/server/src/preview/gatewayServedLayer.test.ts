@@ -1,17 +1,8 @@
 /**
- * Regression coverage for the preview gateway's router isolation.
- *
- * A live boot with `--preview-gateway` died at startup with
- * `Method 'GET' already declared for route '/*'`. `HttpRouter.serve` builds its
- * router from the module-level `HttpRouter.layer`, layers are memoized by
- * identity within a single build, and so the gateway's catch-all was registered
- * into the *main app's* router next to the app's own catch-all. A control boot
- * without the flag started clean, which is what pinned it on the gateway.
- *
- * `./gatewayRoute.test.ts` could not catch this and still cannot: it builds the
- * gateway on its own, and with only one router in the build there is nothing to
- * collide with. The property here needs two routers in one build, which is what
- * `makeServerLayer` does and what these tests reproduce.
+ * Regression coverage for the preview gateway's router isolation: layers are
+ * memoized by identity within one build, so the gateway's catch-all landed in the
+ * main app's router ("Method 'GET' already declared for route '/*'"). The property
+ * needs two routers in one build, as `makeServerLayer` has, so these tests build both.
  */
 
 // @effect-diagnostics nodeBuiltinImport:off - this test binds real listeners to
@@ -44,21 +35,17 @@ import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts
 import { makePreviewGatewayServedLayer } from "../server.ts";
 
 /**
- * A stand-in for the main app's router: one catch-all, which is the only thing
- * about `makeRoutesLayer` that participates in the collision. Building the real
- * one needs a dozen mocked services (`server.test.ts`'s `buildAppUnderTest`),
- * none of which would make the assertion stronger.
+ * A stand-in for the main app's router: one catch-all, the only part of
+ * `makeRoutesLayer` that participates in the collision. The real one needs a
+ * dozen mocked services and would not make the assertion stronger.
  */
 const APP_RESPONSE_BODY = "main-app-router";
 const appRouterLayer = HttpRouter.add("*", "/*", HttpServerResponse.text(APP_RESPONSE_BODY));
 
 /**
- * A distinct listener layer per call.
- *
- * Reusing one layer *value* for both servers would reintroduce the same
- * memoization sharing at the listener instead of the router — and production
- * has two distinct values (`HttpServerLive`, `PreviewGatewayHttpServerLive`),
- * so a factory is what actually mirrors it.
+ * A distinct listener layer per call: reusing one layer value for both servers
+ * would reintroduce the memoization sharing at the listener, and production has
+ * two distinct values, so a factory is what mirrors it.
  */
 const makeEphemeralHttpServerLayer = () =>
   NodeHttpServer.layer(NodeHttp.createServer, { host: "127.0.0.1", port: 0 });

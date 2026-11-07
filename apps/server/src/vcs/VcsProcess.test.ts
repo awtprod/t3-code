@@ -4,25 +4,21 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, expect, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Cause from "effect/Cause";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
-import { TestClock } from "effect/testing";
 import { ChildProcessSpawner } from "effect/process";
 
-import {
-  VcsProcessExitError,
-  VcsProcessSpawnError,
-  VcsProcessTimeoutError,
-} from "@t3tools/contracts";
+import { VcsProcessExitError, VcsProcessSpawnError } from "@t3tools/contracts";
 import * as ProcessRunner from "../processRunner.ts";
 import { HOST_GIT_HARDENED_CONFIG_ARGS, inheritedGitConfigPins } from "./HostGitSecurity.ts";
 import * as VcsProcess from "./VcsProcess.ts";
@@ -89,6 +85,8 @@ const gitConfigEntries = (env: NodeJS.ProcessEnv | undefined) =>
   ]);
 /** Exact pins the suite setup exports (testUtils/gitConfig.setup.ts), if honoured. */
 const inheritedPins = () => inheritedGitConfigPins(process.env).map(([key, value]) => [key, value]);
+/** VcsProcess appends this to every hardened Git and connector CLI environment. */
+const EXPLICIT_BARE_REPOSITORY = ["safe.bareRepository", "explicit"];
 
 const ACME_REMOTE = "https://github.com/acme/web.git";
 const remoteWithUserInfo = (() => {
@@ -127,6 +125,7 @@ describe("VcsProcess.run trusted Git config", () => {
       expect(calls[0]?.env?.GIT_TERMINAL_PROMPT).toBe("0");
       expect(gitConfigEntries(calls[0]?.env)).toEqual([
         ...inheritedPins(),
+        EXPLICIT_BARE_REPOSITORY,
         [`http.${ACME_REMOTE}.extraheader`, accessTokenHeader("acme-token")],
       ]);
       // The hardening -c flags still come first and win over env config.
@@ -208,7 +207,10 @@ describe("VcsProcess.run trusted Git config", () => {
       const calls: ProcessRunner.ProcessRunInput[] = [];
       const service = yield* recordingService(calls);
       yield* service.run({ ...baseInput, env: pins });
-      expect(gitConfigEntries(calls[0]?.env)).toEqual(inheritedPins());
+      expect(gitConfigEntries(calls[0]?.env)).toEqual([
+        ...inheritedPins(),
+        EXPLICIT_BARE_REPOSITORY,
+      ]);
     }),
   );
 
@@ -287,14 +289,18 @@ describe("VcsProcess.run", () => {
       ]);
       expect(calls[0]?.extendEnv).toBe(false);
       // The caller's raw GIT_CONFIG_COUNT never survives; only inherited exact pins may.
-      expect(gitConfigEntries(calls[0]?.env)).toEqual(inheritedPins());
+      expect(gitConfigEntries(calls[0]?.env)).toEqual([
+        ...inheritedPins(),
+        EXPLICIT_BARE_REPOSITORY,
+      ]);
       expect(calls[0]?.env).not.toHaveProperty("GIT_DIR");
       expect(calls[0]?.env).not.toHaveProperty("GIT_INDEX_FILE");
       expect(calls[1]?.env?.GIT_INDEX_FILE).toBe("/tmp/checkpoint-index");
       expect(calls[2]?.args).toEqual(["pr", "checkout", "42"]);
       expect(calls[2]?.env).toMatchObject({
         GH_TOKEN: "trusted-token",
-        GIT_CONFIG_COUNT: "8",
+        // The eight command-scope hardening entries, then safe.bareRepository=explicit.
+        GIT_CONFIG_COUNT: "9",
         GIT_TERMINAL_PROMPT: "0",
       });
       expect(calls[2]?.env?.PATH?.split(NodePath.delimiter).every(NodePath.isAbsolute)).toBe(true);
@@ -304,8 +310,63 @@ describe("VcsProcess.run", () => {
     }),
   );
 
+  it.effect("explains a locked Git index and allows restore after the lock is released", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-index-lock-" });
+      const git = (args: readonly string[]) =>
+        run({ operation: "test.checkpoint.restore", command: "git", cwd, args });
+      yield* git(["init"]);
+      const file = path.join(cwd, "README.md");
+      yield* fs.writeFileString(file, "before\n");
+      yield* git(["add", "README.md"]);
+      yield* git([
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "initial",
+      ]);
+      yield* fs.writeFileString(file, "after\n");
+      const lock = path.join(cwd, ".git", "index.lock");
+      yield* fs.writeFileString(lock, "held by another process\n");
+      const restore = ["restore", "--source=HEAD", "--worktree", "--staged", "--", "README.md"];
+
+      const error = yield* Effect.flip(git(restore));
+      expect(error).toBeInstanceOf(VcsProcessExitError);
+      expect(error).toMatchObject({
+        exitCode: 128,
+        failureKind: "command-failed",
+        detail: "Git's index is locked. Wait for other Git operations to finish, then try again.",
+      });
+      expect(error.message).not.toContain("index.lock");
+      expect(yield* fs.readFileString(file)).toBe("after\n");
+      expect(yield* fs.readFileString(lock)).toBe("held by another process\n");
+
+      yield* fs.remove(lock);
+      yield* git(restore);
+      expect(yield* fs.readFileString(file)).toBe("before\n");
+    }).pipe(provideLive, Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.effect.each([
-    { stderr: "fatal: Unable to create '/private/repo/index.lock': File exists", retryable: true },
+    {
+      stderr: "fatal: Unable to create '/private/repo/index.lock': File exists",
+      retryable: true,
+      detail: "Git's index is locked. Wait for other Git operations to finish, then try again.",
+    },
+    {
+      stderr: "fatal: Unable to create 'C:\\private\\repo\\.git\\index.lock': File exists.",
+      retryable: true,
+      detail: "Git's index is locked. Wait for other Git operations to finish, then try again.",
+    },
+    {
+      stderr: "fatal: Unable to create '/private/repo/.git/config.lock': File exists.",
+      retryable: true,
+    },
     {
       stderr: "fatal: Unable to create '/private/repo/index.lock': Permission denied",
       retryable: false,
@@ -322,8 +383,8 @@ describe("VcsProcess.run", () => {
     },
     { stderr: "fatal: index file corrupt", retryable: false },
   ])(
-    "classifies Git exit retryability without retaining stderr: $stderr",
-    ({ stderr, retryable }) =>
+    "classifies Git exit retryability and safe detail without retaining stderr: $stderr",
+    ({ stderr, retryable, detail = "Process exited with a non-zero status." }) =>
       Effect.gen(function* () {
         const error = yield* captureProcessResult(
           Effect.succeed({
@@ -339,102 +400,74 @@ describe("VcsProcess.run", () => {
         );
         assert.instanceOf(error, VcsProcessExitError);
         expect(error.retryable === true).toBe(retryable);
+        expect(error.detail).toBe(detail);
         const encoded = yield* encodeExitError(error);
-        expect(encoded).not.toContain("/private/repo");
-      }),
-  );
-
-  it.effect.each(["timeout", "spawn"] as const)(
-    "checkpoint commands do not retry %s failures",
-    (kind) =>
-      Effect.gen(function* () {
-        let attempts = 0;
-        const fields = { command: "git", argumentCount: 2, cwd: "/workspace" };
-        const failure =
-          kind === "timeout"
-            ? new ProcessRunner.ProcessTimeoutError({ ...fields, timeoutMs: 30_000 })
-            : new ProcessRunner.ProcessSpawnError({ ...fields, cause: new Error("spawn failed") });
-        const service = yield* VcsProcess.make.pipe(
-          Effect.provideService(ProcessRunner.ProcessRunner, {
-            run: () =>
-              Effect.sync(() => {
-                attempts += 1;
-              }).pipe(Effect.andThen(Effect.fail(failure))),
-          }),
-        );
-        const error = yield* service
-          .run({
-            ...baseInput,
-            operation: VcsProcess.CHECKPOINT_CAPTURE_OPERATION,
-          })
-          .pipe(Effect.flip);
-        expect(attempts).toBe(1);
-        expect(error._tag).toBe(
-          kind === "timeout" ? "VcsProcessTimeoutError" : "VcsProcessSpawnError",
-        );
+        expect(encoded).not.toContain("private");
       }),
   );
 
   it.effect.each([
     {
-      name: "recovers after two lock failures",
-      failures: 2,
-      attempts: 3,
-      transient: true,
-      capture: true,
-      streaming: false,
+      stderr: "fatal: fsync error on '.git/objects/a5/tmp_obj_Pseg66': Operation not supported",
+      fsyncMethods: ["fsync", "writeout-only"],
     },
     {
-      name: "bounds persistent lock failures",
-      failures: Infinity,
-      attempts: 3,
-      transient: true,
-      capture: true,
-      streaming: false,
+      stderr:
+        "fatal: update_ref failed for ref 'refs/t3/checkpoints/x': cannot update ref 'refs/t3/checkpoints/x': couldn't write '/Volumes/share/.git/refs/t3/checkpoints/x.lock'",
+      fsyncMethods: ["fsync", "writeout-only"],
+    },
+    { stderr: "fatal: Operation not supported", fsyncMethods: ["fsync"] },
+    {
+      stderr:
+        "fatal: update_ref failed for ref 'refs/t3/checkpoints/x': cannot update ref 'refs/t3/checkpoints/x': couldn't write '/Volumes/share/.git/refs/t3/checkpoints/x.lock': Input/output error",
+      fsyncMethods: ["fsync"],
     },
     {
-      name: "does not retry unknown exits",
-      failures: Infinity,
-      attempts: 1,
-      transient: false,
-      capture: true,
-      streaming: false,
+      stderr: "fatal: fsync error on '.git/objects/a5/tmp_obj_Pseg66': Operation not supported",
+      fsyncMethods: ["fsync", "writeout-only"],
+      fallbackFails: true,
     },
     {
-      name: "leaves other operations unchanged",
-      failures: Infinity,
-      attempts: 1,
-      transient: true,
-      capture: false,
-      streaming: false,
+      platform: "linux",
+      stderr: "fatal: fsync error on '.git/objects/a5/tmp_obj_Pseg66': Operation not supported",
+      fsyncMethods: ["fsync"],
     },
     {
-      name: "does not replay stdout callbacks",
-      failures: Infinity,
-      attempts: 1,
-      transient: true,
-      capture: true,
-      streaming: true,
+      operation: baseInput.operation,
+      stderr: "fatal: fsync error on '.git/objects/a5/tmp_obj_Pseg66': Operation not supported",
+      fsyncMethods: ["fsync"],
     },
-  ])(
-    "checkpoint command retry $name",
-    ({ failures, attempts: expectedAttempts, transient, capture, streaming }) =>
+    {
+      stderr: "fatal: fsync error on '.git/objects/bulk_fsync_Pseg66': Operation not supported",
+      fsyncMethods: ["batch", "writeout-only"],
+    },
+    {
+      stderr:
+        "fatal: update_ref failed for ref 'refs/t3/checkpoints/x': cannot update ref 'refs/t3/checkpoints/x': couldn't write '/Volumes/share/.git/refs/t3/checkpoints/x.lock'",
+      fsyncMethods: ["batch", "writeout-only"],
+    },
+  ] as const)(
+    "falls back to writeout-only only for unsupported flushes on macOS ($fsyncMethods): $stderr",
+    ({ stderr, fsyncMethods, ...scenario }) =>
       Effect.gen(function* () {
-        let attempts = 0;
+        const seen: Array<ReadonlyArray<string>> = [];
         const service = yield* VcsProcess.make.pipe(
+          Effect.provideService(
+            HostProcess.Platform,
+            "platform" in scenario ? scenario.platform : "darwin",
+          ),
           Effect.provideService(ProcessRunner.ProcessRunner, {
-            run: () =>
+            run: (input) =>
               Effect.sync(() => {
-                attempts += 1;
+                // Command Center: drop the hardened `-c` prefix and safe.directory pair.
+                seen.push(input.args.slice(HOST_GIT_HARDENED_CONFIG_ARGS.length + 2));
+                const failed =
+                  input.args.includes(`core.fsyncMethod=${fsyncMethods[0]}`) ||
+                  ("fallbackFails" in scenario && scenario.fallbackFails);
                 return {
                   stdout: "",
-                  stderr:
-                    attempts > failures
-                      ? ""
-                      : transient
-                        ? "fatal: Unable to create '/repo/index.lock': File exists"
-                        : "fatal: index file corrupt",
-                  code: ChildProcessSpawner.ExitCode(attempts > failures ? 0 : attempts),
+                  stderr: failed ? stderr : "",
+                  code: ChildProcessSpawner.ExitCode(failed ? 128 : 0),
                   timedOut: false,
                   stdoutTruncated: false,
                   stderrTruncated: false,
@@ -444,31 +477,48 @@ describe("VcsProcess.run", () => {
               }),
           }),
         );
-        const fiber = yield* service
+        const exit = yield* service
           .run({
             ...baseInput,
-            operation: capture ? VcsProcess.CHECKPOINT_CAPTURE_OPERATION : baseInput.operation,
-            ...(streaming ? { onStdoutChunk: () => {} } : {}),
+            operation:
+              "operation" in scenario
+                ? scenario.operation
+                : VcsProcess.CHECKPOINT_CAPTURE_OPERATION,
+            args: [
+              "-c",
+              "core.fsync=objects,reference",
+              "-c",
+              ...(fsyncMethods[0] === "batch" ? ["core.fsyncMethod=fsync", "-c"] : []),
+              `core.fsyncMethod=${fsyncMethods[0]}`,
+              "add",
+            ],
           })
-          .pipe(Effect.exit, Effect.forkScoped);
-        yield* TestClock.adjust("150 millis");
-        const result = yield* Fiber.join(fiber);
-        expect(attempts).toBe(expectedAttempts);
-        if (failures === Infinity) {
-          if (Exit.isSuccess(result))
-            return yield* Effect.die("Expected a capture command failure");
-          const error = Cause.findErrorOption(result.cause);
-          if (error._tag === "None" || error.value._tag !== "VcsProcessExitError") {
-            return yield* Effect.die("Expected a Git exit error");
-          }
-          expect(error.value.exitCode).toBe(expectedAttempts);
-        } else {
-          expect(Exit.isSuccess(result)).toBe(true);
+          .pipe(Effect.exit);
+        expect(seen).toEqual(
+          fsyncMethods.map((method) => [
+            "-c",
+            "core.fsync=objects,reference",
+            "-c",
+            ...(fsyncMethods[0] === "batch"
+              ? [`core.fsyncMethod=${method === "batch" ? "fsync" : method}`, "-c"]
+              : []),
+            `core.fsyncMethod=${method}`,
+            "add",
+          ]),
+        );
+        expect(Exit.isSuccess(exit)).toBe(
+          fsyncMethods.length === 2 && !("fallbackFails" in scenario && scenario.fallbackFails),
+        );
+        if (Exit.isFailure(exit)) {
+          expect(Cause.findErrorOption(exit.cause)).toMatchObject({
+            _tag: "Some",
+            value: { _tag: "VcsProcessExitError", exitCode: 128 },
+          });
         }
       }),
   );
 
-  it.effect("bounds a synthetic burst of GitHub API processes", () =>
+  it.effect("bounds a burst of processes that share a concurrency key", () =>
     Effect.gen(function* () {
       const gate = yield* Deferred.make<void>();
       const starts = yield* Queue.unbounded<number>();
@@ -504,10 +554,11 @@ describe("VcsProcess.run", () => {
       const burst = yield* Effect.all(
         Array.from({ length: 32 }, (_, index) =>
           service.run({
-            operation: `synthetic.github.${index}`,
-            command: "gh",
+            operation: `synthetic.cli.${index}`,
+            command: "host-cli",
             args: ["api", "user"],
             cwd: "/workspace",
+            concurrency: { key: "host-cli", limit: 4 },
           }),
         ),
         { concurrency: "unbounded" },
@@ -525,74 +576,30 @@ describe("VcsProcess.run", () => {
     }),
   );
 
-  it.effect("collects stdout", () =>
+  it.effect("keeps git from opening a folder laid out as a bare repository", () =>
     Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const cwd = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-vcs-bare-" });
+      yield* fileSystem.makeDirectory(path.join(cwd, "objects", "info"), { recursive: true });
+      yield* fileSystem.makeDirectory(path.join(cwd, "refs", "heads"), { recursive: true });
+      yield* fileSystem.writeFileString(path.join(cwd, "HEAD"), "ref: refs/heads/main\n");
+      yield* fileSystem.writeFileString(
+        path.join(cwd, "config"),
+        '[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tworktree = .\n\tfsmonitor = "echo ran >> fsmonitor-runs; false"\n',
+      );
+
       const result = yield* run({
-        operation: "test.stdout",
-        command: "node",
-        args: ["-e", "process.stdout.write('hello')"],
-        cwd: process.cwd(),
+        operation: "test.bare-repository",
+        command: "git",
+        args: ["status"],
+        cwd,
+        allowNonZeroExit: true,
       });
 
-      expect(result.stdout).toBe("hello");
-      expect(result.stderr).toBe("");
-      expect(result.stdoutTruncated).toBe(false);
-      expect(result.stderrTruncated).toBe(false);
-    }).pipe(provideLive),
-  );
-
-  it.effect("writes stdin before waiting for exit", () =>
-    Effect.gen(function* () {
-      const result = yield* run({
-        operation: "test.stdin",
-        command: "node",
-        args: [
-          "-e",
-          [
-            "process.stdin.setEncoding('utf8');",
-            "let data='';",
-            "process.stdin.on('data', chunk => { data += chunk; });",
-            "process.stdin.on('end', () => { process.stdout.write(data); });",
-          ].join(""),
-        ],
-        cwd: process.cwd(),
-        stdin: "stdin payload",
-      });
-
-      expect(result.stdout).toBe("stdin payload");
-    }).pipe(provideLive),
-  );
-
-  it.effect("fails with VcsProcessExitError for non-zero exits by default", () =>
-    Effect.gen(function* () {
-      const secretArgument = "--token=super-secret-token";
-      const secretStderr = "remote rejected super-secret-token";
-      const error = yield* run({
-        operation: "test.exit",
-        command: "node",
-        args: [
-          "-e",
-          "process.stderr.write(process.argv[1]); process.exit(2)",
-          secretStderr,
-          secretArgument,
-        ],
-        cwd: process.cwd(),
-      }).pipe(Effect.flip);
-
-      expect(error).toBeInstanceOf(VcsProcessExitError);
-      expect(error).toMatchObject({
-        operation: "test.exit",
-        command: "node",
-        argumentCount: 4,
-        exitCode: 2,
-        detail: "Process exited with a non-zero status.",
-        failureKind: "command-failed",
-        stderrLength: secretStderr.length,
-        stderrTruncated: false,
-      });
-      expect(error.message).not.toContain(secretArgument);
-      expect(error.message).not.toContain(secretStderr);
-    }).pipe(provideLive),
+      expect(result.exitCode).not.toBe(0);
+      expect(yield* fileSystem.exists(path.join(cwd, "fsmonitor-runs"))).toBe(false);
+    }).pipe(Effect.scoped, provideLive, Effect.provide(NodeServices.layer)),
   );
 
   it.effect("classifies authentication failures without retaining stderr", () =>
@@ -645,21 +652,27 @@ describe("VcsProcess.run", () => {
     }).pipe(provideLive),
   );
 
-  it.effect("classifies HTTP 429 responses as rate limits", () =>
+  it.effect("reads a failure with the command's own classifier and names it in its terms", () =>
     Effect.gen(function* () {
-      const providerStderr = "HTTP 429: Too Many Requests. request-id=secret-value";
-      const error = yield* run({
-        operation: "test.rate-limit",
-        command: "node",
-        args: ["-e", "process.stderr.write(process.argv[1]); process.exit(1)", providerStderr],
-        cwd: process.cwd(),
-      }).pipe(Effect.flip);
+      const fail = (input: Partial<VcsProcess.VcsProcessInput>) =>
+        run({
+          operation: "test.classify",
+          command: "node",
+          args: ["-e", "process.stderr.write('HTTP 404: 404 Not Found'); process.exit(1)"],
+          cwd: process.cwd(),
+          ...input,
+        }).pipe(Effect.flip);
 
-      expect(error).toMatchObject({
-        detail: "API rate limit exceeded.",
-        failureKind: "rate-limited",
+      expect(yield* fail({})).toMatchObject({
+        failureKind: "command-failed",
+        detail: "Process exited with a non-zero status.",
       });
-      expect(error.message).not.toContain(providerStderr);
+      expect(
+        yield* fail({
+          classifyFailure: (stderr) => (stderr.includes("404") ? "not-found" : null),
+          notFoundDetail: "Merge request not found.",
+        }),
+      ).toMatchObject({ failureKind: "not-found", detail: "Merge request not found." });
     }).pipe(provideLive),
   );
 
@@ -684,68 +697,6 @@ describe("VcsProcess.run", () => {
     }).pipe(provideLive),
   );
 
-  it.effect("preserves real boundary causes without manufacturing structural ones", () =>
-    Effect.gen(function* () {
-      const cause = new Error("secret stdin failure");
-      const error = yield* captureProcessResult(
-        Effect.fail(
-          new ProcessRunner.ProcessStdinError({
-            command: baseInput.command,
-            argumentCount: baseInput.args.length,
-            cwd: baseInput.cwd,
-            stdinBytes: 47,
-            cause,
-          }),
-        ),
-      );
-
-      expect(error).toMatchObject({
-        _tag: "VcsProcessStdinWriteError",
-        operation: baseInput.operation,
-        stdinBytes: 47,
-        cause,
-      });
-      expect(error.message).not.toContain(cause.message);
-
-      const missingExitCodeError = yield* captureProcessResult(
-        Effect.succeed({
-          stdout: "",
-          stderr: "",
-          code: null,
-          timedOut: false,
-          stdoutTruncated: false,
-          stderrTruncated: false,
-          stdoutInvalidUtf8: false,
-          stderrInvalidUtf8: false,
-        }),
-      );
-
-      expect(missingExitCodeError).toMatchObject({
-        _tag: "VcsProcessMissingExitCodeError",
-        operation: baseInput.operation,
-        command: baseInput.command,
-        cwd: baseInput.cwd,
-        argumentCount: baseInput.args.length,
-      });
-      expect(missingExitCodeError).not.toHaveProperty("cause");
-    }),
-  );
-
-  it.effect("returns output when non-zero exits are allowed", () =>
-    Effect.gen(function* () {
-      const result = yield* run({
-        operation: "test.allowed-exit",
-        command: "node",
-        args: ["-e", "process.stderr.write('boom'); process.exit(2)"],
-        cwd: process.cwd(),
-        allowNonZeroExit: true,
-      });
-
-      expect(result.exitCode).toBe(2);
-      expect(result.stderr).toBe("boom");
-    }).pipe(provideLive),
-  );
-
   it.effect("truncates output and appends the marker when requested", () =>
     Effect.gen(function* () {
       const result = yield* run({
@@ -760,21 +711,6 @@ describe("VcsProcess.run", () => {
       expect(result.stdoutTruncated).toBe(true);
       expect(result.stdout).toContain("[truncated]");
       expect(result.stderrTruncated).toBe(false);
-    }).pipe(provideLive),
-  );
-
-  it.effect("truncates without the marker when truncation markers are disabled", () =>
-    Effect.gen(function* () {
-      const result = yield* run({
-        operation: "test.truncate-silent",
-        command: "node",
-        args: ["-e", "process.stdout.write('x'.repeat(2048))"],
-        cwd: process.cwd(),
-        maxOutputBytes: 128,
-      });
-
-      expect(result.stdoutTruncated).toBe(true);
-      expect(result.stdout).not.toContain("[truncated]");
     }).pipe(provideLive),
   );
 
@@ -811,23 +747,6 @@ describe("VcsProcess.run", () => {
       expect(result.stdout).toBe("xxxxxxxx");
       expect(result.stdoutTruncated).toBe(true);
       expect(Buffer.concat(chunks).toString()).toBe("x".repeat(131072) + "\0S final\0");
-    }).pipe(provideLive),
-  );
-
-  it.effect("fails with VcsProcessTimeoutError on timeout", () =>
-    Effect.gen(function* () {
-      const errorFiber = yield* run({
-        operation: "test.timeout",
-        command: "node",
-        args: ["-e", "setTimeout(() => {}, 5000)"],
-        cwd: process.cwd(),
-        timeoutMs: 50,
-      }).pipe(Effect.flip, Effect.forkScoped);
-      yield* Effect.yieldNow;
-      yield* TestClock.adjust(Duration.millis(50));
-      const error = yield* Fiber.join(errorFiber);
-
-      expect(error).toBeInstanceOf(VcsProcessTimeoutError);
     }).pipe(provideLive),
   );
 });

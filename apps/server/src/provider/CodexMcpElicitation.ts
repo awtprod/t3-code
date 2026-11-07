@@ -100,7 +100,6 @@ function isMcpElicitationOneTimeApprovalValue(value: string): boolean {
   return /^(?:once|accept|approve|allow)(?:[_ -]?once)?$/i.test(value.trim());
 }
 
-/** Returns the app and approval choices advertised by an MCP elicitation. */
 export function describeMcpElicitation(
   payload: EffectCodexSchema.McpServerElicitationRequestParams,
 ): { readonly appName: string; readonly options: ReadonlyArray<ProviderApprovalOption> } {
@@ -157,7 +156,6 @@ export function describeMcpElicitation(
   };
 }
 
-/** Converts a T3 approval decision into the MCP elicitation wire response. */
 export function toMcpElicitationResponse(
   payload: EffectCodexSchema.McpServerElicitationRequestParams,
   decision: ProviderApprovalDecision,

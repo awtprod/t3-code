@@ -4,12 +4,20 @@ import { useMemo, useState } from "react";
 import { Pressable, ScrollView, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { useEnvironments } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { usageEnvironment } from "../../state/usage";
 
 const RANGES = [7, 30, 90] as const;
+
+/** Wall-clock ms read once per `key`, so the queried window holds still between renders. */
+function useNowFor(key: string): number {
+  const readNow = () => ({ key, nowMs: Date.now() });
+  const [snapshot, setSnapshot] = useState(readNow);
+  if (snapshot.key !== key) setSnapshot(readNow);
+  return snapshot.nowMs;
+}
 
 function total(tokens: UsageQueryTokenTotals): number | null {
   const values = [
@@ -75,17 +83,18 @@ export function SettingsUsageRouteScreen() {
   const [days, setDays] = useState<(typeof RANGES)[number] | "custom">(30);
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
+  const nowMs = useNowFor(`${days}|${customFrom}|${customTo}`);
   const input = useMemo(() => {
     const parsedFrom = Date.parse(`${customFrom}T00:00:00.000Z`);
     const parsedTo = Date.parse(`${customTo}T23:59:59.999Z`);
     const hasCustomRange =
       days === "custom" && Number.isFinite(parsedFrom) && Number.isFinite(parsedTo);
-    const to = hasCustomRange ? new Date(`${customTo}T23:59:59.999Z`) : new Date();
+    const to = hasCustomRange ? new Date(`${customTo}T23:59:59.999Z`) : new Date(nowMs);
     const from = hasCustomRange
       ? new Date(`${customFrom}T00:00:00.000Z`)
       : new Date(to.getTime() - (days === "custom" ? 30 : days) * 86_400_000);
     return { from: from.toISOString(), to: to.toISOString(), bucket: "day" as const, limit: 30 };
-  }, [customFrom, customTo, days]);
+  }, [customFrom, customTo, days, nowMs]);
   const query = useEnvironmentQuery(
     environment ? usageEnvironment({ environmentId: environment.environmentId, input }) : null,
   );

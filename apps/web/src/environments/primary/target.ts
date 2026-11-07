@@ -68,14 +68,6 @@ export class PrimaryEnvironmentDisabledError extends Schema.TaggedError<PrimaryE
   }
 }
 
-export const isPrimaryEnvironmentUrlInvalidError = Schema.is(PrimaryEnvironmentUrlInvalidError);
-export const isPrimaryEnvironmentProtocolUnsupportedError = Schema.is(
-  PrimaryEnvironmentProtocolUnsupportedError,
-);
-export const isDesktopEnvironmentBootstrapIncompleteError = Schema.is(
-  DesktopEnvironmentBootstrapIncompleteError,
-);
-
 export interface PrimaryEnvironmentTarget {
   readonly source: PrimaryEnvironmentTargetSource;
   readonly target: {
@@ -87,9 +79,6 @@ export interface PrimaryEnvironmentTarget {
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 
 function getDesktopLocalEnvironmentBootstrap(): DesktopEnvironmentBootstrap | null {
-  // The primary (Windows-native) backend keeps the "primary" id. The
-  // plural list may include a second WSL entry; the primary-target
-  // resolver only cares about the primary, so just find it.
   const bootstraps = window.desktopBridge?.getLocalEnvironmentBootstraps() ?? [];
   return bootstraps.find((entry) => entry.id === PRIMARY_LOCAL_ENVIRONMENT_ID) ?? null;
 }
@@ -166,13 +155,9 @@ function isSameLoopbackOrigin(left: URL, right: URL): boolean {
   return left.protocol === right.protocol && left.port === right.port;
 }
 
-// Whether this document was served by the vite dev server, which proxies
-// `/api`, `/ws`, `/attachments`, and `/.well-known` to the backend. When it
-// was, routing through the current origin is always correct — including when
-// the dev server is reached over a non-loopback host (a Tailscale name, a LAN
-// IP), where the origin string cannot match the loopback `VITE_DEV_SERVER_URL`.
-// `import.meta.env.DEV` is false in a production build, so this never widens
-// behaviour for the static-served app.
+// Whether the vite dev server (which proxies the backend routes) served this document.
+// Then the current origin is always right, including over a non-loopback host
+// (Tailscale, LAN) that cannot match the loopback `VITE_DEV_SERVER_URL`.
 function isDocumentServedByDevServer(currentUrl: URL, devServerUrl: URL): boolean {
   if (currentUrl.protocol !== "http:" && currentUrl.protocol !== "https:") {
     return false;
@@ -261,10 +246,7 @@ function resolveConfiguredPrimaryTarget(): PrimaryEnvironmentTarget | null {
     return null;
   }
 
-  // Scheme checks run on the raw configured string, while the URL parser
-  // folds schemes to lowercase ("WSS://host" parses fine). Without the
-  // case folding an uppercase scheme would be classified as plaintext and
-  // swapped to http/ws, silently downgrading TLS.
+  // Match URL scheme case-folding so uppercase WSS cannot downgrade to plaintext.
   const resolvedHttpBaseUrl =
     configuredHttpBaseUrl ??
     (configuredWsBaseUrl?.toLowerCase().startsWith("wss:")
@@ -364,8 +346,7 @@ export function resolvePrimaryEnvironmentHttpUrl(
   return url.toString();
 }
 
-// Null only when the desktop app runs with its local environment disabled;
-// every other host has a primary (falling back to the page origin).
+/** Null only for desktop with its local environment disabled; other hosts fall back to page origin. */
 export function readPrimaryEnvironmentTarget(): PrimaryEnvironmentTarget | null {
   if (isLocalEnvironmentDisabled()) {
     return null;
@@ -379,12 +360,9 @@ export function readPrimaryEnvironmentTarget(): PrimaryEnvironmentTarget | null 
     ...primaryTarget,
     target: {
       ...primaryTarget.target,
-      // In dev, route HTTP through the same (vite) origin so requests that read
-      // the target directly — notably environment discovery
-      // (`/.well-known/t3/environment`) — go through the vite proxy instead of
-      // hitting the backend origin cross-origin (which the browser blocks,
-      // surfacing as ConnectionTransientError "network"). Kept symmetric with
-      // the wsBaseUrl rewrite below; both are no-ops outside the dev server.
+      // In dev, route HTTP through the vite origin so direct target reads (environment
+      // discovery) use the proxy instead of a blocked cross-origin backend request.
+      // Symmetric with the wsBaseUrl rewrite; both are no-ops outside the dev server.
       httpBaseUrl: resolveHttpRequestBaseUrl(primaryTarget),
       wsBaseUrl: resolvePrimaryEnvironmentWebSocketBaseUrl(primaryTarget),
     },

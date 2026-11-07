@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { pipe } from "effect/Function";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { make as makeJsonSchemaGenerator } from "@effect/openapi-generator/JsonSchemaGenerator";
@@ -140,9 +141,8 @@ const ManualSchemas: Record<string, Schema.Json> = {
   },
 };
 
-// Codex adds plan slugs between our protocol refreshes (0.159 added `promax`).
-// T3 Code only uses the plan for labels, so an unknown slug must not fail the
-// whole `account/read` decode and take the provider down with it.
+// T3 Code only uses the plan for labels, so an unknown slug must not fail the whole
+// `account/read` decode and take the provider down with it.
 const DefinitionOverrides: Record<string, Schema.Json> = {
   PlanType: { type: "string" },
 };
@@ -165,7 +165,6 @@ const ensureGeneratedDir = Effect.fn("ensureGeneratedDir")(function* () {
 });
 
 const fetchText = Effect.fn("fetchText")(function* (url: string) {
-  // Unauthenticated GitHub API calls are capped at 60/hour; set GITHUB_TOKEN to lift that.
   const token = process.env.GITHUB_TOKEN;
   return yield* HttpClientRequest.get(url).pipe(
     HttpClientRequest.setHeader("user-agent", USER_AGENT),
@@ -294,13 +293,9 @@ function isJsonSchemaNode(value: Schema.Json | undefined): value is JsonSchemaNo
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-// Adapts Codex's JSON Schema to Effect's importer, visiting only schema
-// positions so a field literally named "properties" is left alone:
-// - Effect imports an object without additionalProperties as an open record.
-//   Codex omits it for plain structs, so close objects that list properties.
-// - Effect cannot intersect shared object fields with object alternatives,
-//   which Codex uses for "one of these keys plus shared fields"
-//   (image_url | file_id). Fold the shared fields into each alternative.
+// Visit only schema positions so fields literally named properties stay untouched.
+// Close Codex structs that omit additionalProperties; Effect otherwise imports open records.
+// Fold shared fields into each object alternative because Effect cannot intersect them.
 function adaptSchemaForEffect(value: Schema.Json): Schema.Json {
   if (!isJsonSchemaNode(value)) {
     return value;
@@ -377,7 +372,6 @@ function toPascalCaseMethod(method: string) {
 }
 
 function parseRequestEntries(fileContents: string): ReadonlyArray<MethodEntry> {
-  // Optional params render as `params?: Foo | undefined`; their JSON schema is `NullableFoo`.
   const entryPattern = /\{\s*"method":\s*"([^"]+)",\s*id:\s*RequestId,\s*params(\??):\s*([^,}|]+)/g;
   const entries: Array<MethodEntry> = [];
   let match: RegExpExecArray | null;
@@ -455,9 +449,7 @@ function resolveResponseTypeName(
     const fromParams = paramsType.replace(/Params$/, "Response");
     try {
       return resolveSchemaTypeName(fromParams, generatedSchemaNames);
-    } catch {
-      // Fall through to method-based lookup.
-    }
+    } catch {}
   }
 
   return resolveSchemaTypeName(`${toPascalCaseMethod(method)}Response`, generatedSchemaNames);
@@ -645,15 +637,15 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
     );
 
     for (const [definitionName, definitionSchema] of Object.entries(parsed.definitions ?? {})) {
-      aggregateSchemas[localDefinitionNames.get(definitionName)!] = stripNullDefaults(
-        normalizeNullableTypes(
-          rewriteExternalRefs(
-            DefinitionOverrides[definitionName] ?? definitionSchema,
-            localDefinitionNames,
-            file.namespace,
-            exportNameByQualifiedName,
-          ),
+      aggregateSchemas[localDefinitionNames.get(definitionName)!] = pipe(
+        rewriteExternalRefs(
+          DefinitionOverrides[definitionName] ?? definitionSchema,
+          localDefinitionNames,
+          file.namespace,
+          exportNameByQualifiedName,
         ),
+        normalizeNullableTypes,
+        stripNullDefaults,
       );
     }
 
@@ -664,15 +656,15 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
       }
     }
 
-    aggregateSchemas[file.exportName] = stripNullDefaults(
-      normalizeNullableTypes(
-        rewriteExternalRefs(
-          topLevelSchema,
-          localDefinitionNames,
-          file.namespace,
-          exportNameByQualifiedName,
-        ),
+    aggregateSchemas[file.exportName] = pipe(
+      rewriteExternalRefs(
+        topLevelSchema,
+        localDefinitionNames,
+        file.namespace,
+        exportNameByQualifiedName,
       ),
+      normalizeNullableTypes,
+      stripNullDefaults,
     );
   }
 

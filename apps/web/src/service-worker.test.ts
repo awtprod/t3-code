@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 function loadServiceWorker() {
   const listeners = new Map<string, (event: any) => void>();
-  const showNotification = vi.fn((_title: string, options?: { data?: unknown }) =>
+  const showNotification = vi.fn((_title: string, _options?: { data?: unknown }) =>
     Promise.resolve(),
   );
   const openWindow = vi.fn(() => Promise.resolve());

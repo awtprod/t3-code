@@ -4,7 +4,6 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
@@ -117,7 +116,7 @@ function makeCredentials(dbPath: string, override: unknown = undefined) {
     JSON.stringify(override ?? { ...profile, prospectorDbPath: dbPath }),
   );
   return CommandCenterCredentialStore.of({
-    get: () => Effect.succeed(Option.some(value)),
+    get: () => Effect.succeedSome(value),
     set: () => Effect.void,
     create: () => Effect.void,
     remove: () => Effect.void,

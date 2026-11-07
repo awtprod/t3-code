@@ -1,17 +1,8 @@
 /**
- * The signed cookie that names which loopback port the preview gateway forwards to.
- *
- * The gateway is mounted at the *root* of its own port rather than under a
- * `/preview/<port>/` prefix, because dev servers emit absolute URLs
- * (`/@vite/client`, `/src/main.tsx`, the HMR socket) that would resolve against
- * the gateway origin and 404 under a prefix. Root mounting means the request
- * path can no longer carry the target port, so the port travels in a cookie.
- *
- * A cookie the browser can edit would turn the gateway into a "pick your own
- * upstream" control, so the value is HMAC-signed with the same server secret
- * machinery the session cookie uses and carries its own expiry. Verification is
- * pure and lives here so it can be tested exhaustively; the port range and
- * loopback rules stay in {@link ./gatewayTarget.ts}.
+ * The signed cookie naming the loopback port the preview gateway forwards to. The
+ * gateway is root-mounted (dev servers emit absolute URLs that 404 under a prefix),
+ * so the port travels in a cookie. A browser-editable port would let a client pick
+ * its own upstream, so the cookie is HMAC-signed with the server secret and expires.
  */
 
 import * as Base64Url from "effect/encoding/Base64Url";
@@ -85,11 +76,10 @@ export function signPreviewPortCookie(input: {
 }
 
 /**
- * Verify a cookie value and recover the port it names.
- *
- * `selfPorts` are the server's own listening ports, forwarded to
- * {@link resolveGatewayPort} so a cookie can never aim the gateway at itself —
- * including a cookie that was validly signed before those ports were known.
+ * Verify a cookie value and recover the port it names. Verification is pure; port
+ * range and loopback rules live in {@link ./gatewayTarget.ts}. `selfPorts` (the
+ * server's own ports) go to {@link resolveGatewayPort} so a cookie can never aim
+ * the gateway at itself, even one validly signed before those ports were known.
  */
 export function verifyPreviewPortCookie(input: {
   readonly value: string | undefined;

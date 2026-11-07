@@ -10,6 +10,8 @@ import {
   windowsPathBreadcrumbs,
 } from "./windowsMediaPicker.logic";
 
+const decodeChatAttachment = Schema.decodeUnknownSync(ChatAttachment);
+
 function entry(
   name: string,
   kind: CommandCenterWindowsMediaEntry["kind"],
@@ -107,6 +109,6 @@ describe("draft -> turn mapping", () => {
     expect("previewUrl" in turn[0]!).toBe(false);
     expect("dataUrl" in turn[0]!).toBe(false);
     // The wire shape decodes as the contract's windows-file member.
-    expect(Schema.decodeUnknownSync(ChatAttachment)(turn[0])).toEqual(picked);
+    expect(decodeChatAttachment(turn[0])).toEqual(picked);
   });
 });

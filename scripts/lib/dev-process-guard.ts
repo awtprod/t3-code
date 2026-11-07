@@ -3,15 +3,10 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 /**
- * Records the process group of a running dev-runner so a later launch (or the
- * `dev:stop` script) can reap the whole tree — the `vp` toolchain, the
- * `node --watch src/bin.ts` watcher, and the server it spawns.
- *
- * The watcher is the reason orphans accumulate: killing only the dev-runner pid
- * leaves the watcher reparented to init, where it keeps respawning the server
- * against the same data directory. dev-runner spawns its children with
- * `detached: false`, so they inherit its process group and a single
- * group-directed signal cleans the entire tree.
+ * Records the process group of a running dev-runner so a later launch (or `dev:stop`) can
+ * reap the whole tree. Killing only the dev-runner pid leaves the `node --watch` watcher
+ * reparented to init, respawning the server against the same data directory. Children
+ * inherit the group (`detached: false`), so one group-directed signal cleans the tree.
  */
 export interface DevRunnerLock {
   readonly pid: number;
@@ -45,11 +40,10 @@ export function readProcessCwd(pid: number): string | undefined {
 }
 
 /**
- * True when a process command line looks like a dev server belonging to this
- * repo's stack: the dev-runner launcher, the `node --watch src/bin.ts` server
- * watcher (or the server it spawns), or a Vite web dev server. The match is
- * repo-agnostic — always pair it with a cwd-under-repo check before acting so a
- * dev server from a *different* checkout is left alone.
+ * True when a process command line looks like a dev server of this repo's stack: the
+ * dev-runner launcher, the `node --watch src/bin.ts` watcher (or its server), or a Vite
+ * web dev server. The match is repo-agnostic: pair it with a cwd-under-repo check so a
+ * *different* checkout's dev server is left alone.
  */
 export function isDevServerCmdline(cmdline: string): boolean {
   if (cmdline.includes("dev-runner")) {

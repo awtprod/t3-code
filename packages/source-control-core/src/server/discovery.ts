@@ -1,8 +1,3 @@
-/**
- * Discovery specs: how each provider reports its CLI or API, and the shared probe that runs them.
- *
- * @module source-control-core/server/discovery
- */
 import * as NodeUtil from "node:util";
 import {
   VcsProcessSpawnError,
@@ -63,10 +58,7 @@ export type SourceControlApiDiscoverySpec = SourceControlDiscoverySpecBase & {
 export type SourceControlManagedCliDiscoverySpec = SourceControlDiscoverySpecBase & {
   readonly type: "managed-cli";
   readonly probe: (cwd: string) => Effect.Effect<SourceControlProviderDiscoveryItem>;
-  /**
-   * `null` when the integration holds nothing for the remote, which includes its CLI not being
-   * installed. A failure means it could not tell, and the registry does not keep that answer.
-   */
+  /** Null includes missing CLIs. Failure means unknown and must not be cached by the registry. */
   readonly refineUnknownRemote: (input: {
     readonly cwd: string;
     readonly context: SourceControlProvider.SourceControlProviderContext;
@@ -82,8 +74,6 @@ type SourceControlCliRemoteRefinementSpec = SourceControlCliDiscoverySpec & {
   readonly refineUnknownRemote: NonNullable<SourceControlCliDiscoverySpec["refineUnknownRemote"]>;
 };
 
-// Most provider CLIs answer `--version` in well under a second, so a short budget keeps
-// discovery snappy. Specs whose CLI is known to be slower can raise it via probeTimeoutMs.
 const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
 
 function probeTimeoutMs(spec: SourceControlCliDiscoverySpec): number {
@@ -308,10 +298,7 @@ export function probeSourceControlProvider(input: {
 
 const isVcsProcessSpawnError = Schema.is(VcsProcessSpawnError);
 
-/**
- * A hosting CLI that is not installed claims no remote. The spawner checks the cwd before the
- * executable, so only the executable's own ENOENT comes from `ChildProcess`.
- */
+/** The spawner checks cwd first, so ChildProcess NotFound identifies the executable. */
 export function isMissingExecutable(error: unknown): boolean {
   return (
     isVcsProcessSpawnError(error) &&
@@ -321,7 +308,6 @@ export function isMissingExecutable(error: unknown): boolean {
   );
 }
 
-/** The CLI ran, but its output does not say whether it holds the remote's host. */
 class UnknownRemoteUnanswered extends Schema.TaggedError<UnknownRemoteUnanswered>()(
   "UnknownRemoteUnanswered",
   {},
@@ -329,7 +315,6 @@ class UnknownRemoteUnanswered extends Schema.TaggedError<UnknownRemoteUnanswered
 
 export interface UnknownRemoteVerdict {
   readonly provider: SourceControlProviderInfo | null;
-  /** Every integration answered, so the verdict holds for other checkouts of the same server. */
   readonly settled: boolean;
 }
 
@@ -367,7 +352,6 @@ function refineWithSpec(input: {
     );
 }
 
-/** Asks every integration whether it holds the remote's server; the first claim wins. */
 export const refineUnknownRemoteProvider = Effect.fn("refineUnknownRemoteProvider")(
   function* (input: {
     readonly specs: ReadonlyArray<SourceControlProviderDiscoverySpec>;
@@ -378,8 +362,7 @@ export const refineUnknownRemoteProvider = Effect.fn("refineUnknownRemoteProvide
     const results = yield* Effect.forEach(input.specs, (spec) =>
       refineWithSpec({ ...input, spec }).pipe(Effect.result),
     );
-    // A claim reached after another integration could not answer is not settled: that one might
-    // have claimed the host first.
+    // An earlier integration that could not answer might have claimed this host.
     let settled = true;
     for (const result of results) {
       if (Result.isFailure(result)) settled = false;

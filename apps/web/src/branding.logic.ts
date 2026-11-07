@@ -23,21 +23,10 @@ export function resolveSidebarV2Default(stageLabel: string): boolean {
 }
 
 /**
- * Resolved sidebar v2 state: an explicit choice if the user has made one,
- * otherwise the default for this build stage.
- *
- * A stored `enabled: true` counts as an explicit choice even without the
- * companion flag. `true` was never the schema default, so it can only have come
- * from the Settings → Beta toggle — settings written before that flag existed
- * would otherwise lose the opt-in and drop such users back to v1 on production.
- * Mirrors how `normalizeDesktopSettingsDocument` treats a legacy stored
- * `updateChannel: "nightly"` as user-configured.
- *
- * `settingsHydrated` guards the startup window: client settings load
- * asynchronously and the pre-hydration snapshot is just the schema defaults, so
- * resolving against it would mount one sidebar and swap it out a tick later,
- * remounting the tree. While hydrating, hold v1 — where both paths already
- * start.
+ * Resolved sidebar v2 state: an explicit user choice, else the build-stage default.
+ * A stored `enabled: true` counts as explicit even without the companion flag
+ * (`true` was never the schema default). While `settingsHydrated` is false the
+ * snapshot is schema defaults, so hold v1 to avoid remounting the tree.
  */
 export function resolveSidebarV2Enabled(input: {
   readonly enabled: boolean;

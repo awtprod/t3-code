@@ -95,73 +95,69 @@ const acquire = Effect.fn("ServerSettingsFileLock.acquire")(function* (
  * resolving a supported settings-file symlink. SQLite owns crash-time release;
  * the explicit transaction cleanup covers ordinary failure and interruption.
  */
-export const withServerSettingsFileLock = <A, E, R>(
-  settingsPath: string,
-  effect: Effect.Effect<A, E, R>,
-): Effect.Effect<
+export const withServerSettingsFileLock = Effect.fn("ServerSettingsFileLock.withLock")(function* <
   A,
-  E | ServerSettingsFileLockError | ServerSettingsFileLockBusyError,
-  R | FileSystem.FileSystem | Path.Path
-> =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const absolutePath = path.resolve(settingsPath);
-    const parent = path.dirname(absolutePath);
-    yield* fs
-      .makeDirectory(parent, { recursive: true })
-      .pipe(
-        Effect.mapError(
-          (cause) => new ServerSettingsFileLockError({ settingsPath, operation: "prepare", cause }),
-        ),
-      );
-    const canonicalParent = yield* fs
-      .realPath(parent)
-      .pipe(
-        Effect.mapError(
-          (cause) => new ServerSettingsFileLockError({ settingsPath, operation: "prepare", cause }),
-        ),
-      );
-    const canonicalSettingsPath = path.join(canonicalParent, path.basename(absolutePath));
-    const lockPath = `${canonicalSettingsPath}.lock.sqlite`;
-
-    return yield* Effect.scoped(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        const connection = yield* sql.reserve.pipe(
-          Effect.mapError(
-            (cause) => new ServerSettingsFileLockError({ settingsPath, operation: "open", cause }),
-          ),
-        );
-        return yield* Effect.acquireUseRelease(
-          acquire(connection, settingsPath),
-          () => effect,
-          (heldConnection, exit) =>
-            execute(
-              heldConnection,
-              Exit.isSuccess(exit) ? "COMMIT" : "ROLLBACK",
-              settingsPath,
-              Exit.isSuccess(exit) ? "commit" : "rollback",
-            ),
-        );
-      }).pipe(
-        Effect.provide(
-          NodeSqliteClient.layer({
-            filename: lockPath,
-            spanAttributes: {
-              "db.name": path.basename(lockPath),
-              "service.name": "t3-settings-file-lock",
-            },
-          }),
-        ),
-      ),
-    ).pipe(
-      // The caller's error channel is generic, which `catchTags` cannot type; this maps
-      // the lock database's SqlError (opening the lock file), as before the lint rule.
-      // oxlint-disable-next-line t3code/prefer-catch-tags
-      Effect.catchTag(
-        "SqlError",
-        (cause) => new ServerSettingsFileLockError({ settingsPath, operation: "open", cause }),
+  E,
+  R,
+>(settingsPath: string, effect: Effect.Effect<A, E, R>) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const absolutePath = path.resolve(settingsPath);
+  const parent = path.dirname(absolutePath);
+  yield* fs
+    .makeDirectory(parent, { recursive: true })
+    .pipe(
+      Effect.mapError(
+        (cause) => new ServerSettingsFileLockError({ settingsPath, operation: "prepare", cause }),
       ),
     );
-  });
+  const canonicalParent = yield* fs
+    .realPath(parent)
+    .pipe(
+      Effect.mapError(
+        (cause) => new ServerSettingsFileLockError({ settingsPath, operation: "prepare", cause }),
+      ),
+    );
+  const canonicalSettingsPath = path.join(canonicalParent, path.basename(absolutePath));
+  const lockPath = `${canonicalSettingsPath}.lock.sqlite`;
+
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const connection = yield* sql.reserve.pipe(
+        Effect.mapError(
+          (cause) => new ServerSettingsFileLockError({ settingsPath, operation: "open", cause }),
+        ),
+      );
+      return yield* Effect.acquireUseRelease(
+        acquire(connection, settingsPath),
+        () => effect,
+        (heldConnection, exit) =>
+          execute(
+            heldConnection,
+            Exit.isSuccess(exit) ? "COMMIT" : "ROLLBACK",
+            settingsPath,
+            Exit.isSuccess(exit) ? "commit" : "rollback",
+          ),
+      );
+    }).pipe(
+      Effect.provide(
+        NodeSqliteClient.layer({
+          filename: lockPath,
+          spanAttributes: {
+            "db.name": path.basename(lockPath),
+            "service.name": "t3-settings-file-lock",
+          },
+        }),
+      ),
+    ),
+  ).pipe(
+    // The caller's error channel is generic, which `catchTags` cannot type; this maps
+    // the lock database's SqlError (opening the lock file), as before the lint rule.
+    // oxlint-disable-next-line t3code/prefer-catch-tags
+    Effect.catchTag(
+      "SqlError",
+      (cause) => new ServerSettingsFileLockError({ settingsPath, operation: "open", cause }),
+    ),
+  );
+});

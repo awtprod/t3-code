@@ -23,6 +23,7 @@ import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexReplay from "effect-codex-app-server/replay";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -31,7 +32,7 @@ import * as Stream from "effect/Stream";
 
 import packageJson from "../../../package.json" with { type: "json" };
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
-import { makeReplayServerConfig } from "./CodexAdapterV2.testkit.ts";
+import { makeReplayServerConfig } from "../testkit/ProviderReplayHarness.ts";
 
 /**
  * Codex `item/permissions/requestApproval` is a sandbox escalation request.
@@ -192,6 +193,7 @@ function permissionsReplayEntries(input: {
           approvalsReviewer: "user",
           sandboxPolicy: { type: "dangerFullAccess" },
           summary: "detailed",
+          collaborationMode: { mode: "default", settings: { model: "gpt-5.4" } },
         },
       },
     },
@@ -281,17 +283,6 @@ function makeAppThread(input: {
   };
 }
 
-const awaitUntil = (predicate: () => boolean, label: string): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    for (let attempt = 0; attempt < 5000; attempt++) {
-      if (predicate()) {
-        return;
-      }
-      yield* Effect.yieldNow;
-    }
-    return yield* Effect.die(`Timed out waiting for ${label}.`);
-  });
-
 interface PermissionsScenario {
   readonly name: string;
   readonly settings: typeof DEFAULT_CODEX_SETTINGS;
@@ -360,11 +351,21 @@ const runPermissionsScenario = (scenario: PermissionsScenario) =>
       runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
     });
     const events: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
+    const approvalRequested = yield* Deferred.make<void>();
+    const turnTerminal = yield* Deferred.make<void>();
     yield* runtime.events.pipe(
       Stream.runForEach((event) =>
         Effect.sync(() => {
           events.push(event);
-        }),
+        }).pipe(
+          Effect.andThen(
+            event.type === "runtime_request.updated"
+              ? Deferred.succeed(approvalRequested, undefined)
+              : event.type === "turn.terminal"
+                ? Deferred.succeed(turnTerminal, undefined)
+                : Effect.void,
+          ),
+        ),
       ),
       Effect.forkScoped,
     );
@@ -402,7 +403,7 @@ const runPermissionsScenario = (scenario: PermissionsScenario) =>
       );
 
     if (scenario.decision !== null) {
-      yield* awaitUntil(() => runtimeRequests().length > 0, "permissions approval request");
+      yield* Deferred.await(approvalRequested);
       yield* runtime.respondToRuntimeRequest({
         requestId: runtimeRequests()[0]!.id,
         decision: scenario.decision,
@@ -410,10 +411,7 @@ const runPermissionsScenario = (scenario: PermissionsScenario) =>
     }
     // The replay turn only completes once the adapter wrote the expected
     // response frame, so a wrong or missing answer never reaches this point.
-    yield* awaitUntil(
-      () => events.some((event) => event.type === "turn.terminal"),
-      "turn terminal",
-    );
+    yield* Deferred.await(turnTerminal);
     return { events, runtimeRequests, approvalItems };
   }).pipe(
     Effect.scoped,
@@ -540,7 +538,7 @@ describe("CodexAdapterV2 permission escalations: prompt text", () => {
       assert.equal(result.runtimeRequests()[0]!.kind, "file-change");
       assert.equal(
         result.approvalItems()[0]?.prompt,
-        "write: /workspace/out; network access — Build and publish the report.",
+        "write: /workspace/out; network access (Build and publish the report.)",
       );
     }),
   );
@@ -558,7 +556,7 @@ describe("CodexAdapterV2 permission escalations: prompt text", () => {
       assert.equal(result.runtimeRequests()[0]!.kind, "file-read");
       assert.equal(
         result.approvalItems()[0]?.prompt,
-        "read: /workspace/docs, /workspace/notes.md — Need the docs.",
+        "read: /workspace/docs, /workspace/notes.md (Need the docs.)",
       );
     }),
   );

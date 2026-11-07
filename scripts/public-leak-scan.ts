@@ -40,6 +40,9 @@ const REVIEWED_PUBLIC_UPSTREAM_COMMITS = [
   // pingdotgg/t3code tag v0.1.0 (orchestration v2) merged in the 2026-10 re-platform,
   // verified through the GitHub API on 2026-10-16.
   "81493efb71e8e8244f95d3e9f71d8369654ab151",
+  // pingdotgg/t3code tag v0.1.5 merged in the 2026-11 sync, verified through the GitHub API
+  // on 2026-11-01.
+  "6d450a4284852af137b2f3407fddd89eb76e7644",
 ] as const;
 
 const args = new Set(process.argv.slice(2));
@@ -177,13 +180,9 @@ function upstreamSyncRefs(): readonly string[] {
 }
 
 /**
- * Whether this path's content is byte-identical to the upstream side of the sync.
- *
- * Upstream is a public repository: its own fixtures and comments carry example
- * home paths and hostnames that the generic heuristics flag, and re-flagging
- * them says nothing about Command Center's private boundary. This is the same
- * reasoning `.repos/` already encodes, narrowed to content the fork has not
- * touched — anything the fork authored or edited keeps the full scan.
+ * Whether this path is byte-identical to the public upstream side of a sync. Upstream fixtures
+ * carry example paths and hosts the heuristics flag; anything the fork authored or edited
+ * keeps the full scan.
  */
 function isUpstreamVerbatim(relativePath: string, candidateBytes: Buffer): boolean {
   return upstreamRefs.some((ref) => {
@@ -195,14 +194,9 @@ function isUpstreamVerbatim(relativePath: string, candidateBytes: Buffer): boole
 }
 
 /**
- * Drop findings that sit on a line the fork never wrote.
- *
- * A merge result is a mix: the file is not byte-identical to upstream, yet most
- * of its lines are upstream's verbatim. Flagging those says nothing about
- * Command Center's private boundary, and they cannot be "fixed" — the rules
- * reject the absolute-path shape itself, so renaming the account in an upstream
- * fixture still trips them. Lines the fork authored or edited keep the full
- * scan, and denylist findings are never dropped.
+ * Drop findings on lines the fork never wrote: most lines of a merged file are upstream's
+ * verbatim and cannot be "fixed". Fork-authored or edited lines keep the full scan, and
+ * denylist findings are never dropped.
  */
 function dropUpstreamVerbatimLines(
   relativePath: string,
@@ -325,10 +319,8 @@ function readCandidate(relativePath: string): Candidate {
 }
 
 function scanHistoricalRevisions() {
-  // Audit Command Center's release lineage and each integration merge as a complete delta from its
-  // first parent. Preserved upstream ancestry may contain hundreds of intermediate public commits;
-  // scanning those separately creates findings for transient fixtures that are absent from the
-  // pinned merge result. The merge commit itself remains fully scanned below against the release
+  // Audit the release lineage and each integration merge as one delta from its first parent, not
+  // upstream's intermediate public commits. The merge itself is fully scanned against the release
   // parent, so every byte entering Command Center is still covered.
   const commits = git(["rev-list", "--first-parent", "--reverse", `${baseline}..HEAD`])
     .trim()

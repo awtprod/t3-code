@@ -29,9 +29,10 @@ export function WorktreeCleanupToastCoordinator() {
   const notices = useAtomValue(primaryServerWorktreeCleanupNoticesAtom);
   const toastedKeysRef = useRef<Set<string> | null>(null);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- raises an imperative toast for each new cleanup notice and persists which ones were shown.
   useEffect(() => {
-    toastedKeysRef.current ??= readToastedWorktreeCleanupNoticeKeys();
-    const { toToast, nextKeys } = planWorktreeCleanupNoticeToasts(notices, toastedKeysRef.current);
+    const toastedKeys = toastedKeysRef.current ?? readToastedWorktreeCleanupNoticeKeys();
+    const { toToast, nextKeys } = planWorktreeCleanupNoticeToasts(notices, toastedKeys);
     toastedKeysRef.current = nextKeys;
     rememberToastedWorktreeCleanupNoticeKeys(nextKeys);
 

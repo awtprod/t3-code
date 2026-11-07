@@ -1072,10 +1072,9 @@ export const safeRuntimeLayer = Layer.unwrap(
           }
           return yield* google.read(input);
         }).pipe(
-          Effect.flatMap((result) =>
-            result.operation === "drive.export"
-              ? Effect.fail("Drive export is unavailable to generic automation connector nodes.")
-              : Effect.succeed(result),
+          Effect.filterOrFail(
+            (result) => result.operation !== "drive.export",
+            () => "Drive export is unavailable to generic automation connector nodes.",
           ),
           Effect.mapError((cause) => (typeof cause === "string" ? cause : cause.message)),
         ),
