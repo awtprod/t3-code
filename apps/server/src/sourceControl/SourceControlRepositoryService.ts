@@ -31,6 +31,7 @@ import {
   type GitCloneProgressLine,
 } from "../project/gitCloneProgress.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { AUTHENTICATED_CLONE_OPERATION } from "../vcs/GitVcsDriverCore.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as GitHubProfileAuth from "./GitHubProfileAuth.ts";
@@ -189,6 +190,30 @@ function selectRemoteUrl(
     case "auto":
       return urls.sshUrl;
   }
+}
+
+/**
+ * A github.com clone URL in a form GitHub hands out: HTTPS, scp-style SSH, or
+ * an SSH URL. Other hosts, SSH aliases, userinfo, and extra path segments do
+ * not match.
+ */
+const GITHUB_CLONE_URL =
+  /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/iu;
+
+/**
+ * The HTTPS clone URL for a repository whose owner has an approved GitHub
+ * profile, or null. The driver authenticates that URL with the owner's profile
+ * (AUTHENTICATED_CLONE_OPERATION); SSH would instead depend on keys and host
+ * keys the server may not have. publishRepository applies the same rule.
+ */
+function managedGitHubCloneUrl(remoteUrl: string): string | null {
+  const match = GITHUB_CLONE_URL.exec(remoteUrl.trim());
+  const owner = match?.[1];
+  const name = match?.[2];
+  if (!owner || !name || name === "." || name === "..") return null;
+  return GitHubProfileAuth.approvedGitHubProfileForOwner(owner) === null
+    ? null
+    : `https://github.com/${owner}/${name}.git`;
 }
 
 function managedGitHubRepository(repository: string) {
@@ -353,10 +378,13 @@ export const make = Effect.gen(function* () {
         detail: "Enter a repository path or clone URL before cloning.",
       });
     }
+    // Clients pick the transport (the add-project palette sends GitHub's SSH
+    // URL), but a managed owner is cloned over HTTPS with its profile.
+    const cloneUrl = managedGitHubCloneUrl(remoteUrl) ?? remoteUrl;
     return {
       destinationPath: preparedDestination.destinationPath,
-      remoteUrl: redactRemoteUrl(remoteUrl),
-      cloneUrl: remoteUrl,
+      remoteUrl: redactRemoteUrl(cloneUrl),
+      cloneUrl,
       repository,
     } satisfies SourceControlPreparedClone;
   });
@@ -383,7 +411,9 @@ export const make = Effect.gen(function* () {
     };
     yield* git
       .execute({
-        operation: "SourceControlRepositoryService.cloneRepository",
+        // The driver adds the owner's profile header only for a managed
+        // GitHub HTTPS URL; any other clone runs exactly as before.
+        operation: AUTHENTICATED_CLONE_OPERATION,
         cwd: path.dirname(destinationPath),
         args: ["clone", "--progress", "--", cloneUrl, path.basename(destinationPath)],
         timeoutMs: options?.timeoutMs === undefined ? CLONE_TIMEOUT_MS : options.timeoutMs,
@@ -400,10 +430,14 @@ export const make = Effect.gen(function* () {
             new SourceControlRepositoryError({
               operation: "cloneRepository",
               provider: input.provider ?? SourceControlProviderKind.make("unknown"),
+              // Without an exit code git never ran (e.g. the profile for a
+              // managed owner is unavailable); the driver's detail says why.
               detail:
                 stderrTail.length > 0
                   ? stderrTail.join(" ")
-                  : "The repository could not be cloned.",
+                  : cause.exitCode === undefined
+                    ? cause.detail
+                    : "The repository could not be cloned.",
               cause,
             }),
         ),

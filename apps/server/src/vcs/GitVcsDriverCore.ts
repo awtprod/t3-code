@@ -72,6 +72,18 @@ const branchBaseConfigKey = (branch: string) => `branch.${branch}.t3-merge-base`
  */
 const legacyBranchBaseConfigKey = (branch: string) => `branch.${branch}.gh-merge-base`;
 const gitProcesses = Semaphore.makeUnsafe(8);
+
+/** The only remote form scoped GitHub auth sends a profile token to. */
+const MANAGED_GITHUB_HTTPS_URL =
+  /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)(?:\.git)?$/iu;
+
+/**
+ * Operation name for the one clone the driver authenticates:
+ * `clone --progress -- https://github.com/<owner>/<name>.git <directory>`, where
+ * the owner has an approved GitHub profile. Other clones run without auth.
+ */
+export const AUTHENTICATED_CLONE_OPERATION = "GitVcsDriver.cloneRepository";
+
 function parseGitInvocation(args: readonly string[]): {
   readonly globals: readonly string[];
   readonly verbIndex: number;
@@ -1399,6 +1411,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     if (invocation === null) return yield* Effect.fail("Unsupported leading Git option.");
     const { globals, verbIndex, hasCommandConfig } = invocation;
     const verb = input.args[verbIndex];
+    if (verb === "clone") {
+      return input.operation === AUTHENTICATED_CLONE_OPERATION
+        ? yield* scopedCloneAuth(input.args.slice(verbIndex + 1), globals)
+        : null;
+    }
     if (verb !== "push" && verb !== "fetch" && verb !== "pull") return null;
     if (hasCommandConfig)
       return yield* Effect.fail("Authenticated Git cannot use command configuration overrides.");
@@ -1424,8 +1441,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           )).trim()
         : "";
     const configuredUrl = rawPushUrl || rawUrl[0] || "";
-    const managedUrl = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)(?:\.git)?$/iu;
-    const fetchMatch = managedUrl.exec(rawUrl[0] ?? "");
+    const fetchMatch = MANAGED_GITHUB_HTTPS_URL.exec(rawUrl[0] ?? "");
     if (
       fetchMatch !== null &&
       GitHubProfileAuth.approvedGitHubProfileForOwner(fetchMatch[1] ?? "") !== null &&
@@ -1433,7 +1449,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     ) {
       return yield* Effect.fail("GitHub remote has multiple or conflicting URLs.");
     }
-    const match = managedUrl.exec(configuredUrl);
+    const match = MANAGED_GITHUB_HTTPS_URL.exec(configuredUrl);
     if (match === null) return null;
     const owner = GitHubProfileAuth.approvedGitHubProfileForOwner(match[1] ?? "");
     if (owner === null) return null;
@@ -1452,6 +1468,44 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       return yield* Effect.fail("GitHub remote URL rewrite is not allowed for authenticated Git.");
     }
     yield* inspectAuthenticatedGitConfig(input.cwd, globals);
+    return yield* profileAuthorization(owner, configuredUrl);
+  });
+
+  /**
+   * A clone has no repository config to inspect (git ignores an enclosing repo's local config
+   * and the hardened env drops global/system config), so only the exact shape
+   * SourceControlRepositoryService builds is authenticated.
+   */
+  const scopedCloneAuth = Effect.fn("GitVcsDriver.scopedCloneAuth")(function* (
+    cloneArgs: readonly string[],
+    globals: readonly string[],
+  ) {
+    const separator = cloneArgs.indexOf("--");
+    const remoteUrl = separator === -1 ? undefined : cloneArgs[separator + 1];
+    const match = remoteUrl === undefined ? null : MANAGED_GITHUB_HTTPS_URL.exec(remoteUrl);
+    if (remoteUrl === undefined || match === null) return null;
+    const owner = GitHubProfileAuth.approvedGitHubProfileForOwner(match[1] ?? "");
+    if (owner === null) return null;
+    const directory = cloneArgs[separator + 2];
+    if (
+      globals.length > 0 ||
+      cloneArgs.length !== separator + 3 ||
+      directory === undefined ||
+      directory.length === 0 ||
+      cloneArgs.slice(0, separator).some((option) => option !== "--progress")
+    ) {
+      return yield* Effect.fail(
+        "Authenticated clone accepts only --progress, a GitHub URL, and a directory.",
+      );
+    }
+    return yield* profileAuthorization(owner, remoteUrl);
+  });
+
+  /** The owner's profile token as an HTTP header pinned to exactly `remoteUrl`. */
+  const profileAuthorization = Effect.fn("GitVcsDriver.scopedAuth.profileAuthorization")(function* (
+    owner: string,
+    remoteUrl: string,
+  ) {
     if (Option.isNone(profileAuth)) {
       return yield* Effect.fail("The selected GitHub profile is unavailable.");
     }
@@ -1459,8 +1513,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       .get(owner)
       .pipe(Effect.mapError(() => `GitHub profile ${owner} is unavailable.`));
     const trusted = validateTrustedGitConfig({
-      remoteUrl: configuredUrl,
-      key: `http.${configuredUrl}.extraheader`,
+      remoteUrl,
+      key: `http.${remoteUrl}.extraheader`,
       value: Redacted.make(
         `AUTHORIZATION: basic ${Base64.encode(`x-access-token:${Redacted.value(credential.token)}`)}`,
       ),
@@ -1468,7 +1522,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     if ("rejected" in trusted) {
       return yield* Effect.fail("GitHub remote is not safe for authenticated Git.");
     }
-    return { remoteUrl: configuredUrl, entry: trusted.entry };
+    return { remoteUrl, entry: trusted.entry };
   });
 
   // Pre-2.36 Git rejects worktree list -z; normalize its line fallback to NUL records.

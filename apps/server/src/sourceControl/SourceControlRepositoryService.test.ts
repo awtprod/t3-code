@@ -19,6 +19,7 @@ import {
 
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { AUTHENTICATED_CLONE_OPERATION } from "../vcs/GitVcsDriverCore.ts";
 import type * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as SourceControlRepositoryService from "./SourceControlRepositoryService.ts";
@@ -881,6 +882,157 @@ it.effect("clones a looked-up repository after creating missing parent directori
         }),
       ),
     );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+const captureCloneExecute = (
+  calls: Array<{ operation: string; args: ReadonlyArray<string> }>,
+): GitVcsDriver.GitVcsDriver["Service"]["execute"] => {
+  return (input) =>
+    Effect.sync(() => {
+      calls.push({ operation: input.operation, args: input.args });
+      return processOutput();
+    });
+};
+
+it.effect.each([
+  "git@github.com:exampleowner/sample.git",
+  "ssh://git@github.com/exampleowner/sample.git",
+  "https://github.com/exampleowner/sample",
+  "https://github.com/exampleowner/sample.git/",
+])("clones a managed owner sent as %s over authenticated HTTPS", (remoteUrl) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-managed-clone-" });
+    const destinationPath = path.join(parent, "sample");
+    const calls: Array<{ operation: string; args: ReadonlyArray<string> }> = [];
+    const result = yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      return yield* service.cloneRepository({ remoteUrl, destinationPath });
+    }).pipe(Effect.provide(layer({ git: { execute: captureCloneExecute(calls) } })));
+
+    const httpsUrl = "https://github.com/exampleowner/sample.git";
+    assert.strictEqual(result.remoteUrl, httpsUrl);
+    assert.deepStrictEqual(calls, [
+      {
+        operation: AUTHENTICATED_CLONE_OPERATION,
+        args: ["clone", "--progress", "--", httpsUrl, "sample"],
+      },
+    ]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("clones a looked-up managed repository over HTTPS when no protocol is chosen", () => {
+  const pins: Array<string | null> = [];
+  const provider = makeProvider({
+    getRepositoryCloneUrls: () =>
+      Effect.gen(function* () {
+        const pin = yield* GitHubRequestPolicy.PinnedGitHubCredential;
+        pins.push(pin?.credentialFingerprint ?? null);
+        return {
+          nameWithOwner: "exampleowner/sample",
+          url: "https://github.com/exampleowner/sample",
+          sshUrl: "git@github.com:exampleowner/sample.git",
+        };
+      }),
+  });
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-managed-lookup-clone-" });
+    const destinationPath = path.join(parent, "sample");
+    const calls: Array<{ operation: string; args: ReadonlyArray<string> }> = [];
+    const result = yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      return yield* service.cloneRepository({
+        provider: SourceControlProviderKind.make("github"),
+        repository: "exampleowner/sample",
+        destinationPath,
+      });
+    }).pipe(
+      Effect.provide(
+        layer({
+          provider,
+          profile: GitHubProfileAuth.GitHubProfileAuth.of({
+            get: (owner) =>
+              Effect.succeed({
+                account: owner,
+                token: Redacted.make("fake-token"),
+                fingerprint: "github.com:test-fingerprint",
+              }),
+          }),
+          git: { execute: captureCloneExecute(calls) },
+        }),
+      ),
+    );
+
+    assert.deepStrictEqual(pins, ["github.com:test-fingerprint"]);
+    assert.strictEqual(result.remoteUrl, "https://github.com/exampleowner/sample.git");
+    assert.deepStrictEqual(
+      calls.map((call) => call.args[3]),
+      ["https://github.com/exampleowner/sample.git"],
+    );
+  }).pipe(Effect.provide(NodeServices.layer));
+});
+
+it.effect.each([
+  // No approved profile for this owner.
+  "git@github.com:someoneelse/sample.git",
+  // An SSH alias may stand for a different account's key; leave it alone.
+  "git@github-work.example:exampleowner/sample.git",
+  "https://github.example.com/exampleowner/sample.git",
+])("keeps the client's clone URL %s when no managed profile applies", (remoteUrl) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-unmanaged-clone-" });
+    const destinationPath = path.join(parent, "sample");
+    const calls: Array<{ operation: string; args: ReadonlyArray<string> }> = [];
+    const result = yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      return yield* service.cloneRepository({ remoteUrl, destinationPath });
+    }).pipe(Effect.provide(layer({ git: { execute: captureCloneExecute(calls) } })));
+
+    assert.strictEqual(result.remoteUrl, remoteUrl);
+    assert.deepStrictEqual(
+      calls.map((call) => call.args),
+      [["clone", "--progress", "--", remoteUrl, "sample"]],
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("explains a clone the driver refused before git ran", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-refused-clone-" });
+    const error = yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      return yield* Effect.flip(
+        service.cloneRepository({
+          remoteUrl: "git@github.com:exampleowner/sample.git",
+          destinationPath: path.join(parent, "sample"),
+        }),
+      );
+    }).pipe(
+      Effect.provide(
+        layer({
+          git: {
+            execute: (input) =>
+              Effect.fail(
+                new GitCommandError({
+                  operation: input.operation,
+                  command: "git",
+                  cwd: input.cwd,
+                  detail: "GitHub profile primary is unavailable.",
+                }),
+              ),
+          },
+        }),
+      ),
+    );
+    assert.strictEqual(error.detail, "GitHub profile primary is unavailable.");
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 

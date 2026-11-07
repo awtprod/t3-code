@@ -34,6 +34,7 @@ import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as ServerConfig from "../config.ts";
 import * as GitHubProfileAuth from "../sourceControl/GitHubProfileAuth.ts";
 import {
+  AUTHENTICATED_CLONE_OPERATION,
   makeGitVcsDriverCore,
   parseGitCheckoutProgressLine,
   splitNullSeparatedGitStdoutPaths,
@@ -134,6 +135,159 @@ it.effect.each(["exampleowner", "exampleorg"] as const)(
       });
       assert.notEqual(config.exitCode, 0);
     }).pipe(Effect.provide(layerTest)),
+);
+
+const runCapturedClone = (input: {
+  readonly operation: string;
+  readonly args: (cwd: string) => ReadonlyArray<string>;
+}) =>
+  Effect.gen(function* () {
+    const cwd = yield* makeTmpDir();
+    const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const captured: Array<{ args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
+    const spawner = ChildProcessSpawner.make((command) => {
+      if (
+        ChildProcess.isStandardCommand(command) &&
+        gitSubcommandArgs(command.args).includes("clone")
+      ) {
+        captured.push({ args: command.args, env: command.options.env ?? {} });
+        return Effect.succeed(makeSuccessfulHandle(""));
+      }
+      return delegate.spawn(command);
+    });
+    let credentialReads = 0;
+    const profile = GitHubProfileAuth.GitHubProfileAuth.of({
+      get: (owner) => {
+        credentialReads += 1;
+        return Effect.succeed({
+          account: owner,
+          token: Redacted.make("fake-token"),
+          fingerprint: "test",
+        });
+      },
+    });
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(GitHubProfileAuth.GitHubProfileAuth, profile),
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provide(layerServerConfig),
+    );
+    const result = yield* Effect.result(
+      driver.execute({ operation: input.operation, cwd, args: input.args(cwd) }),
+    );
+    const headers = captured.map((clone) =>
+      Array.from({ length: Number(clone.env.GIT_CONFIG_COUNT ?? 0) }, (_, index) => [
+        clone.env[`GIT_CONFIG_KEY_${index}`],
+        clone.env[`GIT_CONFIG_VALUE_${index}`],
+      ]).filter(([key]) => key?.endsWith(".extraheader")),
+    );
+    return { result, captured, headers, credentialReads };
+  });
+
+it.effect("authenticates a managed GitHub clone with only its owner's profile header", () =>
+  Effect.gen(function* () {
+    const remoteUrl = "https://github.com/exampleorg/sample.git";
+    const { result, captured, headers } = yield* runCapturedClone({
+      operation: AUTHENTICATED_CLONE_OPERATION,
+      args: () => ["clone", "--progress", "--", remoteUrl, "sample"],
+    });
+    assert.isTrue(Result.isSuccess(result));
+    assert.equal(captured.length, 1);
+    assert.deepStrictEqual(headers, [
+      [
+        [
+          `http.${remoteUrl}.extraheader`,
+          "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46ZmFrZS10b2tlbg==",
+        ],
+      ],
+    ]);
+    const args = captured[0]?.args ?? [];
+    assert.notInclude(args.join(" "), "fake-token");
+    assert.include(args, "credential.helper=");
+    assert.include(args, `http.${remoteUrl}.followRedirects=false`);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  {
+    name: "another operation",
+    operation: "GitVcsDriver.test.clone",
+    remoteUrl: "https://github.com/exampleowner/sample.git",
+  },
+  {
+    name: "an owner without a profile",
+    operation: AUTHENTICATED_CLONE_OPERATION,
+    remoteUrl: "https://github.com/someoneelse/sample.git",
+  },
+  {
+    name: "an SSH URL",
+    operation: AUTHENTICATED_CLONE_OPERATION,
+    remoteUrl: "git@github.com:exampleowner/sample.git",
+  },
+])("clones without credentials for $name", ({ operation, remoteUrl }) =>
+  Effect.gen(function* () {
+    const { result, captured, headers, credentialReads } = yield* runCapturedClone({
+      operation,
+      args: () => ["clone", "--progress", "--", remoteUrl, "sample"],
+    });
+    assert.isTrue(Result.isSuccess(result));
+    assert.equal(captured.length, 1);
+    assert.deepStrictEqual(headers, [[]]);
+    assert.notInclude(captured[0]?.args ?? [], "credential.helper=");
+    assert.equal(credentialReads, 0);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  {
+    name: "a template directory",
+    args: (_cwd: string) => [
+      "clone",
+      "--progress",
+      "--template=/tmp/hooks",
+      "--",
+      "https://github.com/exampleowner/sample.git",
+      "sample",
+    ],
+  },
+  {
+    name: "a leading -C",
+    args: (cwd: string) => [
+      "-C",
+      cwd,
+      "clone",
+      "--progress",
+      "--",
+      "https://github.com/exampleowner/sample.git",
+      "sample",
+    ],
+  },
+  {
+    name: "a second positional argument",
+    args: (_cwd: string) => [
+      "clone",
+      "--progress",
+      "--",
+      "https://github.com/exampleowner/sample.git",
+      "sample",
+      "extra",
+    ],
+  },
+])("refuses an authenticated clone with $name before reading the profile", ({ args }) =>
+  Effect.gen(function* () {
+    const { result, captured, credentialReads } = yield* runCapturedClone({
+      operation: AUTHENTICATED_CLONE_OPERATION,
+      args,
+    });
+    assert.isTrue(Result.isFailure(result));
+    if (Result.isFailure(result)) {
+      assert.equal(
+        result.failure.detail,
+        "Authenticated clone accepts only --progress, a GitHub URL, and a directory.",
+      );
+    }
+    assert.equal(captured.length, 0);
+    assert.equal(credentialReads, 0);
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("uses a remote named fetch without reclassifying a nested remote command", () =>
