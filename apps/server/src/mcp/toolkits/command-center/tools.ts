@@ -526,7 +526,7 @@ const CommandCenterKnowledgeRetireTool = commandCenterCapability(
     dependencies,
   })
     .annotate(Tool.Readonly, false)
-    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Destructive, true)
     .annotate(Tool.Idempotent, true),
   "cc.items.write",
 );
