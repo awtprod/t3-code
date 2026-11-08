@@ -119,12 +119,39 @@ export const make = Effect.gen(function* () {
   const requireScope = Effect.fn("Knowledge.requireScope")(function* (
     scope: Scope,
     access: KnowledgeAccess,
+    capability: "cc.items.read" | "cc.items.write",
   ) {
     if (
       access.kind === "scoped" &&
       (scope.spaceId !== access.spaceId || scope.repositoryId !== access.repositoryId)
     )
       return yield* error("denied", "This credential cannot access the requested knowledge scope.");
+    if (Option.isNone(config))
+      return yield* error("denied", "The current Space configuration is unavailable.");
+    const loaded = yield* config.value.load.pipe(
+      Effect.catchCause((cause) =>
+        Effect.fail(
+          new KnowledgeError({
+            reason: "denied",
+            message: "The current Space configuration is unavailable.",
+            cause,
+          }),
+        ),
+      ),
+    );
+    const space = loaded.spaces.find((space) => space.id === scope.spaceId);
+    if (
+      space === undefined ||
+      (scope.repositoryId !== null &&
+        !space.repositories.some((repository) => repository.id === scope.repositoryId))
+    )
+      return yield* error("denied", "The requested repository scope is unavailable.");
+    if (
+      access.kind === "scoped" &&
+      (!access.capabilities.includes(capability) ||
+        !space.policy.allowedCapabilities.includes(capability))
+    )
+      return yield* error("denied", "The Space no longer permits this knowledge operation.");
     const rows =
       yield* sql`SELECT id FROM command_center_spaces WHERE id=${scope.spaceId} AND lifecycle='active' LIMIT 1`;
     if (rows.length === 0) return yield* error("not_found", "The Space was not found.");
@@ -202,7 +229,7 @@ export const make = Effect.gen(function* () {
     connected?: Connected,
   ) {
     const request = yield* decode(CommandCenterKnowledgeCaptureInput)(raw);
-    yield* requireScope(request, access);
+    yield* requireScope(request, access, "cc.items.write");
     if (
       new Set(
         request.documents.map((doc) =>
@@ -251,12 +278,21 @@ export const make = Effect.gen(function* () {
             yield* sql`DELETE FROM command_center_knowledge_current WHERE id IN (SELECT c.id FROM command_center_knowledge_chunks c JOIN command_center_knowledge_sources s ON s.current_revision_id=c.revision_id WHERE s.id=${sourceId})`;
             yield* sql`INSERT INTO command_center_knowledge_revisions(id,source_id,document_json,captured_at,actor_id,acquisition,connected_operation,connected_account)
           VALUES(${revisionId},${sourceId},${canonicalJson(doc)},${at},${access.actorId},${connected ? "connected" : "imported"},${connected?.operation ?? null},${connected?.account ?? null})`;
-            for (let start = 0, chunk = 0; start < doc.text.length; start += 2048, chunk++) {
-              const end = Math.min(start + 2048, doc.text.length);
+            for (let start = 0, chunk = 0; start < doc.text.length; chunk++) {
+              let end = Math.min(start + 2048, doc.text.length);
+              if (end < doc.text.length) {
+                // Keep ordinary words together, with at least 1536 code units of progress.
+                const boundary = doc.text
+                  .slice(start + 1536, end)
+                  .match(/[^\p{L}\p{N}\p{M}_](?=[\p{L}\p{N}\p{M}_]*$)/u);
+                if (boundary) end = start + 1536 + boundary.index! + boundary[0].length;
+                if (/[\uD800-\uDBFF]/u.test(doc.text[end - 1]!)) end--;
+              }
               const rows = yield* sql<{
                 id: number;
               }>`INSERT INTO command_center_knowledge_chunks(revision_id,chunk,start,end,text) VALUES(${revisionId},${chunk},${start},${end},${doc.text.slice(start, end)}) RETURNING id`;
               yield* sql`INSERT INTO command_center_knowledge_current(id,space_id,repository_id,scope_key,text) VALUES(${rows[0]!.id},${request.spaceId},${request.repositoryId},${digest([request.spaceId, request.repositoryId])},${doc.text.slice(start, end)})`;
+              start = end;
             }
             yield* sql`UPDATE command_center_knowledge_sources SET current_revision_id=${revisionId} WHERE id=${sourceId}`;
             return { sourceId, revisionId };
@@ -307,9 +343,13 @@ export const make = Effect.gen(function* () {
           : "superseded",
     });
   });
-  const get = Effect.fn("Knowledge.get")(function* (raw: unknown, access: KnowledgeAccess) {
+  const get = Effect.fn("Knowledge.get")(function* (
+    raw: unknown,
+    access: KnowledgeAccess,
+    capability: "cc.items.read" | "cc.items.write" = "cc.items.read",
+  ) {
     const request = yield* decode(CommandCenterKnowledgeGetInput)(raw);
-    yield* requireScope(request, access);
+    yield* requireScope(request, access, capability);
     const rows =
       yield* sql<EvidenceRow>`SELECT r.id, r.source_id AS "sourceId", s.space_id AS "spaceId", s.repository_id AS "repositoryId", s.current_revision_id AS "currentRevisionId", s.retired_at AS "retiredAt", r.document_json AS "documentJson", r.captured_at AS "capturedAt", r.actor_id AS "actorId", r.acquisition, r.connected_operation AS "connectedOperation", r.connected_account AS "connectedAccount", c.chunk,c.start,c.end,c.text AS excerpt
       FROM command_center_knowledge_revisions r JOIN command_center_knowledge_sources s ON s.id=r.source_id JOIN command_center_knowledge_chunks c ON c.revision_id=r.id
@@ -321,7 +361,7 @@ export const make = Effect.gen(function* () {
   const search = Effect.fn("Knowledge.search")(
     function* (raw: unknown, access: KnowledgeAccess) {
       const request = yield* decode(CommandCenterKnowledgeSearchInput)(raw);
-      yield* requireScope(request, access);
+      yield* requireScope(request, access, "cc.items.read");
       const terms = (request.query.match(/[\p{L}\p{N}_]+/gu) ?? [])
         .map((term) => `"${term}"`)
         .join(" AND ");
@@ -349,7 +389,7 @@ export const make = Effect.gen(function* () {
   );
   const retire = Effect.fn("Knowledge.retire")(function* (raw: unknown, access: KnowledgeAccess) {
     const request = yield* decode(CommandCenterKnowledgeRetireInput)(raw);
-    yield* requireScope(request, access);
+    yield* requireScope(request, access, "cc.items.write");
     const hash = digest({ request, actorId: access.actorId });
     return yield* sql.withTransaction(
       Effect.gen(function* () {
@@ -363,6 +403,7 @@ export const make = Effect.gen(function* () {
             chunk: 0,
           },
           access,
+          "cc.items.write",
         );
         const rows = yield* sql<{
           id: string;

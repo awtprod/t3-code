@@ -18,7 +18,23 @@ tests("Knowledge", (it) => {
       yield* migration;
       yield* sql`INSERT INTO command_center_spaces(id,slug,name,kind,instructions,policy_json,model_defaults_json,connections_json,repositories_json,aliases_json,lifecycle,created_at,updated_at)
       VALUES('fixture','fixture','Fixture','business','','{}','{}','[]','[]','[]','active','2026-11-08T00:00:00.000Z','2026-11-08T00:00:00.000Z')`;
-      const service = yield* Knowledge.make;
+      const service = yield* Knowledge.make.pipe(
+        Effect.provide(
+          Layer.mock(CommandCenterConfig)({
+            configDirectory: "/unused-knowledge-fixture",
+            load: Effect.succeed({
+              spaces: [
+                {
+                  id: "fixture",
+                  repositories: [{ id: "repo" }, { id: "other-repo" }],
+                  policy: { allowedCapabilities: ["cc.items.read", "cc.items.write"] },
+                },
+                { id: "second-space", repositories: [] },
+              ],
+            } as never),
+          }),
+        ),
+      );
       const access = { kind: "owner", actorId: "fixture-owner" } as const;
       const scope = { spaceId: "fixture", repositoryId: null };
       const document = {
@@ -144,6 +160,47 @@ tests("Knowledge", (it) => {
       assert.strictEqual(last.start, 4096);
       assert.strictEqual(last.end, text.length);
       assert.strictEqual(last.excerpt, text.slice(last.start, last.end));
+      for (const [index, [text, query]] of (
+        [
+          ["a ".repeat(1023) + "needle", "needle"],
+          ["a ".repeat(1023) + "éclair", "éclair"],
+          ["a ".repeat(1023) + "𐐀word", "𐐀word"],
+          ["a ".repeat(32764) + "tail", "tail"],
+          [("x".repeat(1536) + " ").repeat(42) + "lastword", "lastword"],
+          ["a".repeat(2047) + "😀 finalword", "finalword"],
+        ] as const
+      ).entries()) {
+        const receipt = yield* service.capture(
+          {
+            ...request,
+            mutationId: `boundary-${index}`,
+            documents: [{ ...document, externalId: `boundary-${index}`, text }],
+          },
+          access,
+        );
+        const hits = yield* service.search({ ...scope, query, limit: 20 }, access);
+        assert.strictEqual(hits.length, 1);
+        const hit = hits[0]!;
+        assert.strictEqual(hit.excerpt, text.slice(hit.start, hit.end));
+        assert.deepStrictEqual(
+          yield* service.get({ ...scope, revisionId: hit.revisionId, chunk: hit.chunk }, access),
+          hit,
+        );
+        const chunks = yield* sql<{
+          start: number;
+          end: number;
+          text: string;
+          chunk: number;
+        }>`SELECT start,end,text,chunk FROM command_center_knowledge_chunks WHERE revision_id=${receipt.revisions[0]!.revisionId} ORDER BY chunk`;
+        assert.strictEqual(chunks.map((chunk) => chunk.text).join(""), text);
+        assert.isTrue(chunks.length <= 43);
+        for (const [i, chunk] of chunks.entries()) {
+          assert.strictEqual(chunk.start, i === 0 ? 0 : chunks[i - 1]!.end);
+          assert.strictEqual(chunk.text, text.slice(chunk.start, chunk.end));
+          assert.isTrue(chunk.text.length <= 2048);
+          assert.isTrue(chunk.text.isWellFormed());
+        }
+      }
       const account = yield* service.capture(
         {
           ...request,
@@ -208,7 +265,15 @@ it.effect(
           Effect.map(
             (value) =>
               ({
-                spaces: [{ id: "connected", policy: { allowedCapabilities: [capability] } }],
+                spaces: [
+                  {
+                    id: "connected",
+                    repositories: [],
+                    policy: {
+                      allowedCapabilities: [capability, "cc.items.read", "cc.items.write"],
+                    },
+                  },
+                ],
                 connections: value.enabled
                   ? [
                       {
@@ -293,6 +358,132 @@ it.effect(
         (yield* service.capture({ ...request, acquisition: "connected" }, owner).pipe(Effect.flip))
           .reason,
         "validation",
+      );
+    }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+);
+
+it.effect.each(["policy", "removed", "reassigned"] as const)(
+  "rechecks %s before knowledge operations and receipts",
+  (revocation) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* core;
+      yield* migration;
+      yield* sql`INSERT INTO command_center_spaces(id,slug,name,kind,lifecycle,created_at,updated_at) VALUES('fixture','fixture','Fixture','business','active','2026-11-08T00:00:00.000Z','2026-11-08T00:00:00.000Z')`;
+      const state = yield* Ref.make({
+        capabilities: ["cc.items.read", "cc.items.write"],
+        repositories: [{ id: "repo" }],
+        available: true,
+      });
+      const config = Layer.mock(CommandCenterConfig)({
+        configDirectory: "/unused-knowledge-fixture",
+        load: Ref.get(state).pipe(
+          Effect.map(
+            (value) =>
+              ({
+                spaces: value.available
+                  ? [
+                      {
+                        id: "fixture",
+                        repositories: value.repositories,
+                        policy: { allowedCapabilities: value.capabilities },
+                      },
+                      {
+                        id: "other",
+                        repositories:
+                          revocation === "reassigned" && value.repositories.length === 0
+                            ? [{ id: "repo" }]
+                            : [],
+                      },
+                    ]
+                  : [],
+              }) as never,
+          ),
+        ),
+      });
+      const service = yield* Knowledge.make.pipe(Effect.provide(config));
+      const scope = { spaceId: "fixture", repositoryId: "repo" };
+      const owner = { kind: "owner", actorId: "owner" } as const;
+      const scoped = {
+        kind: "scoped",
+        actorId: "run",
+        ...scope,
+        capabilities: ["cc.items.read", "cc.items.write"],
+      } as const;
+      const request = {
+        ...scope,
+        mutationId: "capture",
+        documents: [
+          {
+            sourceKind: "note",
+            bindingId: "manual",
+            accountId: "fixture",
+            externalId: "one",
+            title: "Fixture",
+            url: null,
+            sourceUpdatedAt: "2026-11-08T00:00:00.000Z",
+            text: "needle",
+          },
+        ],
+      };
+      const captured = yield* service.capture(request, scoped);
+      const citation = { ...scope, revisionId: captured.revisions[0]!.revisionId, chunk: 0 };
+      const retire = {
+        ...scope,
+        mutationId: "retire",
+        sourceId: captured.revisions[0]!.sourceId,
+        expectedRevisionId: captured.revisions[0]!.revisionId,
+      };
+      yield* service.retire(retire, scoped);
+      const requireDenied = Effect.fn("Fixture.requireDenied")(function* (
+        operation: Effect.Effect<unknown, Knowledge.KnowledgeError>,
+      ) {
+        const result = yield* operation.pipe(Effect.result);
+        assert.isTrue(result._tag === "Failure" && result.failure.reason === "denied");
+      });
+      if (revocation === "policy") {
+        yield* Ref.update(state, (value) => ({ ...value, capabilities: [] }));
+        for (const operation of [
+          service.get(citation, scoped),
+          service.search({ ...scope, query: "needle", limit: 1 }, scoped),
+          service.capture(request, scoped),
+          service.capture({ ...request, mutationId: "fresh" }, scoped),
+          service.retire(retire, scoped),
+        ]) {
+          yield* requireDenied(operation);
+        }
+      }
+      yield* Ref.update(state, (value) => ({
+        ...value,
+        capabilities: ["cc.items.read", "cc.items.write"],
+        repositories: [],
+      }));
+      for (const access of [owner, scoped]) {
+        for (const operation of [
+          service.get(citation, access),
+          service.search({ ...scope, query: "needle", limit: 1 }, access),
+          service.capture(request, access),
+          service.capture({ ...request, mutationId: "fresh" }, access),
+          service.retire(retire, access),
+          service.capture(
+            { ...request, repositoryId: "never-assigned" },
+            { ...access, ...(access.kind === "scoped" ? { repositoryId: "never-assigned" } : {}) },
+          ),
+        ]) {
+          yield* requireDenied(operation);
+        }
+      }
+      yield* service.capture({ ...request, repositoryId: null, mutationId: "space-only" }, owner);
+      yield* Ref.update(state, (value) => ({ ...value, available: false }));
+      assert.strictEqual(
+        (yield* service.capture({ ...request, repositoryId: null }, owner).pipe(Effect.flip))
+          .reason,
+        "denied",
+      );
+      const unavailable = yield* Knowledge.make;
+      assert.strictEqual(
+        (yield* unavailable.get(citation, owner).pipe(Effect.flip)).reason,
+        "denied",
       );
     }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );

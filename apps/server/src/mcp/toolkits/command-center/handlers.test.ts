@@ -1,3 +1,5 @@
+import * as Ref from "effect/Ref";
+import { CommandCenterConfig } from "../../../command-center/Config.ts";
 import * as Knowledge from "../../../command-center/Knowledge.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import knowledgeMigration from "../../../persistence/Migrations/114_CommandCenterKnowledge.ts";
@@ -1530,7 +1532,24 @@ it.effect(
       yield* knowledgeCoreMigration;
       yield* knowledgeMigration;
       yield* sql`INSERT INTO command_center_spaces(id,slug,name,kind,lifecycle,created_at,updated_at) VALUES('command-center','command-center','Fixture','business','active','2026-11-08T00:00:00.000Z','2026-11-08T00:00:00.000Z')`;
-      const knowledge = yield* Knowledge.make;
+      const policy = yield* Ref.make(["cc.items.read", "cc.items.write"]);
+      const knowledge = yield* Knowledge.make.pipe(
+        Effect.provide(
+          Layer.mock(CommandCenterConfig)({
+            configDirectory: "/unused-knowledge-fixture",
+            load: Ref.get(policy).pipe(
+              Effect.map(
+                (allowedCapabilities) =>
+                  ({
+                    spaces: [
+                      { id: "command-center", repositories: [], policy: { allowedCapabilities } },
+                    ],
+                  }) as never,
+              ),
+            ),
+          }),
+        ),
+      );
       const scope = activityScope({ capabilities: new Set(["cc.items.read", "cc.items.write"]) });
       const target = { spaceId: "command-center", repositoryId: null };
       const captured = yield* invokeKnowledge(knowledge, scope, "cc_knowledge_capture", {
@@ -1598,5 +1617,41 @@ it.effect(
       });
       expect(retired[0]?.isFailure).toBe(false);
       expect((yield* sql`SELECT * FROM command_center_memories`).length).toBe(0);
+      yield* Ref.set(policy, []);
+      for (const [name, input] of [
+        ["cc_knowledge_get", { ...target, revisionId: hit.revisionId, chunk: 0 }],
+        ["cc_knowledge_search", { ...target, query: "saffron", limit: 1 }],
+        [
+          "cc_knowledge_capture",
+          {
+            ...target,
+            mutationId: "revoked-write",
+            documents: [
+              {
+                sourceKind: "note",
+                bindingId: "manual",
+                accountId: "fixture",
+                externalId: "new",
+                title: "Fixture",
+                url: null,
+                sourceUpdatedAt: "2026-11-08T00:00:00.000Z",
+                text: "forbidden",
+              },
+            ],
+          },
+        ],
+        [
+          "cc_knowledge_retire",
+          {
+            ...target,
+            mutationId: "retire",
+            sourceId: hit.sourceId,
+            expectedRevisionId: hit.revisionId,
+          },
+        ],
+      ] as const) {
+        const denied = yield* invokeKnowledge(knowledge, scope, name, input).pipe(Effect.result);
+        expect(denied._tag === "Failure" || denied.success[0]?.isFailure === true).toBe(true);
+      }
     }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );

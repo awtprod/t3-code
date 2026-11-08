@@ -73,7 +73,7 @@ export const CommandCenterKnowledgeSearchInput = Schema.Struct({
 export const CommandCenterKnowledgeGetInput = Schema.Struct({
   ...CommandCenterKnowledgeScope.fields,
   revisionId: id,
-  chunk: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 31 })),
+  chunk: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 63 })),
 });
 export const CommandCenterKnowledgeRetireInput = Schema.Struct({
   ...CommandCenterKnowledgeScope.fields,
