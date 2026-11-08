@@ -128,6 +128,16 @@ describe("Command Center RPC authorization", () => {
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.googleConnectionRemove)).toBe(
       AuthCommandCenterOperateScope,
     );
+    for (const method of [
+      COMMAND_CENTER_WS_METHODS.knowledgeCapture,
+      COMMAND_CENTER_WS_METHODS.knowledgeRetire,
+    ])
+      expect(scopes.get(method)).toBe(AuthCommandCenterOperateScope);
+    for (const method of [
+      COMMAND_CENTER_WS_METHODS.knowledgeSearch,
+      COMMAND_CENTER_WS_METHODS.knowledgeGet,
+    ])
+      expect(scopes.get(method)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.memoryReview)).toBe(AuthCommandCenterOperateScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.approvalDecide)).toBe(
       AuthCommandCenterApproveScope,

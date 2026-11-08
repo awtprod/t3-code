@@ -1,3 +1,7 @@
+import * as Knowledge from "../../../command-center/Knowledge.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import knowledgeMigration from "../../../persistence/Migrations/114_CommandCenterKnowledge.ts";
+import knowledgeCoreMigration from "../../../persistence/Migrations/033_CommandCenterCore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { RepositoryId, SpaceId } from "@command-center/core";
@@ -1465,3 +1469,134 @@ describe("cc_google_draft_create", () => {
     }).pipe(Effect.provide(draftToolLayer(drafts, { connectorFails: true })));
   });
 });
+
+const invokeKnowledge = (
+  knowledge: Knowledge.Knowledge["Service"],
+  scope: McpInvocationContext.McpInvocationScope,
+  name: "cc_knowledge_capture" | "cc_knowledge_search" | "cc_knowledge_get" | "cc_knowledge_retire",
+  input: unknown,
+) =>
+  Effect.gen(function* () {
+    const toolkit = yield* CommandCenterToolkit;
+    return Array.from(yield* Stream.runCollect(yield* toolkit.handle(name, input as never)));
+  }).pipe(
+    Effect.provide(
+      McpToolAccess.HandlersLayer.layer(CommandCenterToolkitHandlersLive).pipe(
+        Layer.provideMerge(
+          Layer.mergeAll(
+            Layer.succeed(Knowledge.Knowledge, knowledge),
+            Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: (id) =>
+                Effect.succeed({
+                  ...liveThreadShell(id),
+                  providerInstanceId: scope.thread!.providerInstanceId,
+                }),
+            }),
+            Layer.mock(CommandCenterService.CommandCenterService)({
+              getConfiguredSpace: () =>
+                Effect.succeed({
+                  agent: { enabled: true },
+                  policy: { allowedCapabilities: ["cc.items.read", "cc.items.write"] },
+                } as never),
+            }),
+            Layer.mock(AutomationRuns.AutomationRuns)({}),
+            Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+            Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+            Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+            Layer.mock(SpaceActivity.SpaceActivity)({}),
+            Layer.mock(PhoneCalls)({}),
+            Layer.mock(PhoneCallProposals)({}),
+            Layer.succeed(
+              ReadinessGate.CommandCenterReadinessGate,
+              ReadinessGate.CommandCenterReadinessGate.of({
+                state: Effect.succeed("ready"),
+                requireReady: Effect.void,
+                markReady: Effect.void,
+                markFailed: Effect.void,
+              }),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+it.effect(
+  "captures and cites through real MCP handlers without approving memory or escaping credential scope",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* knowledgeCoreMigration;
+      yield* knowledgeMigration;
+      yield* sql`INSERT INTO command_center_spaces(id,slug,name,kind,lifecycle,created_at,updated_at) VALUES('command-center','command-center','Fixture','business','active','2026-11-08T00:00:00.000Z','2026-11-08T00:00:00.000Z')`;
+      const knowledge = yield* Knowledge.make;
+      const scope = activityScope({ capabilities: new Set(["cc.items.read", "cc.items.write"]) });
+      const target = { spaceId: "command-center", repositoryId: null };
+      const captured = yield* invokeKnowledge(knowledge, scope, "cc_knowledge_capture", {
+        ...target,
+        mutationId: "fixture-capture",
+        documents: [
+          {
+            sourceKind: "note",
+            bindingId: "manual",
+            accountId: "fixture",
+            externalId: "one",
+            title: "Fixture",
+            url: null,
+            sourceUpdatedAt: "2026-11-08T00:00:00.000Z",
+            text: "saffron untrusted fixture",
+          },
+        ],
+      });
+      expect(captured[0]?.isFailure).toBe(false);
+      const found = yield* invokeKnowledge(knowledge, scope, "cc_knowledge_search", {
+        ...target,
+        query: "saffron",
+        limit: 1,
+      });
+      expect(found[0]?.isFailure).toBe(false);
+      const results = yield* Schema.decodeUnknownEffect(
+        Schema.Array(
+          Schema.Struct({ revisionId: Schema.String, sourceId: Schema.String, chunk: Schema.Int }),
+        ),
+      )(found[0]?.result);
+      const hit = results[0]!;
+      const read = yield* invokeKnowledge(knowledge, scope, "cc_knowledge_get", {
+        ...target,
+        revisionId: hit.revisionId,
+        chunk: hit.chunk,
+      });
+      expect(read[0]?.result).toMatchObject({
+        excerpt: "saffron untrusted fixture",
+        acquisition: "imported",
+        contentTrust: "untrusted-evidence",
+      });
+      for (const input of [
+        { ...target, repositoryId: "other", revisionId: hit.revisionId, chunk: 0 },
+        { ...target, spaceId: "other", revisionId: hit.revisionId, chunk: 0 },
+      ]) {
+        const denied = yield* invokeKnowledge(knowledge, scope, "cc_knowledge_get", input).pipe(
+          Effect.result,
+        );
+        expect(denied._tag === "Failure" || denied.success[0]?.isFailure === true).toBe(true);
+      }
+      const missingCapability = yield* invokeKnowledge(
+        knowledge,
+        activityScope({ capabilities: new Set() }),
+        "cc_knowledge_get",
+        { ...target, revisionId: hit.revisionId, chunk: 0 },
+      ).pipe(Effect.result);
+      expect(
+        missingCapability._tag === "Failure" || missingCapability.success[0]?.isFailure === true,
+      ).toBe(true);
+      const retired = yield* invokeKnowledge(knowledge, scope, "cc_knowledge_retire", {
+        ...target,
+        mutationId: "retire",
+        sourceId: hit.sourceId,
+        expectedRevisionId: hit.revisionId,
+      });
+      expect(retired[0]?.isFailure).toBe(false);
+      expect((yield* sql`SELECT * FROM command_center_memories`).length).toBe(0);
+    }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+);

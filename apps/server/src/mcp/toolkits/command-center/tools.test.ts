@@ -10,7 +10,14 @@ it("exposes scoped automation create/save tools without any publication tool", (
   expect(names).toContain("cc_automations_create");
   expect(names).toContain("cc_automations_save");
   expect(names.some((name) => /push|publish/iu.test(name))).toBe(false);
-  for (const name of ["cc_automations_create", "cc_automations_save"]) {
+  for (const name of [
+    "cc_automations_create",
+    "cc_automations_save",
+    "cc_knowledge_capture",
+    "cc_knowledge_search",
+    "cc_knowledge_get",
+    "cc_knowledge_retire",
+  ]) {
     const tool = tools.find((candidate) => candidate.name === name)!;
     const schema = Tool.getJsonSchema(tool) as {
       readonly type?: string;
@@ -20,7 +27,8 @@ it("exposes scoped automation create/save tools without any publication tool", (
     expect(schema.properties?.spaceId).toBeDefined();
     expect(schema.properties).not.toHaveProperty("path");
     expect(schema.properties).not.toHaveProperty("credential");
-    expect(tool.description).toContain("never pushes");
+    if (name.startsWith("cc_automations_")) expect(tool.description).toContain("never pushes");
+    else expect(schema.properties?.repositoryId).toBeDefined();
   }
 });
 

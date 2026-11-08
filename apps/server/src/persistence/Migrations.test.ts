@@ -229,6 +229,7 @@ describe("released migration ids", () => {
         [111, "PeerLinks"],
         [112, "PeerLinkFence"],
         [113, "WaitingLinkRequestIndex"],
+        [114, "CommandCenterKnowledge"],
       ],
     );
   });

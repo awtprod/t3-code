@@ -216,6 +216,7 @@ import * as CommandCenterInbox from "./command-center/Inbox.ts";
 import * as SprintPlan from "./command-center/SprintPlan.ts";
 import * as CommandCenterDigest from "./command-center/Digest.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as Knowledge from "./command-center/Knowledge.ts";
 import * as Observations from "./command-center/Observations.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
@@ -745,6 +746,7 @@ const layerCommandCenterBase = Layer.mergeAll(
   CommandCenterInbox.layer,
   CommandCenterDigest.liveLayer,
   CommandCenterEventStream.layer,
+  Knowledge.layer.pipe(Layer.provide(layerCommandCenterConfig)),
   Observations.layer,
   MemorySearchIndex.layer,
   SpaceActivity.layer,

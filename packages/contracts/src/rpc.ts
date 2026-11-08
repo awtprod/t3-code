@@ -1,4 +1,13 @@
 import {
+  CommandCenterKnowledgeCaptureInput,
+  CommandCenterKnowledgeSearchInput,
+  CommandCenterKnowledgeGetInput,
+  CommandCenterKnowledgeRetireInput,
+  CommandCenterKnowledgeReceipt,
+  CommandCenterKnowledgeEvidence,
+  CommandCenterKnowledgeSearchResults,
+} from "./commandCenterKnowledge.ts";
+import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -1412,6 +1421,36 @@ export const WsCommandCenterWindowsMediaRootsRpc = Rpc.make(
   {
     payload: CommandCenterWindowsMediaRootsInput,
     success: CommandCenterWindowsMediaRootsResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterKnowledgeCaptureRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.knowledgeCapture,
+  {
+    payload: CommandCenterKnowledgeCaptureInput,
+    success: CommandCenterKnowledgeReceipt,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterKnowledgeSearchRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.knowledgeSearch,
+  {
+    payload: CommandCenterKnowledgeSearchInput,
+    success: CommandCenterKnowledgeSearchResults,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterKnowledgeGetRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.knowledgeGet, {
+  payload: CommandCenterKnowledgeGetInput,
+  success: CommandCenterKnowledgeEvidence,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+export const WsCommandCenterKnowledgeRetireRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.knowledgeRetire,
+  {
+    payload: CommandCenterKnowledgeRetireInput,
+    success: CommandCenterKnowledgeReceipt,
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
 );
@@ -2928,6 +2967,10 @@ export const WsCommandCenterRpcGroup = RpcGroup.make(
   WsCommandCenterGoogleReadRpc,
   WsCommandCenterWindowsMediaListRpc,
   WsCommandCenterWindowsMediaRootsRpc,
+  WsCommandCenterKnowledgeCaptureRpc,
+  WsCommandCenterKnowledgeSearchRpc,
+  WsCommandCenterKnowledgeGetRpc,
+  WsCommandCenterKnowledgeRetireRpc,
   WsCommandCenterObservationsListRpc,
   WsCommandCenterObservationsGetRpc,
   WsCommandCenterObservationsHistoryRpc,
