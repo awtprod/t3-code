@@ -49,7 +49,7 @@ import {
 import { makeRunLifecyclePersistence } from "./RunLifecycle.ts";
 import { spaceAgentRunAuthorizedEventId } from "./SpaceAgentIds.ts";
 import { loadSpaceBriefInput, renderSpaceBrief } from "./SpaceBrief.ts";
-import { latestAssistantText } from "./V2Transcript.ts";
+import { loadConversationContext } from "./ConversationContext.ts";
 import {
   COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX,
   COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX,
@@ -1074,7 +1074,9 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
           const priorContext =
             deps.loadPriorContext === undefined ? [] : yield* deps.loadPriorContext(run);
           const spaceBrief =
-            deps.loadSpaceBrief === undefined ? "" : yield* deps.loadSpaceBrief(run, space);
+            run.command.conversationId !== undefined || deps.loadSpaceBrief === undefined
+              ? ""
+              : yield* deps.loadSpaceBrief(run, space);
           const userRouter = run.parentRunId === null && run.startedBySpaceAgent !== true;
           const threadPrefix = userRouter
             ? COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX
@@ -1267,13 +1269,6 @@ interface SpaceRow {
   readonly repositoriesJson: string;
 }
 
-interface PriorRunRow {
-  readonly id: string;
-  readonly threadId: string | null;
-  readonly routeJson: string;
-  readonly inputJson: string;
-}
-
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const crypto = yield* Crypto.Crypto;
@@ -1411,84 +1406,22 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const loadPriorContext: NonNullable<DispatcherDependencies["loadPriorContext"]> = Effect.fn(
-    "RunDispatcher.loadPriorContext",
-  )(function* (run) {
-    const candidates = yield* sql<PriorRunRow>`
-      SELECT previous.id, previous.thread_id AS "threadId",
-        previous.route_json AS "routeJson", previous.input_json AS "inputJson"
-      FROM command_center_runs previous
-      JOIN command_center_runs current ON current.id = ${run.id}
-      WHERE previous.space_id = ${run.spaceId}
-        AND previous.id <> current.id
-        AND previous.state = 'succeeded'
-        AND (
-          previous.started_at < current.started_at OR
-          (previous.started_at = current.started_at AND previous.id < current.id)
-        )
-      ORDER BY previous.started_at DESC, previous.id DESC
-      LIMIT 20
-    `.pipe(
+  const loadPriorContext: NonNullable<DispatcherDependencies["loadPriorContext"]> = (run) =>
+    loadConversationContext({
+      runId: run.id,
+      spaceId: run.spaceId,
+      repositoryId: run.route.repositoryId,
+    }).pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
       Effect.mapError((cause) =>
         dispatcherError(
           "persistence-failed",
           run.id,
-          "Prior Command context could not be loaded.",
+          "Conversation context could not be loaded.",
           cause,
         ),
       ),
     );
-    const selected: PriorRunRow[] = [];
-    for (const candidate of candidates) {
-      const candidateRoute = yield* decodeRoute(
-        yield* parseJson(run.id, candidate.routeJson, "prior Run route"),
-      ).pipe(
-        Effect.mapError((cause) =>
-          dispatcherError(
-            "persistence-failed",
-            run.id,
-            "Prior Command context contains an invalid route.",
-            cause,
-          ),
-        ),
-      );
-      if (candidateRoute.repositoryId === run.route.repositoryId) selected.push(candidate);
-      if (selected.length === 6) break;
-    }
-
-    return yield* Effect.forEach(selected, (candidate) =>
-      Effect.gen(function* () {
-        const command = yield* decodeCommand(
-          yield* parseJson(run.id, candidate.inputJson, "prior Run input"),
-        ).pipe(
-          Effect.mapError((cause) =>
-            dispatcherError(
-              "persistence-failed",
-              run.id,
-              "Prior Command context contains invalid input.",
-              cause,
-            ),
-          ),
-        );
-        if (candidate.threadId === null) return { commandText: command.text };
-        const responseText = (yield* latestAssistantText({ threadId: candidate.threadId }).pipe(
-          Effect.provideService(SqlClient.SqlClient, sql),
-          Effect.mapError((cause) =>
-            dispatcherError(
-              "persistence-failed",
-              run.id,
-              "A prior Command result could not be loaded.",
-              cause,
-            ),
-          ),
-        ))?.trim();
-        return {
-          commandText: command.text,
-          ...(responseText ? { responseText } : {}),
-        };
-      }),
-    );
-  });
 
   const loadSpaceBrief: NonNullable<DispatcherDependencies["loadSpaceBrief"]> = (run, space) =>
     Effect.gen(function* () {

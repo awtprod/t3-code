@@ -30,6 +30,25 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       tag: COMMAND_CENTER_WS_METHODS.bootstrap,
       staleTimeMs: 2_000,
     }),
+    conversations: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:conversations",
+      tag: COMMAND_CENTER_WS_METHODS.conversationList,
+      staleTimeMs: 1_000,
+    }),
+    conversation: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:conversation",
+      tag: COMMAND_CENTER_WS_METHODS.conversationGet,
+      staleTimeMs: 1_000,
+    }),
+    createConversation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:conversation-create",
+      tag: COMMAND_CENTER_WS_METHODS.conversationCreate,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.requestId]),
+      },
+    }),
     submit: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:submit",
       tag: COMMAND_CENTER_WS_METHODS.commandSubmit,

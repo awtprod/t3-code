@@ -5,6 +5,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   CAPABILITY_NAMES,
+  ConversationId,
   Artifact,
   Connection,
   ItemId,
@@ -31,6 +32,7 @@ import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts
 import { resolveGoogleDraftAttachmentPaths } from "./AutomationRuns.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import * as ConnectionHealth from "./ConnectionHealth.ts";
+import { loadConversationContext } from "./ConversationContext.ts";
 import { make as makeInbox } from "./Inbox.ts";
 import { CommandCenterService, layer as commandCenterServiceLayer } from "./Service.ts";
 
@@ -3358,3 +3360,285 @@ it.effect("keeps another automation's alert open when two are blocked for the sa
     ]);
   }).pipe(Effect.provide(makeTestLayer(runsBlockedConfig))),
 );
+
+it.effect(
+  "persists scoped conversations and admits exactly one active turn with retry receipts",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* CommandCenterService;
+      const sql = yield* SqlClient.SqlClient;
+      const scope = { spaceId: systemSpace.id, repositoryId: null };
+      const conversation = yield* service.createConversation({
+        ...scope,
+        requestId: "create-chat",
+        title: "Private chat",
+      });
+      expect(
+        yield* service.createConversation({
+          ...scope,
+          requestId: "create-chat",
+          title: "Private chat",
+        }),
+      ).toEqual(conversation);
+      expect(
+        yield* service
+          .createConversation({ ...scope, requestId: "create-chat", title: "Changed" })
+          .pipe(Effect.flip),
+      ).toMatchObject({ reason: "conflict" });
+      const input = decodeCommand({
+        commandId: "conversation-turn-1",
+        text: "Remember the blue umbrella",
+        ...scope,
+        repositoryId: undefined,
+        conversationId: conversation.id,
+      });
+      const retries = yield* Effect.all(
+        [service.submitCommand(input, providers), service.submitCommand(input, providers)],
+        { concurrency: 2 },
+      );
+      expect(retries.map((r) => r.duplicate).sort()).toEqual([false, true]);
+      expect(retries[0]?.run.conversationId).toBe(conversation.id);
+      const first = retries[0]!;
+      const followup = decodeCommand({
+        ...input,
+        commandId: "conversation-turn-2",
+        text: "What color?",
+      });
+      expect(yield* service.submitCommand(followup, providers).pipe(Effect.flip)).toMatchObject({
+        reason: "conflict",
+      });
+      yield* sql`UPDATE command_center_runs SET state = 'failed', finished_at = ${fixtureTimestamp} WHERE id = ${first.run.id}`;
+      const second = yield* service.submitCommand(followup, providers);
+      yield* sql`UPDATE command_center_runs SET state = 'canceled', finished_at = ${fixtureTimestamp} WHERE id = ${second.run.id}`;
+      const attempts = yield* Effect.forEach(
+        ["conversation-turn-3", "conversation-turn-competing"],
+        (commandId) =>
+          service
+            .submitCommand(decodeCommand({ ...followup, commandId }), providers)
+            .pipe(Effect.exit),
+        { concurrency: 2 },
+      );
+      expect(attempts.filter((attempt) => attempt._tag === "Success")).toHaveLength(1);
+      expect(attempts.filter((attempt) => attempt._tag === "Failure")).toHaveLength(1);
+      const winner = attempts.find((attempt) => attempt._tag === "Success")!;
+      if (winner._tag !== "Success") return yield* Effect.die("No admitted turn");
+      const third = winner.value;
+      const failedContext = yield* loadConversationContext({
+        runId: third.run.id,
+        spaceId: scope.spaceId,
+        repositoryId: null,
+      });
+      expect(failedContext.map((c) => c.commandText)).toEqual([
+        `[Previous turn status: canceled]\n${followup.text}`,
+        `[Previous turn status: failed]\n${input.text}`,
+      ]);
+      expect(
+        yield* service
+          .submitCommand(decodeCommand({ ...input, text: "changed retry" }), providers)
+          .pipe(Effect.flip),
+      ).toMatchObject({ reason: "conflict" });
+
+      const detail = yield* service.getConversation({ ...scope, conversationId: conversation.id });
+      expect(detail.turns.map((t) => t.run.id)).toEqual([
+        first.run.id,
+        second.run.id,
+        third.run.id,
+      ]);
+      expect(detail.turns.map((t) => t.run.status)).toEqual(["failed", "canceled", "queued"]);
+      expect(detail.turns[0]?.command.text).toBe(input.text);
+      expect(detail.conversation.id).toBe(conversation.id);
+      expect((yield* service.listConversations(scope)).conversations.map((c) => c.id)).toEqual([
+        conversation.id,
+      ]);
+      expect(
+        yield* service
+          .getConversation({ ...scope, spaceId: studioSpace.id, conversationId: conversation.id })
+          .pipe(Effect.flip),
+      ).toMatchObject({ reason: "not_found" });
+      expect(
+        yield* service
+          .getConversation({ ...scope, conversationId: ConversationId.make("guessed") })
+          .pipe(Effect.flip),
+      ).toMatchObject({ reason: "not_found" });
+      expect(
+        yield* service
+          .submitCommand(
+            decodeCommand({ ...followup, commandId: "wrong-space", spaceId: studioSpace.id }),
+            providers,
+          )
+          .pipe(Effect.flip),
+      ).toMatchObject({ reason: "not_found" });
+      const repoScope = { spaceId: studioSpace.id, repositoryId: studioSpace.repositories[0]!.id };
+      const repoConversation = yield* service.createConversation({
+        ...repoScope,
+        requestId: "repo-chat",
+        title: "Repository",
+      });
+      expect(
+        yield* service
+          .getConversation({
+            spaceId: studioSpace.id,
+            repositoryId: null,
+            conversationId: repoConversation.id,
+          })
+          .pipe(Effect.flip),
+      ).toMatchObject({ reason: "not_found" });
+      expect(
+        (yield* service.listConversations({ spaceId: studioSpace.id, repositoryId: null }))
+          .conversations,
+      ).toEqual([]);
+    }).pipe(Effect.provide(makeTestLayer())),
+);
+
+it.effect(
+  "loads only explicit conversation context across Spaces, repositories and legacy submissions",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* CommandCenterService;
+      const sql = yield* SqlClient.SqlClient;
+      const scope = { spaceId: studioSpace.id, repositoryId: null };
+      const a = yield* service.createConversation({ ...scope, requestId: "context-a", title: "A" });
+      const b = yield* service.createConversation({ ...scope, requestId: "context-b", title: "B" });
+      const c = yield* service.createConversation({
+        spaceId: personalSpace.id,
+        repositoryId: null,
+        requestId: "context-c",
+        title: "C",
+      });
+      const repo = studioSpace.repositories[0]!.id;
+      const d = yield* service.createConversation({
+        ...scope,
+        repositoryId: repo,
+        requestId: "context-d",
+        title: "D",
+      });
+      let index = 0;
+      const submit = (conversation: typeof a | undefined, text: string) =>
+        service.submitCommand(
+          decodeCommand({
+            commandId: `context-${++index}`,
+            text,
+            spaceId: conversation?.spaceId ?? scope.spaceId,
+            ...(conversation
+              ? {
+                  conversationId: conversation.id,
+                  repositoryId: conversation.repositoryId ?? undefined,
+                }
+              : {}),
+          }),
+          providers,
+        );
+      const first = yield* submit(a, "alpha umbrella");
+      yield* sql`UPDATE command_center_runs SET state = 'succeeded', thread_id = 'alpha-thread' WHERE id = ${first.run.id}`;
+      yield* sql`INSERT INTO orchestration_v2_projection_messages(message_id,thread_id,role,streaming,created_at,updated_at,payload_json)
+      VALUES('alpha-response','alpha-thread','assistant',0,${fixtureTimestamp},${fixtureTimestamp},${JSON.stringify({ text: "alpha reply" })})`;
+      for (const conversation of [b, c, d, undefined]) {
+        const unrelated = yield* submit(conversation, "unrelated secret");
+        yield* sql`UPDATE command_center_runs SET state = 'succeeded' WHERE id = ${unrelated.run.id}`;
+      }
+      const next = yield* submit(a, "what was my umbrella?");
+      yield* sql`UPDATE command_center_runs SET started_at = '0001-01-01T00:00:00.000Z' WHERE id <> ${next.run.id}`;
+      const context = yield* loadConversationContext({
+        runId: next.run.id,
+        spaceId: scope.spaceId,
+        repositoryId: null,
+      });
+      expect(context).toEqual([{ commandText: "alpha umbrella", responseText: "alpha reply" }]);
+      expect(next.route.repositoryId).toBeNull();
+      const detail = yield* service.getConversation({ ...scope, conversationId: a.id });
+      expect(detail.turns[0]?.responseText).toBe("alpha reply");
+      expect(detail.turns[0]?.run.threadId).toBe("alpha-thread");
+      const legacy = yield* submit(undefined, "new legacy question");
+      expect(
+        yield* loadConversationContext({
+          runId: legacy.run.id,
+          spaceId: scope.spaceId,
+          repositoryId: null,
+        }),
+      ).toEqual([]);
+      expect(
+        yield* loadConversationContext({
+          runId: next.run.id,
+          spaceId: personalSpace.id,
+          repositoryId: null,
+        }),
+      ).toEqual([]);
+      expect(
+        yield* service
+          .submitCommand(
+            decodeCommand({
+              commandId: "mismatch-repo",
+              text: "hello",
+              spaceId: scope.spaceId,
+              repositoryId: repo,
+              conversationId: a.id,
+            }),
+            providers,
+          )
+          .pipe(Effect.flip),
+      ).toMatchObject({ reason: "not_found" });
+      expect(
+        yield* service
+          .submitCommand(
+            decodeCommand({
+              commandId: "mismatch-retry",
+              text: "hello",
+              spaceId: scope.spaceId,
+              conversationId: b.id,
+            }),
+            providers,
+          )
+          .pipe(Effect.map((r) => r.run.conversationId)),
+      ).toBe(b.id);
+    }).pipe(Effect.provide(makeTestLayer())),
+);
+
+it.effect("rechecks conversation scope and policy after configuration revocation", () => {
+  let currentConfig: LoadedCommandCenterConfig = loadedConfig;
+  return Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    const scope = { spaceId: studioSpace.id, repositoryId: studioSpace.repositories[0]!.id };
+    const conversation = yield* service.createConversation({
+      ...scope,
+      requestId: "revoke-chat",
+      title: "Scoped",
+    });
+    const input = decodeCommand({
+      commandId: "revoke-1",
+      text: "What is next?",
+      ...scope,
+      conversationId: conversation.id,
+    });
+    const first = yield* service.submitCommand(input, providers);
+    yield* sql`UPDATE command_center_runs SET state = 'succeeded' WHERE id = ${first.run.id}`;
+    currentConfig = {
+      ...loadedConfig,
+      spaces: loadedConfig.spaces.map((space) =>
+        space.id === studioSpace.id
+          ? { ...space, policy: { ...space.policy, allowedCapabilities: [] } }
+          : space,
+      ),
+    };
+    const denied = yield* service.submitCommand(
+      decodeCommand({ ...input, commandId: "revoke-2" }),
+      providers,
+    );
+    expect(denied.route.status).toBe("blocked");
+    expect(denied.run.status).toBe("failed");
+    currentConfig = {
+      ...loadedConfig,
+      spaces: loadedConfig.spaces.map((space) =>
+        space.id === studioSpace.id ? { ...space, repositories: [] } : space,
+      ),
+    };
+    expect(
+      yield* service
+        .getConversation({ ...scope, conversationId: conversation.id })
+        .pipe(Effect.flip),
+    ).toMatchObject({ reason: "not_found" });
+    expect(yield* service.submitCommand(input, providers).pipe(Effect.flip)).toMatchObject({
+      reason: "not_found",
+    });
+  }).pipe(Effect.provide(makeTestLayerFrom(Effect.sync(() => currentConfig))));
+});

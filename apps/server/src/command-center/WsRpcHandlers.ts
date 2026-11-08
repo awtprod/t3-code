@@ -455,6 +455,12 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
               "rpc.aggregate": "command-center",
             },
           ),
+        [COMMAND_CENTER_WS_METHODS.conversationCreate]: (input) =>
+          commandCenter.createConversation(input),
+        [COMMAND_CENTER_WS_METHODS.conversationList]: (input) =>
+          commandCenter.listConversations(input),
+        [COMMAND_CENTER_WS_METHODS.conversationGet]: (input) =>
+          commandCenter.getConversation(input),
         [COMMAND_CENTER_WS_METHODS.commandSubmit]: (input) =>
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.commandSubmit,

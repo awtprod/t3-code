@@ -1,8 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
+import { CLIENT_GUARDED_RPC_SCOPES } from "./clientRpcPermissions.ts";
+import { AuthCommandCenterOperateScope } from "./auth.ts";
 
 import {
   COMMAND_CENTER_WEBHOOK_MAX_PAYLOAD_BYTES,
+  COMMAND_CENTER_WS_METHODS,
+  CommandCenterConversationCreateInput,
+  CommandCenterConversationGetInput,
   CommandCenterAutomationDefinitionCreateInput,
   CommandCenterAutomationWebhookAdmitInput,
   CommandCenterAutomationDefinitionSaveInput,
@@ -17,6 +22,8 @@ import {
   CommandCenterRunStartResult,
 } from "./commandCenter.ts";
 
+const decodeConversationGet = Schema.decodeSync(CommandCenterConversationGetInput);
+const decodeConversationCreate = Schema.decodeUnknownSync(CommandCenterConversationCreateInput);
 const decodeSnapshot = Schema.decodeUnknownSync(CommandCenterAutomationDefinitionSnapshot);
 const decodeCreate = Schema.decodeUnknownSync(CommandCenterAutomationDefinitionCreateInput);
 const decodeSave = Schema.decodeUnknownSync(CommandCenterAutomationDefinitionSaveInput);
@@ -283,4 +290,30 @@ describe("Command Center Memory proposal contract", () => {
     const { confidence: _confidence, ...missing } = proposal(0.5);
     expect(() => decodeProposal(missing)).toThrow(/\["confidence"\]/);
   });
+});
+
+it("bounds conversation creation, requires an exact nullable scope, and guards mutations", () => {
+  const decode = decodeConversationCreate;
+  const request = { spaceId: "personal", repositoryId: null, title: "Chat", requestId: "request" };
+  expect(decode(request)).toEqual(request);
+  for (const invalid of [
+    { ...request, title: " " },
+    { ...request, title: "x".repeat(201) },
+    { ...request, requestId: "" },
+    { ...request, repositoryId: undefined },
+  ])
+    expect(() => decode(invalid)).toThrow();
+  expect(() =>
+    decodeConversationGet({
+      ...request,
+      conversationId: "chat",
+      beforeTurn: 0,
+    }),
+  ).toThrow();
+  expect(CLIENT_GUARDED_RPC_SCOPES[COMMAND_CENTER_WS_METHODS.conversationCreate]).toBe(
+    AuthCommandCenterOperateScope,
+  );
+  expect(CLIENT_GUARDED_RPC_SCOPES[COMMAND_CENTER_WS_METHODS.commandSubmit]).toBe(
+    AuthCommandCenterOperateScope,
+  );
 });

@@ -28,6 +28,12 @@ import {
   type CommandCenterArtifactsQueryInput,
   type CommandCenterAutomationsQueryInput,
   type CommandCenterBootstrap,
+  CommandCenterConversation,
+  CommandCenterConversationCreateInput,
+  CommandCenterConversationListInput,
+  CommandCenterConversationGetInput,
+  type CommandCenterConversationListResult,
+  type CommandCenterConversationGetResult,
   CommandCenterCommandSubmitInput,
   CommandCenterCommandSubmitResult,
   type CommandCenterCommandSubmitResult as CommandCenterCommandSubmitResultType,
@@ -68,6 +74,7 @@ import {
 import { ConnectionHealth, layer as connectionHealthLayer } from "./ConnectionHealth.ts";
 import { configProjectionFingerprint, type ConfigSyncState } from "./ConfigProjection.ts";
 import { CommandApprovalPayload, makeCommandApprovalPayload } from "./CommandApproval.ts";
+import { latestAssistantText } from "./V2Transcript.ts";
 import { spaceAgentRunAuthorizedEventId } from "./SpaceAgentIds.ts";
 import { isSpaceAgentItemMetadata, recordSpaceAgentReply } from "./SpaceAgentReplies.ts";
 import {
@@ -234,6 +241,7 @@ interface ItemRow {
 }
 
 interface RunRow {
+  readonly conversationId: string | null;
   readonly id: string;
   readonly commandId: string;
   readonly parentRunId: string | null;
@@ -410,6 +418,7 @@ const decodeRunRow = Effect.fn("CommandCenter.decodeRunRow")(function* (row: Hyd
     kind: row.kind,
     status: row.state,
     commandId: row.commandId,
+    conversationId: row.conversationId ?? undefined,
     parentRunId: row.parentRunId ?? undefined,
     repositoryId: route.repositoryId ?? undefined,
     projectId: row.projectId ?? undefined,
@@ -591,6 +600,15 @@ export interface CommandCenterServiceShape {
   readonly queryMemories: (
     input: CommandCenterMemoryQueryInput,
   ) => Effect.Effect<{ readonly memories: ReadonlyArray<MemoryType> }, CommandCenterError>;
+  readonly createConversation: (
+    input: CommandCenterConversationCreateInput,
+  ) => Effect.Effect<CommandCenterConversation, CommandCenterError>;
+  readonly listConversations: (
+    input: CommandCenterConversationListInput,
+  ) => Effect.Effect<CommandCenterConversationListResult, CommandCenterError>;
+  readonly getConversation: (
+    input: CommandCenterConversationGetInput,
+  ) => Effect.Effect<CommandCenterConversationGetResult, CommandCenterError>;
   readonly submitCommand: (
     input: CommandCenterCommandSubmitInput,
     providers: ReadonlyArray<ProviderAvailability>,
@@ -1216,7 +1234,7 @@ export const layer = Layer.effect(
     const listRuns = Effect.fn("CommandCenter.listRuns")(function* () {
       const rows = yield* sql<RunRow>`
         SELECT r.id, r.command_id AS "commandId", r.parent_run_id AS "parentRunId",
-          r.space_id AS "spaceId", r.project_id AS "projectId", r.thread_id AS "threadId",
+          r.conversation_id AS "conversationId", r.space_id AS "spaceId", r.project_id AS "projectId", r.thread_id AS "threadId",
           r.kind, r.state, r.route_json AS "routeJson", r.input_json AS "inputJson",
           r.result_json AS "resultJson", r.error, r.started_at AS "startedAt",
           r.finished_at AS "finishedAt"
@@ -1267,7 +1285,7 @@ export const layer = Layer.effect(
       commandId: string,
     ) {
       const rows = yield* sql<RunRow>`
-          SELECT id, command_id AS "commandId", parent_run_id AS "parentRunId",
+          SELECT id, conversation_id AS "conversationId", command_id AS "commandId", parent_run_id AS "parentRunId",
             space_id AS "spaceId", project_id AS "projectId", thread_id AS "threadId",
             kind, state, route_json AS "routeJson", input_json AS "inputJson",
             result_json AS "resultJson", error, started_at AS "startedAt",
@@ -2249,12 +2267,175 @@ export const layer = Layer.effect(
       },
     );
 
+    const validateConversationScope = Effect.fn("CommandCenter.validateConversationScope")(
+      function* (input: { readonly spaceId: string; readonly repositoryId: string | null }) {
+        const space = yield* requireConfiguredSpace(input.spaceId);
+        if (
+          input.repositoryId !== null &&
+          !space.repositories.some((r) => r.id === input.repositoryId)
+        ) {
+          return yield* new CommandCenterError({
+            reason: "not_found",
+            message: "The conversation scope is unavailable.",
+          });
+        }
+      },
+    );
+    const loadConversation = Effect.fn("CommandCenter.loadConversation")(function* (input: {
+      readonly spaceId: string;
+      readonly repositoryId: string | null;
+      readonly conversationId: string;
+    }) {
+      yield* validateConversationScope(input);
+      const rows =
+        yield* sql`SELECT id, space_id AS "spaceId", repository_id AS "repositoryId", title, created_at AS "createdAt"
+        FROM command_center_conversations WHERE id = ${input.conversationId}
+        AND space_id = ${input.spaceId} AND repository_id IS ${input.repositoryId} AND actor_id = 'owner'`;
+      if (!rows[0])
+        return yield* new CommandCenterError({
+          reason: "not_found",
+          message: "The conversation was not found in this scope.",
+        });
+      return yield* Schema.decodeUnknownEffect(CommandCenterConversation)(rows[0]);
+    });
+    const conversationError = (cause: unknown) =>
+      isCommandCenterError(cause)
+        ? cause
+        : persistenceError("Conversation persistence failed.", cause);
+    const createConversation = Effect.fn("CommandCenter.createConversation")(
+      function* (raw: CommandCenterConversationCreateInput) {
+        const input = yield* Schema.decodeEffect(CommandCenterConversationCreateInput)(raw).pipe(
+          Effect.mapError(
+            () =>
+              new CommandCenterError({
+                reason: "validation",
+                message: "Invalid conversation request.",
+              }),
+          ),
+        );
+        yield* validateConversationScope(input);
+        const requestDigest = yield* digest(stringify(input));
+        return yield* sql.withTransaction(
+          Effect.gen(function* () {
+            const existing = yield* sql<{
+              readonly id: string;
+              readonly requestDigest: string;
+            }>`SELECT id, request_digest AS "requestDigest" FROM command_center_conversations WHERE request_id = ${input.requestId}`;
+            if (existing[0]) {
+              if (existing[0].requestDigest !== requestDigest)
+                return yield* new CommandCenterError({
+                  reason: "conflict",
+                  message: "The conversation request ID was already used with different input.",
+                });
+              return yield* loadConversation({ ...input, conversationId: existing[0].id });
+            }
+            const id = yield* crypto.randomUUIDv4();
+            const createdAt = DateTime.formatIso(yield* DateTime.now);
+            yield* sql`INSERT INTO command_center_conversations(id,space_id,repository_id,title,actor_id,request_id,request_digest,created_at)
+          VALUES(${id},${input.spaceId},${input.repositoryId},${input.title},'owner',${input.requestId},${requestDigest},${createdAt})`;
+            return yield* loadConversation({ ...input, conversationId: id });
+          }),
+        );
+      },
+      (effect) => syncConfig(true).pipe(Effect.andThen(effect)),
+      Effect.mapError(conversationError),
+    );
+    const listConversations = Effect.fn("CommandCenter.listConversations")(
+      function* (raw: CommandCenterConversationListInput) {
+        const input = yield* Schema.decodeEffect(CommandCenterConversationListInput)(raw);
+        yield* validateConversationScope(input);
+        const rows =
+          yield* sql`SELECT id, space_id AS "spaceId", repository_id AS "repositoryId", title, created_at AS "createdAt"
+        FROM command_center_conversations WHERE space_id = ${input.spaceId} AND repository_id IS ${input.repositoryId}
+        AND actor_id = 'owner' AND (${input.beforeId ?? null} IS NULL OR rowid < (SELECT rowid FROM command_center_conversations WHERE id = ${input.beforeId ?? null} AND space_id = ${input.spaceId} AND repository_id IS ${input.repositoryId})) ORDER BY rowid DESC LIMIT 51`;
+        const conversations = yield* Schema.decodeUnknownEffect(
+          Schema.Array(CommandCenterConversation),
+        )(rows.slice(0, 50));
+        return { conversations, nextBeforeId: rows.length > 50 ? conversations.at(-1)!.id : null };
+      },
+      (effect) => syncConfig(true).pipe(Effect.andThen(effect)),
+      Effect.mapError(conversationError),
+    );
+    const getConversation = Effect.fn("CommandCenter.getConversation")(
+      function* (raw: CommandCenterConversationGetInput) {
+        const input = yield* Schema.decodeEffect(CommandCenterConversationGetInput)(raw);
+        const conversation = yield* loadConversation(input);
+        const rows = yield* sql<
+          RunRow & { readonly sequence: number }
+        >`SELECT id, conversation_id AS "conversationId", conversation_turn AS sequence,
+        command_id AS "commandId", parent_run_id AS "parentRunId", space_id AS "spaceId", project_id AS "projectId", thread_id AS "threadId",
+        kind,state,route_json AS "routeJson",input_json AS "inputJson",result_json AS "resultJson",error,started_at AS "startedAt",finished_at AS "finishedAt"
+        FROM command_center_runs WHERE conversation_id = ${conversation.id} AND space_id = ${input.spaceId}
+        AND (${input.beforeTurn ?? null} IS NULL OR conversation_turn < ${input.beforeTurn ?? null}) ORDER BY conversation_turn DESC LIMIT 51`;
+        const page = rows.slice(0, 50);
+        const runs = yield* hydrateRunRows(page);
+        const turns = yield* Effect.forEach(page, (row, i) =>
+          Effect.gen(function* () {
+            const command = yield* parseJson(row.inputJson, "conversation command").pipe(
+              Effect.flatMap(decodeCommandInput),
+            );
+            const responseText =
+              row.threadId === null
+                ? null
+                : yield* latestAssistantText({ threadId: row.threadId }).pipe(
+                    Effect.provideService(SqlClient.SqlClient, sql),
+                  );
+            return { sequence: row.sequence, command, run: runs[i]!, responseText };
+          }),
+        );
+        return {
+          conversation,
+          turns: turns.toReversed(),
+          nextBeforeTurn: rows.length > 50 ? page.at(-1)!.sequence : null,
+        };
+      },
+      (effect) => syncConfig(true).pipe(Effect.andThen(effect)),
+      Effect.mapError(conversationError),
+    );
+
     const submitCommand = Effect.fn("CommandCenter.submitCommand")(
       function* (
         input: CommandCenterCommandSubmitInput,
         providers: ReadonlyArray<ProviderAvailability>,
         options?: CommandCenterSubmitOptions,
       ) {
+        input = yield* decodeCommandInput(input).pipe(
+          Effect.mapError(
+            () =>
+              new CommandCenterError({ reason: "validation", message: "Invalid command request." }),
+          ),
+        );
+        if (
+          input.conversationId !== undefined &&
+          (input.text.length > 32_000 ||
+            input.commandId.length > 200 ||
+            (input.attachments?.length ?? 0) > 20 ||
+            (input.attachments?.some(
+              (a) =>
+                a.reference.length > 8192 ||
+                a.name.length > 200 ||
+                a.id.length > 200 ||
+                a.mimeType.length > 200,
+            ) ??
+              false))
+        ) {
+          return yield* new CommandCenterError({
+            reason: "validation",
+            message: "Command bounds exceeded.",
+          });
+        }
+        if (input.conversationId !== undefined) {
+          if (input.spaceId === undefined)
+            return yield* new CommandCenterError({
+              reason: "validation",
+              message: "A conversation command requires its explicit Space scope.",
+            });
+          yield* loadConversation({
+            spaceId: input.spaceId,
+            repositoryId: input.repositoryId ?? null,
+            conversationId: input.conversationId,
+          });
+        }
         const loaded = yield* syncConfig(false);
         if (loaded.health.status !== "loaded") {
           return yield* new CommandCenterError({
@@ -2298,6 +2479,20 @@ export const layer = Layer.effect(
           const currentRun = yield* hydrateCommandReceiptRun(existing, input.commandId);
           return { ...existing, run: currentRun, duplicate: true };
         }
+        let conversationTurn: number | null = null;
+        if (input.conversationId !== undefined) {
+          const active =
+            yield* sql`SELECT id FROM command_center_runs WHERE conversation_id = ${input.conversationId} AND state IN ('queued','running','waiting','waiting_approval') LIMIT 1`;
+          if (active.length > 0)
+            return yield* new CommandCenterError({
+              reason: "conflict",
+              message: "The conversation already has an active turn.",
+            });
+          const turns = yield* sql<{
+            readonly next: number;
+          }>`SELECT COALESCE(MAX(conversation_turn),0)+1 AS next FROM command_center_runs WHERE conversation_id = ${input.conversationId}`;
+          conversationTurn = turns[0]!.next;
+        }
         const inferredSpace = inferSpace(input.text, loaded.spaces);
         const capabilitySpace = inferCapabilitySpace(
           inferClassifier(input.text, undefined),
@@ -2328,7 +2523,10 @@ export const layer = Layer.effect(
           });
         }
 
-        const inferredRepository = inferPrimaryRepository(input.text, selectedSpace);
+        const inferredRepository =
+          input.conversationId === undefined
+            ? inferPrimaryRepository(input.text, selectedSpace)
+            : undefined;
         const classifier = {
           ...inferClassifier(input.text, selectedSpace.id),
           ...(inferredRepository === undefined ? {} : { repositoryId: inferredRepository.id }),
@@ -2458,6 +2656,7 @@ export const layer = Layer.effect(
           kind: classifier.intent === "automation" ? "automation" : "agent",
           status: state,
           commandId: input.commandId,
+          conversationId: input.conversationId,
           repositoryId: route.repositoryId ?? undefined,
           projectId: route.projectId ?? undefined,
           providerId: route.providerId ?? undefined,
@@ -2489,10 +2688,10 @@ export const layer = Layer.effect(
             let clearedItemId: string | undefined;
             yield* sql`
             INSERT INTO command_center_runs (
-              id, command_id, space_id, project_id, kind, state, route_json, input_json,
+              id, conversation_id, conversation_turn, command_id, space_id, project_id, kind, state, route_json, input_json,
               error, started_at, finished_at
             ) VALUES (
-              ${run.id}, ${input.commandId}, ${selectedSpace.id}, ${route.projectId}, ${run.kind},
+              ${run.id}, ${input.conversationId ?? null}, ${conversationTurn}, ${input.commandId}, ${selectedSpace.id}, ${route.projectId}, ${run.kind},
               ${state}, ${stringify(route)}, ${requestJson},
               ${state === "failed" ? route.reasons.join("; ") : null}, ${now},
               ${state === "failed" ? now : null}
@@ -2665,6 +2864,10 @@ export const layer = Layer.effect(
         );
         return result;
       },
+      (effect, input) =>
+        syncConfig(input.conversationId !== undefined).pipe(
+          Effect.andThen(sql.withTransaction(effect)),
+        ),
       Effect.mapError((cause) =>
         isCommandCenterError(cause)
           ? cause
@@ -3046,6 +3249,11 @@ export const layer = Layer.effect(
       sql
         .withTransaction(
           Effect.gen(function* () {
+            if (input.conversationId !== undefined)
+              return yield* new CommandCenterError({
+                reason: "validation",
+                message: "Agent child Runs cannot join owner conversations.",
+              });
             const result = yield* submitCommand(input, providers);
             yield* bindMcpChildRun({
               runId: result.run.id,
@@ -3088,6 +3296,11 @@ export const layer = Layer.effect(
         }
         // Warm the config cache before the transaction so a rollback below can
         // never leave the cached projection ahead of the database.
+        if (input.conversationId !== undefined)
+          return yield* new CommandCenterError({
+            reason: "validation",
+            message: "Space agents cannot join owner conversations.",
+          });
         const space = yield* requireConfiguredSpace(source.spaceId);
         if (space.agent?.enabled !== true) {
           return yield* new CommandCenterError({
@@ -4208,6 +4421,9 @@ export const layer = Layer.effect(
       getArtifactsByIds,
       queryConnections,
       queryMemories,
+      createConversation,
+      listConversations,
+      getConversation,
       submitCommand,
       authorizeRunExecution,
       submitMcpChildCommand,
