@@ -362,7 +362,7 @@ export const make = Effect.gen(function* () {
     function* (raw: unknown, access: KnowledgeAccess) {
       const request = yield* decode(CommandCenterKnowledgeSearchInput)(raw);
       yield* requireScope(request, access, "cc.items.read");
-      const terms = (request.query.match(/[\p{L}\p{N}_]+/gu) ?? [])
+      const terms = (request.query.match(/[\p{L}\p{N}_][\p{L}\p{N}\p{M}_]*/gu) ?? [])
         .map((term) => `"${term}"`)
         .join(" AND ");
       const query = `scope_key : "${digest([request.spaceId, request.repositoryId])}" AND text : (${terms})`;

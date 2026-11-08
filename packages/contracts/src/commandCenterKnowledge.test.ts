@@ -99,10 +99,17 @@ describe("knowledge boundaries", () => {
     };
     expect(valid(request)).toBe(true);
     for (const query of [
+      "e\u0301clair",
+      Array.from({ length: 16 }, () => "e\u0301clair").join(" "),
+    ])
+      expect(valid({ ...request, query })).toBe(true);
+    for (const query of [
       "",
       "   ",
       '"*()"',
       Array.from({ length: 17 }, () => "word").join(" "),
+      Array.from({ length: 17 }, () => "e\u0301clair").join(" "),
+      "\u0301",
       "a".repeat(513),
     ])
       expect(valid({ ...request, query })).toBe(false);

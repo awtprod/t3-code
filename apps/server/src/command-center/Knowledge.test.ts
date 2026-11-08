@@ -164,6 +164,8 @@ tests("Knowledge", (it) => {
         [
           ["a ".repeat(1023) + "needle", "needle"],
           ["a ".repeat(1023) + "éclair", "éclair"],
+          ["a ".repeat(1023) + "e\u0301lephant", "e\u0301lephant"],
+          ["a ".repeat(1023) + "q\u0301bert", "q\u0301bert"],
           ["a ".repeat(1023) + "𐐀word", "𐐀word"],
           ["a ".repeat(32764) + "tail", "tail"],
           [("x".repeat(1536) + " ").repeat(42) + "lastword", "lastword"],

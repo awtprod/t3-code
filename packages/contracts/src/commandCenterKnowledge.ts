@@ -64,7 +64,7 @@ export const CommandCenterKnowledgeSearchInput = Schema.Struct({
   ...CommandCenterKnowledgeScope.fields,
   query: text(512).check(
     Schema.makeFilter((s) => {
-      const terms = s.match(/[\p{L}\p{N}_]+/gu) ?? [];
+      const terms = s.match(/[\p{L}\p{N}_][\p{L}\p{N}\p{M}_]*/gu) ?? [];
       return terms.length > 0 && terms.length <= 16;
     }),
   ),
