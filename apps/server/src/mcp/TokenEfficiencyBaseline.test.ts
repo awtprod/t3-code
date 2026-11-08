@@ -37,9 +37,7 @@ it("records the committed static-context baseline", () => {
     // 2026-11: -2,671 default / -10,808 plan bytes: upstream v0.1.5 moved Codex to its native
     // collaboration modes, so either mode only sends the tool block from the client.
     collaborationInstructions: { defaultBytes: 393, planBytes: 393 },
-    // 2026-11: -14,271 bytes: upstream v0.1.5 folds the preview tools into compact action tools
-    // (19 -> 12). Command Center (19) and Supabase (9) are unchanged.
-    mcp: { toolCount: 40, schemaBytes: 22_020, toolkitCounts: [12, 19, 9] },
+    mcp: { toolCount: 44, schemaBytes: 24_315, toolkitCounts: [12, 23, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,
