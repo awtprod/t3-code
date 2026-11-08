@@ -18,6 +18,8 @@ import { WS_METHODS } from "./rpc.ts";
 
 /** Incremental client enforcement; the server still authorizes every request. */
 export const CLIENT_GUARDED_RPC_SCOPES = {
+  [COMMAND_CENTER_WS_METHODS.commandSubmit]: AuthCommandCenterOperateScope,
+  [COMMAND_CENTER_WS_METHODS.conversationCreate]: AuthCommandCenterOperateScope,
   [COMMAND_CENTER_WS_METHODS.knowledgeCapture]: AuthCommandCenterOperateScope,
   [COMMAND_CENTER_WS_METHODS.knowledgeSearch]: AuthCommandCenterReadScope,
   [COMMAND_CENTER_WS_METHODS.knowledgeGet]: AuthCommandCenterReadScope,

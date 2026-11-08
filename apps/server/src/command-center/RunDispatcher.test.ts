@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import {
   CAPABILITY_NAMES,
+  ConversationId,
   RepositoryId,
   RouteDecision,
   RunId,
@@ -250,6 +251,7 @@ function makeFixture(
     readonly parentRunId?: string;
     readonly startedBySpaceAgent?: boolean;
     readonly spaceBrief?: string;
+    readonly conversationId?: string;
     readonly priorContext?: ReadonlyArray<{
       readonly commandText: string;
       readonly responseText?: string;
@@ -266,7 +268,10 @@ function makeFixture(
     parentRunId: options.parentRunId ?? null,
     state: "queued",
     route,
-    command,
+    command:
+      options.conversationId === undefined
+        ? command
+        : { ...command, conversationId: ConversationId.make(options.conversationId) },
     ...(options.startedBySpaceAgent === undefined
       ? {}
       : { startedBySpaceAgent: options.startedBySpaceAgent }),
@@ -1080,3 +1085,25 @@ it("renders Space agent turns with the role, a brief fallback, and bounded text"
   expect(turn).toContain("[truncated: context budget exhausted]");
   expect(turn.length).toBeLessThan(SPACE_AGENT_TURN_TEXT_MAX_CHARS + 4_000);
 });
+
+it.effect("keeps unrelated Space briefs out of explicit conversation prompts", () =>
+  Effect.gen(function* () {
+    let dispatched: ClientOrchestrationCommand | undefined;
+    const fixture = makeFixture(readyRoute, {
+      conversationId: "private-conversation",
+      spaceBrief: "unrelated private item from another conversation",
+      priorContext: [{ commandText: "only this conversation" }],
+    });
+    yield* fixture.dispatcher.dispatch({
+      runId,
+      dispatchCommand: fixture.dispatch((command) =>
+        Effect.sync(() => {
+          dispatched = command;
+        }),
+      ),
+    });
+    const prompt = asTurnStart(dispatched).message.text;
+    expect(prompt).toContain("only this conversation");
+    expect(prompt).not.toContain("unrelated private item");
+  }),
+);

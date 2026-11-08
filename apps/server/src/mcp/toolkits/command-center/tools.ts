@@ -301,7 +301,9 @@ const CommandCenterRunStartTool = commandCenterCapability(
   Tool.make("cc_runs_start", {
     description:
       "Start a policy-routed child Run inside this credential's exact Space and repository scope. The Run is queued for the verified dispatcher; protected or unsupported routes remain blocked. For a Space agent, work outside the Space's auto-run policy is not started and is returned as a decision Item for the user.",
-    parameters: CommandCenterCommandSubmitInput,
+    parameters: CommandCenterCommandSubmitInput.mapFields(
+      ({ conversationId: _conversationId, ...fields }) => fields,
+    ),
     success: Schema.Union([
       CommandCenterCommandSubmitResult,
       CommandCenterSpaceAgentProposalResult,

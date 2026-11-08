@@ -9,6 +9,9 @@ import {
 
 export const COMMAND_CENTER_RPC_SCOPE_ENTRIES = [
   [COMMAND_CENTER_WS_METHODS.bootstrap, AuthCommandCenterReadScope],
+  [COMMAND_CENTER_WS_METHODS.conversationCreate, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_WS_METHODS.conversationList, AuthCommandCenterReadScope],
+  [COMMAND_CENTER_WS_METHODS.conversationGet, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.commandSubmit, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.runStart, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.spaceAgentList, AuthCommandCenterReadScope],

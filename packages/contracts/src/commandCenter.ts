@@ -8,6 +8,7 @@ import {
   AutomationId,
   AutomationNodeId,
   CommandSubmission,
+  ConversationId,
   Connection,
   ConnectionId,
   CapabilityName,
@@ -41,6 +42,9 @@ import { ThreadId as AssetThreadId, NonNegativeInt } from "./baseSchemas.ts";
 export const COMMAND_CENTER_WS_METHODS = {
   bootstrap: "cc.bootstrap",
   commandSubmit: "cc.command.submit",
+  conversationCreate: "cc.conversation.create",
+  conversationList: "cc.conversation.list",
+  conversationGet: "cc.conversation.get",
   runStart: "cc.runs.start",
   eventsReplay: "cc.events.replay",
   eventsSubscribe: "cc.events.subscribe",
@@ -187,6 +191,54 @@ export const CommandCenterBootstrap = Schema.Struct({
   authoringHealth: Schema.optional(CommandCenterAutomationAuthoringHealth),
 });
 export type CommandCenterBootstrap = typeof CommandCenterBootstrap.Type;
+
+const ConversationScope = {
+  spaceId: SpaceId.check(Schema.isMaxLength(200)),
+  repositoryId: Schema.NullOr(RepositoryId.check(Schema.isMaxLength(200))),
+};
+const ConversationRequestId = TrimmedNonEmptyString.check(Schema.isMaxLength(200));
+export const CommandCenterConversation = Schema.Struct({
+  id: ConversationId,
+  ...ConversationScope,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  createdAt: Timestamp,
+});
+export type CommandCenterConversation = typeof CommandCenterConversation.Type;
+export const CommandCenterConversationCreateInput = Schema.Struct({
+  ...ConversationScope,
+  requestId: ConversationRequestId,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+});
+export type CommandCenterConversationCreateInput = typeof CommandCenterConversationCreateInput.Type;
+export const CommandCenterConversationListInput = Schema.Struct({
+  ...ConversationScope,
+  beforeId: Schema.optional(ConversationId),
+});
+export type CommandCenterConversationListInput = typeof CommandCenterConversationListInput.Type;
+export const CommandCenterConversationListResult = Schema.Struct({
+  conversations: Schema.Array(CommandCenterConversation),
+  nextBeforeId: Schema.NullOr(ConversationId),
+});
+export type CommandCenterConversationListResult = typeof CommandCenterConversationListResult.Type;
+export const CommandCenterConversationGetInput = Schema.Struct({
+  ...ConversationScope,
+  conversationId: ConversationId,
+  beforeTurn: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+});
+export type CommandCenterConversationGetInput = typeof CommandCenterConversationGetInput.Type;
+export const CommandCenterConversationGetResult = Schema.Struct({
+  conversation: CommandCenterConversation,
+  turns: Schema.Array(
+    Schema.Struct({
+      sequence: Schema.Int,
+      command: CommandSubmission,
+      run: Run,
+      responseText: Schema.NullOr(Schema.String),
+    }),
+  ),
+  nextBeforeTurn: Schema.NullOr(Schema.Int),
+});
+export type CommandCenterConversationGetResult = typeof CommandCenterConversationGetResult.Type;
 
 export const CommandCenterCommandSubmitInput = CommandSubmission;
 export type CommandCenterCommandSubmitInput = typeof CommandCenterCommandSubmitInput.Type;

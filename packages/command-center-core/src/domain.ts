@@ -27,6 +27,10 @@ export const SpaceId = makeEntityId("CommandCenterSpaceId");
 export type SpaceId = typeof SpaceId.Type;
 export const ItemId = makeEntityId("CommandCenterItemId");
 export type ItemId = typeof ItemId.Type;
+export const ConversationId = TrimmedNonEmptyString.check(Schema.isMaxLength(200)).pipe(
+  Schema.brand("CommandCenterConversationId"),
+);
+export type ConversationId = typeof ConversationId.Type;
 export const RunId = makeEntityId("CommandCenterRunId");
 export type RunId = typeof RunId.Type;
 export const AutomationId = makeEntityId("CommandCenterAutomationId");
@@ -376,6 +380,7 @@ export const Run = Schema.Struct({
   kind: RunKind,
   status: RunStatus,
   commandId: Schema.optional(CommandId),
+  conversationId: Schema.optional(ConversationId),
   parentRunId: Schema.optional(RunId),
   automationId: Schema.optional(AutomationId),
   repositoryId: Schema.optional(RepositoryId),
@@ -562,6 +567,7 @@ export type CommandAttachment = typeof CommandAttachment.Type;
 
 export const CommandSubmission = Schema.Struct({
   commandId: CommandId,
+  conversationId: Schema.optional(ConversationId),
   text: TrimmedNonEmptyString,
   attachments: Schema.optional(Schema.Array(CommandAttachment)),
   spaceId: Schema.optional(SpaceId),

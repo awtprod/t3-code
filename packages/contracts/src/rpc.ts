@@ -472,6 +472,12 @@ import {
   CommandCenterAutomationsQueryInput,
   CommandCenterAutomationsQueryResult,
   CommandCenterBootstrap,
+  CommandCenterConversation,
+  CommandCenterConversationCreateInput,
+  CommandCenterConversationListInput,
+  CommandCenterConversationListResult,
+  CommandCenterConversationGetInput,
+  CommandCenterConversationGetResult,
   CommandCenterCommandSubmitInput,
   CommandCenterCommandSubmitResult,
   CommandCenterConnectionRefreshInput,
@@ -811,6 +817,33 @@ export const WsCommandCenterBootstrapRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.bo
   success: CommandCenterBootstrap,
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
+
+export const WsCommandCenterConversationCreateRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.conversationCreate,
+  {
+    payload: CommandCenterConversationCreateInput,
+    success: CommandCenterConversation,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterConversationListRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.conversationList,
+  {
+    payload: CommandCenterConversationListInput,
+    success: CommandCenterConversationListResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterConversationGetRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.conversationGet,
+  {
+    payload: CommandCenterConversationGetInput,
+    success: CommandCenterConversationGetResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
 
 export const WsCommandCenterCommandSubmitRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.commandSubmit, {
   payload: CommandCenterCommandSubmitInput,
@@ -2887,6 +2920,9 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
  */
 export const WsCommandCenterRpcGroup = RpcGroup.make(
   WsCommandCenterBootstrapRpc,
+  WsCommandCenterConversationCreateRpc,
+  WsCommandCenterConversationListRpc,
+  WsCommandCenterConversationGetRpc,
   WsCommandCenterCommandSubmitRpc,
   WsCommandCenterRunStartRpc,
   WsCommandCenterSpaceAgentListRpc,

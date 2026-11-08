@@ -129,11 +129,14 @@ describe("Command Center RPC authorization", () => {
       AuthCommandCenterOperateScope,
     );
     for (const method of [
+      COMMAND_CENTER_WS_METHODS.conversationCreate,
       COMMAND_CENTER_WS_METHODS.knowledgeCapture,
       COMMAND_CENTER_WS_METHODS.knowledgeRetire,
     ])
       expect(scopes.get(method)).toBe(AuthCommandCenterOperateScope);
     for (const method of [
+      COMMAND_CENTER_WS_METHODS.conversationList,
+      COMMAND_CENTER_WS_METHODS.conversationGet,
       COMMAND_CENTER_WS_METHODS.knowledgeSearch,
       COMMAND_CENTER_WS_METHODS.knowledgeGet,
     ])
