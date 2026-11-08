@@ -1,3 +1,5 @@
+import * as Option from "effect/Option";
+import * as Knowledge from "../../../command-center/Knowledge.ts";
 import {
   CommandCenterError,
   type CommandCenterItemUpdateInput,
@@ -346,7 +348,56 @@ const googleConnectionsGranting = <
 
 const decodeGoogleDraftCreateRequest = Schema.decodeUnknownEffect(GoogleDraftCreateRequest);
 
+const withScopedKnowledge = Effect.fn("CommandCenterToolkit.withScopedKnowledge")(function* <A>(
+  capability: "cc.items.read" | "cc.items.write",
+  spaceId: string,
+  use: (
+    knowledge: Knowledge.Knowledge["Service"],
+    access: Knowledge.KnowledgeAccess,
+  ) => Effect.Effect<A, Knowledge.KnowledgeError>,
+) {
+  const scope = yield* requireScopedSpace(capability, spaceId);
+  const available = yield* Effect.serviceOption(Knowledge.Knowledge);
+  if (Option.isNone(available))
+    return yield* new CommandCenterError({
+      reason: "config",
+      message: "Knowledge is unavailable in this environment.",
+    });
+  return yield* use(available.value, {
+    kind: "scoped",
+    actorId: scope.threadId,
+    spaceId: scope.spaceId,
+    repositoryId: scope.repositoryId ?? null,
+    capabilities: [...scope.capabilities],
+  }).pipe(
+    Effect.mapError(
+      (cause) =>
+        new CommandCenterError({
+          reason: cause.reason === "denied" ? "validation" : cause.reason,
+          message: cause.message,
+          cause,
+        }),
+    ),
+  );
+});
+
 const handlers = {
+  cc_knowledge_capture: (input) =>
+    withScopedKnowledge("cc.items.write", input.spaceId, (knowledge, access) =>
+      knowledge.capture(input, access),
+    ),
+  cc_knowledge_search: (input) =>
+    withScopedKnowledge("cc.items.read", input.spaceId, (knowledge, access) =>
+      knowledge.search(input, access),
+    ),
+  cc_knowledge_get: (input) =>
+    withScopedKnowledge("cc.items.read", input.spaceId, (knowledge, access) =>
+      knowledge.get(input, access),
+    ),
+  cc_knowledge_retire: (input) =>
+    withScopedKnowledge("cc.items.write", input.spaceId, (knowledge, access) =>
+      knowledge.retire(input, access),
+    ),
   cc_spaces_list: (_input) =>
     Effect.gen(function* () {
       const scope = yield* requireScopedSpace("cc.items.read");
@@ -864,6 +915,10 @@ const jsonSafe =
 
 /** Every Command Center tool declares its access (see `McpToolAccess`). */
 export const CommandCenterToolkitHandlersLive = McpToolAccess.toLayer(CommandCenterToolkit, {
+  cc_knowledge_capture: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_knowledge_capture)),
+  cc_knowledge_search: McpToolAccess.reads(jsonSafe(handlers.cc_knowledge_search)),
+  cc_knowledge_get: McpToolAccess.reads(jsonSafe(handlers.cc_knowledge_get)),
+  cc_knowledge_retire: McpToolAccess.writesWithCapability(jsonSafe(handlers.cc_knowledge_retire)),
   cc_spaces_list: McpToolAccess.reads(jsonSafe(handlers.cc_spaces_list)),
   cc_items_list: McpToolAccess.reads(jsonSafe(handlers.cc_items_list)),
   cc_memory_list: McpToolAccess.reads(jsonSafe(handlers.cc_memory_list)),

@@ -1,3 +1,4 @@
+export * from "./commandCenterKnowledge.ts";
 export * from "./baseSchemas.ts";
 export * from "./commandCenter.ts";
 export * from "./commandCenterResponsibilities.ts";

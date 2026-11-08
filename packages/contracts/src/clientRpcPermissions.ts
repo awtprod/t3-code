@@ -1,7 +1,10 @@
+import { COMMAND_CENTER_WS_METHODS } from "./commandCenter.ts";
 import * as Schema from "effect/Schema";
 import { GitPreparePullRequestThreadInput, GitRunStackedActionInput } from "./git.ts";
 import {
   AuthAccessWriteScope,
+  AuthCommandCenterReadScope,
+  AuthCommandCenterOperateScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthPreviewOperateScope,
@@ -15,6 +18,11 @@ import { WS_METHODS } from "./rpc.ts";
 
 /** Incremental client enforcement; the server still authorizes every request. */
 export const CLIENT_GUARDED_RPC_SCOPES = {
+  [COMMAND_CENTER_WS_METHODS.knowledgeCapture]: AuthCommandCenterOperateScope,
+  [COMMAND_CENTER_WS_METHODS.knowledgeSearch]: AuthCommandCenterReadScope,
+  [COMMAND_CENTER_WS_METHODS.knowledgeGet]: AuthCommandCenterReadScope,
+  [COMMAND_CENTER_WS_METHODS.knowledgeRetire]: AuthCommandCenterOperateScope,
+
   [WS_METHODS.previewClose]: AuthPreviewOperateScope,
   // Stopping a server signals its processes, as closing a terminal does.
   [WS_METHODS.previewStopLocalServer]: AuthTerminalOperateScope,

@@ -121,6 +121,7 @@ import Migration0109 from "./Migrations/109_ShellStopRequestIndex.ts";
 import Migration0110 from "./Migrations/110_ThreadMessageSearch.ts";
 import Migration0111 from "./Migrations/111_PeerLinks.ts";
 import Migration0112 from "./Migrations/112_PeerLinkFence.ts";
+import Migration0114 from "./Migrations/114_CommandCenterKnowledge.ts";
 import Migration0113 from "./Migrations/113_WaitingLinkRequestIndex.ts";
 
 export const migrationEntries = [
@@ -241,6 +242,7 @@ export const migrationEntries = [
   [111, "PeerLinks", Migration0111],
   [112, "PeerLinkFence", Migration0112],
   [113, "WaitingLinkRequestIndex", Migration0113],
+  [114, "CommandCenterKnowledge", Migration0114],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

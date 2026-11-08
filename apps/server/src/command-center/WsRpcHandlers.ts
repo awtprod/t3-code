@@ -50,6 +50,7 @@ import * as PhoneCallProposals from "./phone/PhoneCallProposals.ts";
 import * as SprintPlan from "./SprintPlan.ts";
 import * as CommandCenterDigest from "./Digest.ts";
 import * as CommandCenterEventStream from "./EventStream.ts";
+import * as Knowledge from "./Knowledge.ts";
 import * as Observations from "./Observations.ts";
 import { refreshCommandCenterConnection } from "./ConnectionRefresh.ts";
 import * as AutomationDefinitionConfig from "./AutomationDefinitionConfig.ts";
@@ -133,6 +134,33 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
               }),
             ),
           onSome: use,
+        });
+      const knowledge = yield* Effect.serviceOption(Knowledge.Knowledge);
+      const knowledgeAccess = { kind: "owner", actorId: currentSession.sessionId } as const;
+      const withKnowledge = <A>(
+        use: (
+          service: Knowledge.Knowledge["Service"],
+        ) => Effect.Effect<A, Knowledge.KnowledgeError>,
+      ) =>
+        Option.match(knowledge, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "config",
+                message: "Knowledge is unavailable in this environment.",
+              }),
+            ),
+          onSome: (service) =>
+            use(service).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new CommandCenterError({
+                    reason: cause.reason === "denied" ? "validation" : cause.reason,
+                    message: cause.message,
+                    cause,
+                  }),
+              ),
+            ),
         });
       const observations = yield* Effect.serviceOption(Observations.ObservationService);
       const youtubeAnalytics = yield* Effect.serviceOption(YouTubeAnalytics.YouTubeAnalytics);
@@ -1255,6 +1283,26 @@ export const layerCommandCenterWsRpc = (currentSession: EnvironmentAuth.Authenti
               };
             }),
             { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.knowledgeCapture]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.knowledgeCapture,
+            withKnowledge((service) => service.capture(input, knowledgeAccess)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.knowledgeSearch]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.knowledgeSearch,
+            withKnowledge((service) => service.search(input, knowledgeAccess)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.knowledgeGet]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.knowledgeGet,
+            withKnowledge((service) => service.get(input, knowledgeAccess)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.knowledgeRetire]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.knowledgeRetire,
+            withKnowledge((service) => service.retire(input, knowledgeAccess)),
           ),
         [COMMAND_CENTER_WS_METHODS.observationsList]: (input) =>
           observeRpcEffect(
