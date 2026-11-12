@@ -77,7 +77,8 @@ type TwilioMethod = "addParticipant" | "createCall" | "updateParticipant" | "end
 
 interface Harness {
   readonly twilio: Array<{ readonly method: TwilioMethod; readonly input: unknown }>;
-  readonly failures: Partial<Record<TwilioMethod, Array<TwilioRequestError>>>;
+  /** Shifted per call; an `undefined` entry lets that call succeed. */
+  readonly failures: Partial<Record<TwilioMethod, Array<TwilioRequestError | undefined>>>;
   readonly elevenLabs: Array<OutboundCallRequest>;
   /** Completed by the next owner dial; replace it to wait for another. */
   ownerDialed: Deferred.Deferred<void>;
@@ -780,6 +781,118 @@ describe("bring_owner_in", () => {
       // The agent is gone, so nobody is taken off hold.
       expect(calls(harness, "updateParticipant")).toHaveLength(1);
     }).pipe(Effect.provide(layer));
+  });
+
+  describe("the callee hangs up while Andrew is bridged in", () => {
+    const gone = () =>
+      new TwilioRequestError({
+        reason: "http",
+        status: 404,
+        code: 20404,
+        message: "The requested resource was not found",
+      });
+
+    /** Bridges Andrew in, queues the given Twilio failures, then Andrew's leg completes first. */
+    const ownerCompletesFirst = (
+      harness: Harness,
+      failures: {
+        readonly updateParticipant?: Array<TwilioRequestError | undefined>;
+        readonly endConference?: Array<TwilioRequestError | undefined>;
+      },
+    ) =>
+      Effect.gen(function* () {
+        yield* seedSpace;
+        const callId = yield* connectCall;
+        const tool = yield* Effect.forkChild(bringOwnerIn());
+        yield* Deferred.await(harness.ownerDialed);
+        yield* twilioRequest({
+          route: "owner-twiml",
+          callId,
+          params: { CallSid: OWNER_SID, CallStatus: "in-progress" },
+        });
+        yield* Fiber.join(tool);
+        yield* status(callId, "owner", OWNER_SID, "in-progress");
+        harness.failures.updateParticipant = failures.updateParticipant ?? [];
+        harness.failures.endConference = failures.endConference ?? [];
+        yield* status(callId, "owner", OWNER_SID, "completed");
+        return callId;
+      });
+
+    const expectCallEnded = (harness: Harness, callId: string) =>
+      Effect.gen(function* () {
+        expect(calls(harness, "endConference")).toEqual([CONFERENCE_SID]);
+        expect((yield* loadRecord).phase).toBe("ended");
+        const rows = yield* phoneRows;
+        const end = rows.filter((row) => row.sourceId === `phone-bridge-end:${callId}:1`);
+        expect(end).toHaveLength(1);
+        expect(end[0]?.title).toBe("Phone: Andrew left; the call ended");
+        expect(end[0]?.status).toBe("bridge-ended");
+        expect(JSON.stringify(rows)).not.toContain("could not be taken off hold");
+        // Late callbacks for the other legs change nothing.
+        const twilioCalls = harness.twilio.length;
+        const rowCount = rows.length;
+        yield* status(callId, "agent", AGENT_SID, "completed");
+        yield* status(callId, "callee", CALLEE_SID, "completed");
+        expect(harness.twilio).toHaveLength(twilioCalls);
+        expect(yield* phoneRows).toHaveLength(rowCount);
+        expect((yield* loadRecord).phase).toBe("ended");
+      });
+
+    it.effect("ends the call instead of reporting a stuck hold", () => {
+      const { harness, layer } = makeLayer();
+      return Effect.gen(function* () {
+        const callId = yield* ownerCompletesFirst(harness, { updateParticipant: [gone()] });
+        // Only the hold; no announce or unmute against a conference that is over.
+        expect(calls(harness, "updateParticipant")).toHaveLength(2);
+        yield* expectCallEnded(harness, callId);
+      }).pipe(Effect.provide(layer));
+    });
+
+    it.effect("still ends the call when the conference is already gone", () => {
+      const { harness, layer } = makeLayer();
+      return Effect.gen(function* () {
+        const callId = yield* ownerCompletesFirst(harness, {
+          updateParticipant: [gone()],
+          endConference: [gone()],
+        });
+        yield* expectCallEnded(harness, callId);
+      }).pipe(Effect.provide(layer));
+    });
+
+    it.effect("ends the call when the participant vanishes after the unhold", () => {
+      const { harness, layer } = makeLayer();
+      return Effect.gen(function* () {
+        // The first (unhold) call succeeds; the announce answers 404.
+        const callId = yield* ownerCompletesFirst(harness, {
+          updateParticipant: [undefined, gone()],
+        });
+        // Hold, unhold, announce; the unmute is never attempted.
+        expect(calls(harness, "updateParticipant")).toHaveLength(3);
+        expect(calls(harness, "updateParticipant").at(-1)).toMatchObject({
+          announceUrl: `${BASE_URL}/twilio/announce?call=${callId}`,
+        });
+        yield* expectCallEnded(harness, callId);
+      }).pipe(Effect.provide(layer));
+    });
+
+    it.effect.each([
+      ["an HTTP 500", { reason: "http", status: 500 }],
+      ["a timeout", { reason: "timeout" }],
+    ] as const)("keeps the stuck-hold report for %s", ([, fields]) => {
+      const { harness, layer } = makeLayer();
+      return Effect.gen(function* () {
+        const failure = () => new TwilioRequestError({ ...fields, message: "Twilio failed" });
+        yield* ownerCompletesFirst(harness, {
+          updateParticipant: [failure(), failure(), failure()],
+        });
+        // Unhold, announce and unmute are all still attempted.
+        expect(calls(harness, "updateParticipant").slice(1)).toHaveLength(3);
+        expect((yield* loadRecord).phase).toBe("in-progress");
+        expect(calls(harness, "endConference")).toEqual([]);
+        const end = (yield* phoneRows).find((row) => row.status === "bridge-ended");
+        expect(end?.title).toBe("Phone: Andrew left; assistant could not be taken off hold");
+      }).pipe(Effect.provide(layer));
+    });
   });
 
   it.effect("reports no answer and leaves the agent untouched; the attempt counts", () => {

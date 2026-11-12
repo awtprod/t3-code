@@ -399,13 +399,22 @@ export const make = Effect.gen(function* () {
   const logFailure = (message: string, record: ConferenceCallRecord) => (error: unknown) =>
     Effect.logWarning(message, { callId: record.callId, cause: error });
 
-  /** Ends the conference if Twilio created one; a failure is logged. */
+  /** Twilio answers 404 for a participant or conference that no longer exists. */
+  const isGone = (error: TwilioRequestError) => error.reason === "http" && error.status === 404;
+
+  /** Ends the conference if Twilio created one; a failure is logged (404 means already over). */
   const endConference = (connection: PhoneConferenceConnection, record: ConferenceCallRecord) =>
     record.conferenceSid === undefined
       ? Effect.void
       : twilio
           .endConference(connection.twilio, record.conferenceSid)
-          .pipe(Effect.catch(logFailure("phone conference could not be ended", record)));
+          .pipe(
+            Effect.catch((error) =>
+              isGone(error)
+                ? Effect.logInfo("phone conference was already over", { callId: record.callId })
+                : logFailure("phone conference could not be ended", record)(error),
+            ),
+          );
 
   /** Persist `ending` (a crash marker), end the conference, then the terminal phase. */
   const endCall = Effect.fn("ConferenceCalls.endCall")(function* (
@@ -688,24 +697,35 @@ export const make = Effect.gen(function* () {
 
   /**
    * Take the agent off hold, play the hand-back announcement, unmute. Each step
-   * is attempted even if an earlier one failed; returns whether all succeeded.
+   * is attempted even if an earlier one failed, unless Twilio says the agent
+   * participant is gone (the call is over): then it stops with "gone".
    */
   const restoreAgent = Effect.fn("ConferenceCalls.restoreAgent")(function* (
     connection: PhoneConferenceConnection,
     record: ConferenceCallRecord,
   ) {
-    if (record.conferenceSid === undefined || record.agent.callSid === undefined) return false;
+    if (record.conferenceSid === undefined || record.agent.callSid === undefined) {
+      return "failed" as const;
+    }
     const target = { conferenceSid: record.conferenceSid, callSid: record.agent.callSid };
     const step = (
       request: Omit<Parameters<typeof twilio.updateParticipant>[1], "conferenceSid" | "callSid">,
     ) =>
       twilio.updateParticipant(connection.twilio, { ...target, ...request }).pipe(
-        Effect.as(true),
+        Effect.as("ok" as const),
         Effect.catch((error) =>
-          logFailure("agent could not be restored", record)(error).pipe(Effect.as(false)),
+          isGone(error)
+            ? Effect.logInfo("agent participant is gone; the call has ended", {
+                callId: record.callId,
+              }).pipe(Effect.as("gone" as const))
+            : logFailure(
+                "agent could not be restored",
+                record,
+              )(error).pipe(Effect.as("failed" as const)),
         ),
       );
     const unheld = yield* step({ hold: false });
+    if (unheld === "gone") return "gone" as const;
     const announced = yield* step({
       announceUrl: twilioCallbackUrl({
         publicBaseUrl: connection.conference.publicBaseUrl,
@@ -713,8 +733,12 @@ export const make = Effect.gen(function* () {
         callId: record.callId,
       }),
     });
+    if (announced === "gone") return "gone" as const;
     const unmuted = yield* step({ muted: false });
-    return unheld && announced && unmuted;
+    if (unmuted === "gone") return "gone" as const;
+    return unheld === "ok" && announced === "ok" && unmuted === "ok"
+      ? ("restored" as const)
+      : ("failed" as const);
   });
 
   const onOwnerDone = Effect.fn("ConferenceCalls.onOwnerDone")(function* (
@@ -733,7 +757,22 @@ export const make = Effect.gen(function* () {
       // The agent left while the owner talked; the callee is not left alone.
       return yield* endCall(connection, updated, "ended");
     }
-    const restored = bridge.held ? yield* restoreAgent(connection, updated) : true;
+    const result = bridge.held ? yield* restoreAgent(connection, updated) : "restored";
+    if (result === "gone") {
+      // No agent participant is left to hand back to, and the callee must not
+      // be left alone in a live conference.
+      if (joined) {
+        const owner = connection.ownerName;
+        yield* writeRowLogged(updated, {
+          sourceId: `phone-bridge-end:${updated.callId}:${bridge.n}`,
+          title: `Phone: ${owner} left; the call ended`,
+          status: PhoneCallStatus.bridgeEnded,
+          text: `${owner} finished talking with ${calleeLabel(updated)} and the call ended, so there was nothing to hand back to the assistant.`,
+        });
+      }
+      return yield* endCall(connection, updated, "ended");
+    }
+    const restored = result === "restored";
     if (joined) {
       const owner = connection.ownerName;
       yield* writeRowLogged(updated, {
