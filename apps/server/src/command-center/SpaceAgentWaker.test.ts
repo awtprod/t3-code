@@ -709,8 +709,7 @@ describe("SpaceAgentWaker", () => {
           });
           expect(yield* readState).toEqual(before);
 
-          // The fallback run fails too: it is never retried.
-          harness.endLatestRun({ state: "failed", class: "provider_error" });
+          harness.endLatestRun({ state: "completed" });
           expect(yield* tickAt("2026-10-09T14:02:00.000Z")).toBe("idle");
           expect(yield* tickAt("2026-10-09T14:02:30.000Z")).toBe("idle");
           expect(harness.turns).toHaveLength(2);
@@ -904,6 +903,109 @@ describe("SpaceAgentWaker", () => {
         expect(harness.turns[5]).toMatchObject({ useFallbackModel: true });
         expect(harness.turns[5]?.text).toContain("Ship the example build.");
         expect(harness.turns).toHaveLength(6);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    /** Wakes on the primary at 14:01 and fails over at 14:01:30; the hold ends at 14:31:30. */
+    const failOverFirstWake = (harness: ReturnType<typeof makeHarness>) =>
+      Effect.gen(function* () {
+        yield* insertSpace(SPACE, agentJson({ debounceMinutes: 1, fallbackModel: true }));
+        yield* tickAt("2026-10-09T13:59:00.000Z");
+        yield* recordActivity({ occurredAt: "2026-10-09T14:00:00.000Z", title: "First" });
+        expect(yield* tickAt("2026-10-09T14:01:00.000Z")).toBe("event");
+        harness.endLatestRun({ state: "failed", class: "provider_error" });
+        expect(yield* tickAt("2026-10-09T14:01:30.000Z")).toBe("failed-over");
+      });
+    const fallbackFlags = (harness: ReturnType<typeof makeHarness>) =>
+      harness.turns.map((turn) => turn.useFallbackModel);
+
+    it.effect("releases the hold when a held wake's fallback run fails, without a re-send", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* failOverFirstWake(harness);
+        harness.endLatestRun({ state: "completed" });
+        expect(yield* tickAt("2026-10-09T14:02:00.000Z")).toBe("idle");
+
+        yield* recordActivity({ occurredAt: "2026-10-09T14:05:00.000Z", title: "Second" });
+        expect(yield* tickAt("2026-10-09T14:06:00.000Z")).toBe("event");
+        harness.endLatestRun({ state: "failed", class: "provider_error" });
+        expect(yield* tickAt("2026-10-09T14:06:30.000Z")).toBe("idle");
+        expect(yield* tickAt("2026-10-09T14:07:00.000Z")).toBe("idle");
+        expect(fallbackFlags(harness)).toEqual([false, true, true]);
+
+        yield* recordActivity({ occurredAt: "2026-10-09T14:08:00.000Z", title: "Third" });
+        expect(yield* tickAt("2026-10-09T14:09:00.000Z")).toBe("event");
+        expect(fallbackFlags(harness)).toEqual([false, true, true, false]);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("watches the failover re-send, and fails over again when both stay down", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* failOverFirstWake(harness);
+        // A failure with no class still counts.
+        harness.endLatestRun({ state: "failed", class: null });
+        expect(yield* tickAt("2026-10-09T14:02:00.000Z")).toBe("idle");
+        expect(fallbackFlags(harness)).toEqual([false, true]);
+
+        yield* recordActivity({ occurredAt: "2026-10-09T14:03:00.000Z", title: "Second" });
+        expect(yield* tickAt("2026-10-09T14:04:00.000Z")).toBe("event");
+        harness.endLatestRun({ state: "failed", class: "provider_error" });
+        expect(yield* tickAt("2026-10-09T14:04:30.000Z")).toBe("failed-over");
+        expect(yield* tickAt("2026-10-09T14:05:00.000Z")).toBe("idle");
+        expect(fallbackFlags(harness)).toEqual([false, true, false, true]);
+        expect(harness.turns[3]?.text).toBe(harness.turns[2]?.text);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("keeps the hold while fallback runs complete", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* failOverFirstWake(harness);
+        harness.endLatestRun({ state: "completed" });
+        yield* recordActivity({ occurredAt: "2026-10-09T14:05:00.000Z", title: "Second" });
+        expect(yield* tickAt("2026-10-09T14:06:00.000Z")).toBe("event");
+        harness.endLatestRun({ state: "completed" });
+        expect(yield* tickAt("2026-10-09T14:06:30.000Z")).toBe("idle");
+        yield* recordActivity({ occurredAt: "2026-10-09T14:08:00.000Z", title: "Third" });
+        expect(yield* tickAt("2026-10-09T14:09:00.000Z")).toBe("event");
+        expect(fallbackFlags(harness)).toEqual([false, true, true, true]);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("sends and watches manual wakes on the fallback while the primary is held", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* failOverFirstWake(harness);
+        harness.endLatestRun({ state: "completed" });
+        const waker = yield* SpaceAgentWaker;
+        yield* TestClock.setTime(epoch("2026-10-09T14:05:00.000Z"));
+        yield* waker.deliverWake(SPACE, { kind: "manual" });
+        expect(harness.turns[2]).toMatchObject({ reason: "manual", useFallbackModel: true });
+
+        harness.endLatestRun({ state: "failed", class: "provider_error" });
+        expect(yield* tickAt("2026-10-09T14:05:30.000Z")).toBe("idle");
+        yield* waker.deliverWake(SPACE, { kind: "manual" });
+        expect(fallbackFlags(harness)).toEqual([false, true, true, false]);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("keeps the hold on a permission error from the fallback", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* failOverFirstWake(harness);
+        harness.endLatestRun({ state: "failed", class: "permission_error" });
+        expect(yield* tickAt("2026-10-09T14:02:00.000Z")).toBe("idle");
+        yield* recordActivity({ occurredAt: "2026-10-09T14:05:00.000Z", title: "Second" });
+        expect(yield* tickAt("2026-10-09T14:06:00.000Z")).toBe("event");
+        expect(fallbackFlags(harness)).toEqual([false, true, true]);
+
+        // A provider failure on the same kind of run does release it.
+        harness.endLatestRun({ state: "failed", class: "provider_error" });
+        expect(yield* tickAt("2026-10-09T14:06:30.000Z")).toBe("idle");
+        yield* recordActivity({ occurredAt: "2026-10-09T14:08:00.000Z", title: "Third" });
+        expect(yield* tickAt("2026-10-09T14:09:00.000Z")).toBe("event");
+        expect(fallbackFlags(harness)).toEqual([false, true, true, false]);
       }).pipe(Effect.provide(harness.layer));
     });
   });

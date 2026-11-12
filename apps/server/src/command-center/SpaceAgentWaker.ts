@@ -30,10 +30,11 @@
  * below. Manual wakes (`cc.spaceAgent.wake`) go through the same `deliverWake`.
  *
  * Failover (only with `agent.fallbackModel`): when the run of a wake sent on
- * the primary model fails for a provider reason, the next tick re-sends the
- * same wake once on the fallback and keeps later wakes on it until the
- * provider's reset time, or for a fixed hold. That state is in memory only; a
- * restart forgets it and wakes go back to the primary.
+ * the primary model fails (other than a permission or validation error), the
+ * next tick re-sends the same wake once on the fallback and keeps later wakes
+ * on it until the provider's reset time, or for a fixed hold. A failed
+ * fallback run is never re-sent but ends the hold. That state is in memory
+ * only; a restart forgets it and wakes go back to the primary.
  *
  * @module SpaceAgentWaker
  */
@@ -88,7 +89,7 @@ const DELTA_TITLE_CHARS = 120;
 const FAILURE_BACKOFF_BASE_MS = 60_000;
 const FAILURE_BACKOFF_MAX_MS = 30 * 60_000;
 const MINUTE_MS = 60_000;
-/** A primary wake whose run has not resolved within this is no longer watched. */
+/** A wake whose run has not resolved within this is no longer watched. */
 const FAILOVER_OUTCOME_WINDOW_MS = 15 * MINUTE_MS;
 /** How long wakes stay on the fallback after a failure with no reset time. */
 const FAILOVER_DEFAULT_HOLD_MS = 30 * MINUTE_MS;
@@ -404,7 +405,7 @@ export const make = Effect.gen(function* () {
   const wakeLock = yield* Semaphore.make(1);
   /** Per-Space retry hold after a non-conflict failure (in memory only). */
   const backoff = new Map<string, { readonly failures: number; readonly untilMs: number }>();
-  /** The latest wake sent on the primary model, until its run resolves (in memory only). */
+  /** The latest wake dispatched, until its run resolves (in memory only). */
   const awaitingOutcome = new Map<
     string,
     {
@@ -412,6 +413,7 @@ export const make = Effect.gen(function* () {
       readonly reason: SpaceAgent.SpaceAgentTurnReason;
       readonly baselineRunId: string | null;
       readonly dispatchedAtMs: number;
+      readonly onFallback: boolean;
     }
   >();
   /** Epoch ms until which wakes go straight to the fallback model (in memory only). */
@@ -528,13 +530,12 @@ export const make = Effect.gen(function* () {
     const failover = agent.fallbackModel !== undefined;
     const useFallbackModel = failover && nowMs < (primaryHeldUntil.get(spaceId) ?? 0);
     // The run this wake starts is the first one after the baseline.
-    const baseline =
-      failover && !useFallbackModel
-        ? yield* spaceAgent.turnOutcome(spaceId).pipe(
-            Effect.map((outcome) => outcome.latestRunId),
-            Effect.option,
-          )
-        : Option.none();
+    const baseline = failover
+      ? yield* spaceAgent.turnOutcome(spaceId).pipe(
+          Effect.map((outcome) => outcome.latestRunId),
+          Effect.option,
+        )
+      : Option.none();
     const turn = yield* spaceAgent
       .sendTurn(spaceId, { text, reason, ...(failover ? { useFallbackModel } : {}) })
       .pipe(
@@ -577,9 +578,9 @@ export const make = Effect.gen(function* () {
         reason,
         baselineRunId: baseline.value,
         dispatchedAtMs: nowMs,
+        onFallback: useFallbackModel,
       });
     } else {
-      // A fallback run that fails is never retried.
       awaitingOutcome.delete(spaceId);
     }
     return {
@@ -596,11 +597,12 @@ export const make = Effect.gen(function* () {
     );
 
   /**
-   * When the last primary wake's run failed for a provider reason, hold the
-   * primary and re-send that wake once on the fallback, without touching the
-   * ledger (the wake was already counted). Returns whether it re-sent.
+   * Settles the last dispatched wake's run. A failed primary run holds the
+   * primary and re-sends that wake once on the fallback, without touching the
+   * ledger (the wake was already counted). A failed fallback run only releases
+   * the hold, so a wake costs at most one extra dispatch. Returns whether it re-sent.
    */
-  const failOverIfPrimaryFailed = Effect.fn("SpaceAgentWaker.failOverIfPrimaryFailed")(function* (
+  const settleAwaitedOutcome = Effect.fn("SpaceAgentWaker.settleAwaitedOutcome")(function* (
     spaceId: string,
     nowMs: number,
   ) {
@@ -619,6 +621,15 @@ export const make = Effect.gen(function* () {
     awaitingOutcome.delete(spaceId);
     if (outcome.state !== "failed") return false;
     if (outcome.class === "permission_error" || outcome.class === "validation_error") return false;
+    if (awaiting.onFallback) {
+      primaryHeldUntil.delete(spaceId);
+      yield* Effect.logInfo("space agent fallback model failed; released the primary hold", {
+        spaceId,
+        failureClass: outcome.class,
+        failureCode: outcome.code,
+      });
+      return false;
+    }
     const resetMs =
       outcome.usageLimitResetAt === null ? undefined : epochOf(outcome.usageLimitResetAt);
     const heldUntilMs =
@@ -635,6 +646,16 @@ export const make = Effect.gen(function* () {
     return yield* spaceAgent
       .sendTurn(spaceId, { text: awaiting.text, reason: awaiting.reason, useFallbackModel: true })
       .pipe(
+        Effect.tap(() =>
+          Effect.sync(() =>
+            awaitingOutcome.set(spaceId, {
+              ...awaiting,
+              baselineRunId: outcome.latestRunId,
+              dispatchedAtMs: nowMs,
+              onFallback: true,
+            }),
+          ),
+        ),
         Effect.as(true),
         Effect.catch((error) =>
           Effect.logWarning("space agent fallback wake was rejected", {
@@ -657,7 +678,7 @@ export const make = Effect.gen(function* () {
     if (state.paused) return "paused" as const;
     if (agent.fallbackModel === undefined) {
       awaitingOutcome.delete(spaceId);
-    } else if (yield* failOverIfPrimaryFailed(spaceId, nowMs)) {
+    } else if (yield* settleAwaitedOutcome(spaceId, nowMs)) {
       return "failed-over" as const;
     }
     const hold = backoff.get(spaceId);
