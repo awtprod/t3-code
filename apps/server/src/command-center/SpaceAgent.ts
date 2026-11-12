@@ -12,6 +12,8 @@ import {
   CommandId,
   MessageId,
   type OrchestrationProjectShell,
+  type OrchestrationV2ProviderFailureClass,
+  type OrchestrationV2ShellThreadStatus,
   type OrchestrationV2ThreadShell,
   ThreadId,
 } from "@t3tools/contracts";
@@ -76,6 +78,17 @@ export interface SpaceAgentTurnResult {
   readonly sequence: number;
 }
 
+/** How the latest run on the agent's thread ended, read from its shell. */
+export type SpaceAgentTurnOutcome =
+  | { readonly state: "idle" | "running" | "completed"; readonly latestRunId: string | null }
+  | {
+      readonly state: "failed";
+      readonly latestRunId: string | null;
+      readonly class: OrchestrationV2ProviderFailureClass | null;
+      readonly code: string | null;
+      readonly usageLimitResetAt: string | null;
+    };
+
 export interface SpaceAgentShape {
   /** Every configured Space with its agent state (enabled, thread, model). */
   readonly list: Effect.Effect<ReadonlyArray<CommandCenterSpaceAgentSummary>, CommandCenterError>;
@@ -92,8 +105,17 @@ export interface SpaceAgentShape {
   /** Send a server-authored turn (role, brief, text) to the Space's agent thread. */
   readonly sendTurn: (
     spaceId: string,
-    input: { readonly text: string; readonly reason: SpaceAgentTurnReason },
+    input: {
+      readonly text: string;
+      readonly reason: SpaceAgentTurnReason;
+      /** Run on `agent.fallbackModel` when one is configured. */
+      readonly useFallbackModel?: boolean;
+    },
   ) => Effect.Effect<SpaceAgentTurnResult, CommandCenterError>;
+  /** How the latest run on the Space's agent thread stands or ended. */
+  readonly turnOutcome: (
+    spaceId: string,
+  ) => Effect.Effect<SpaceAgentTurnOutcome, CommandCenterError>;
   /** Durable MCP scope for a Space agent thread; `undefined` when not enabled. */
   readonly resolveScope: McpSessionRegistry.McpThreadScopeResolver;
 }
@@ -113,6 +135,43 @@ const agentError = (
 const resolveSpaceAgentModel = (
   space: Pick<SpaceType, "agent" | "modelDefaults">,
 ): SpaceModelSelection => space.agent?.model ?? space.modelDefaults ?? SPACE_AGENT_DEFAULT_MODEL;
+
+const SHELL_STATUS_STATES: Record<
+  OrchestrationV2ShellThreadStatus,
+  "idle" | "running" | "completed" | "failed"
+> = {
+  idle: "idle",
+  preparing: "running",
+  queued: "running",
+  starting: "running",
+  running: "running",
+  waiting: "running",
+  completed: "completed",
+  failed: "failed",
+  // A stopped or rolled-back run is the user's doing, not a provider outage.
+  interrupted: "idle",
+  cancelled: "idle",
+  rolled_back: "idle",
+};
+
+const spaceAgentTurnOutcome = (
+  shell: OrchestrationV2ThreadShell | undefined,
+): SpaceAgentTurnOutcome => {
+  if (shell === undefined || shell.latestRunId === null) {
+    return { state: "idle", latestRunId: null };
+  }
+  const latestRunId = shell.latestRunId;
+  const state =
+    shell.activeRunId !== null ? "running" : (SHELL_STATUS_STATES[shell.status] ?? "idle");
+  if (state !== "failed") return { state, latestRunId };
+  return {
+    state,
+    latestRunId,
+    class: shell.lastErrorClass ?? null,
+    code: shell.lastErrorCode ?? null,
+    usageLimitResetAt: shell.usageLimitResetAt ?? null,
+  };
+};
 
 /** MCP scope of an enabled Space agent thread. Memory writes are approved. */
 const spaceAgentScope = (
@@ -255,6 +314,7 @@ const make = Effect.gen(function* () {
     input: {
       readonly text: string;
       readonly reason: SpaceAgentTurnReason | "bootstrap";
+      readonly useFallbackModel?: boolean;
       readonly mailCalendar: SpaceBriefMailCalendar | undefined;
       readonly contextFeeds: SpaceBriefContextFeeds | undefined;
     },
@@ -286,7 +346,10 @@ const make = Effect.gen(function* () {
     // Every turn carries the Space's configured model, so a change to
     // `agent.model` applies on the next wake, not only when the thread is
     // created. The orchestrator runs the turn on it and saves it on the thread.
-    const modelSelection = commandCenterModelSelection(resolveSpaceAgentModel(space));
+    // The fallback may name another provider; the orchestrator switches the
+    // thread to it and back on the next primary turn.
+    const fallback = input.useFallbackModel === true ? space.agent?.fallbackModel : undefined;
+    const modelSelection = commandCenterModelSelection(fallback ?? resolveSpaceAgentModel(space));
     // A follow-up turn on the agent's thread, or its first turn creating it.
     if (existing !== undefined) {
       const dispatched = yield* projection
@@ -367,6 +430,11 @@ const make = Effect.gen(function* () {
       );
     });
 
+  const turnOutcome: SpaceAgentShape["turnOutcome"] = (spaceId) =>
+    findThread(ThreadId.make(spaceAgentThreadId(spaceId))).pipe(
+      Effect.map((shell) => spaceAgentTurnOutcome(Option.getOrUndefined(shell))),
+    );
+
   const ensureThread: SpaceAgentShape["ensureThread"] = (spaceId) =>
     Effect.gen(function* () {
       const space = yield* loadEnabledSpace(spaceId);
@@ -418,7 +486,7 @@ const make = Effect.gen(function* () {
     );
   };
 
-  return SpaceAgent.of({ list, ensureThread, sendTurn, resolveScope });
+  return SpaceAgent.of({ list, ensureThread, sendTurn, turnOutcome, resolveScope });
 });
 
 /**

@@ -440,6 +440,30 @@ it.effect("applies Space agent defaults and maps the agent model at the boundary
       dailyWakeLimit: 12,
       debounceMinutes: 10,
     });
+
+    const withFallback = yield* writeAgentSpaceConfig({
+      enabled: true,
+      model: { provider: "claudeAgent", model: "claude-opus-5-5" },
+      fallbackModel: { provider: "codex", model: "gpt-6.1-sol" },
+    });
+    expect(withFallback.spaces[0]?.agent).toEqual({
+      enabled: true,
+      model: { providerId: "claudeAgent", modelId: "claude-opus-5-5" },
+      fallbackModel: { providerId: "codex", modelId: "gpt-6.1-sol" },
+      dailyWakeLimit: 12,
+      debounceMinutes: 10,
+    });
+
+    const sameAsPrimary = yield* writeAgentSpaceConfig({
+      enabled: true,
+      model: { provider: "codex", model: "gpt-6.1-sol" },
+      fallbackModel: { provider: "codex", model: "gpt-6.1-sol" },
+    });
+    expect(sameAsPrimary.health.status).toBe("invalid");
+    expect(sameAsPrimary.health.message).toContain(
+      "agent.fallbackModel must differ from agent.model",
+    );
+    expect(sameAsPrimary.spaces).toEqual([]);
   }).pipe(Effect.provide(configTestLayer)),
 );
 

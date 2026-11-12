@@ -36,6 +36,7 @@ const makeSpace = (
   agent?: {
     readonly enabled: boolean;
     readonly model?: { readonly providerId: string; readonly modelId: string };
+    readonly fallbackModel?: { readonly providerId: string; readonly modelId: string };
   },
 ) =>
   decodeSpace({
@@ -422,6 +423,92 @@ describe("Space agent", () => {
       const turn = asTurnStart(harness.dispatched.at(-1));
       expect(turn.bootstrap).toBeUndefined();
       expect(turn.modelSelection).toEqual({ instanceId: "claudeAgent", model: "claude-haiku-5-5" });
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("runs a turn on the fallback model only when one is configured", () => {
+    const primary = { providerId: "claudeAgent", modelId: "claude-opus-5-5" };
+    const fallback = { providerId: "codex", modelId: "gpt-6.1-sol" };
+    const harness = makeHarness(
+      configWith([
+        makeSpace("agent-space", { enabled: true, model: primary, fallbackModel: fallback }),
+      ]),
+    );
+    return Effect.gen(function* () {
+      const spaceAgent = yield* SpaceAgent.SpaceAgent;
+      harness.seedThread();
+      yield* spaceAgent.sendTurn("agent-space", {
+        text: "Wake.",
+        reason: "wake",
+        useFallbackModel: true,
+      });
+      expect(asTurnStart(harness.dispatched.at(-1)).modelSelection).toEqual({
+        instanceId: "codex",
+        model: "gpt-6.1-sol",
+      });
+      yield* spaceAgent.sendTurn("agent-space", {
+        text: "Wake.",
+        reason: "wake",
+        useFallbackModel: false,
+      });
+      expect(asTurnStart(harness.dispatched.at(-1)).modelSelection).toEqual({
+        instanceId: "claudeAgent",
+        model: "claude-opus-5-5",
+      });
+
+      harness.setConfig(configWith([makeSpace("agent-space", { enabled: true, model: primary })]));
+      yield* (yield* CommandCenterService.CommandCenterService).syncConfiguration({ force: true });
+      yield* spaceAgent.sendTurn("agent-space", {
+        text: "Wake.",
+        reason: "wake",
+        useFallbackModel: true,
+      });
+      expect(asTurnStart(harness.dispatched.at(-1)).modelSelection).toEqual({
+        instanceId: "claudeAgent",
+        model: "claude-opus-5-5",
+      });
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("reports how the latest run on the agent thread stands", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const spaceAgent = yield* SpaceAgent.SpaceAgent;
+      expect(yield* spaceAgent.turnOutcome("agent-space")).toEqual({
+        state: "idle",
+        latestRunId: null,
+      });
+
+      const run = OrchestrationRunId.make("run-7");
+      harness.seedThread({ latestRunId: run, activeRunId: run, status: "running" });
+      expect(yield* spaceAgent.turnOutcome("agent-space")).toEqual({
+        state: "running",
+        latestRunId: "run-7",
+      });
+
+      harness.seedThread({
+        latestRunId: run,
+        status: "failed",
+        lastErrorClass: "usage_limit",
+        lastErrorCode: "api_error_429",
+        usageLimitResetAt: "2026-10-11T14:00:00.000Z",
+      });
+      expect(yield* spaceAgent.turnOutcome("agent-space")).toEqual({
+        state: "failed",
+        latestRunId: "run-7",
+        class: "usage_limit",
+        code: "api_error_429",
+        usageLimitResetAt: "2026-10-11T14:00:00.000Z",
+      });
+
+      harness.seedThread({ latestRunId: run, status: "completed" });
+      expect(yield* spaceAgent.turnOutcome("agent-space")).toEqual({
+        state: "completed",
+        latestRunId: "run-7",
+      });
+
+      harness.seedThread({ latestRunId: run, status: "interrupted" });
+      expect((yield* spaceAgent.turnOutcome("agent-space")).state).toBe("idle");
     }).pipe(Effect.provide(harness.layer));
   });
 
