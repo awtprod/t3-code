@@ -206,6 +206,8 @@ const SpaceAgentTimezone = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
 export const SpaceAgentConfig = Schema.Struct({
   enabled: Schema.Boolean,
   model: Schema.optional(ModelSelection),
+  /** Used while the primary model's provider is failing; see docs/internals/space-agent.md. */
+  fallbackModel: Schema.optional(ModelSelection),
   checkIns: Schema.optional(
     Schema.Struct({
       cron: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(64))).check(

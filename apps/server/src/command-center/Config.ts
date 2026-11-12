@@ -70,6 +70,7 @@ const RootConfigFile = Schema.Struct({
 const SpaceAgentConfigFile = Schema.Struct({
   enabled: Schema.Boolean,
   model: Schema.optional(Schema.Struct({ provider: NonEmpty, model: NonEmpty })),
+  fallbackModel: Schema.optional(Schema.Struct({ provider: NonEmpty, model: NonEmpty })),
   checkIns: Schema.optional(
     Schema.Struct({
       cron: Schema.Array(NonEmpty).check(Schema.isMaxLength(SPACE_AGENT_MAX_CHECK_INS)),
@@ -121,6 +122,14 @@ const normalizeSpaceAgentConfig = (
   if (raw.quietHours !== undefined && raw.quietHours.start === raw.quietHours.end) {
     return { ok: false, message: "agent.quietHours start and end must differ." };
   }
+  if (
+    raw.model !== undefined &&
+    raw.fallbackModel !== undefined &&
+    raw.model.provider === raw.fallbackModel.provider &&
+    raw.model.model === raw.fallbackModel.model
+  ) {
+    return { ok: false, message: "agent.fallbackModel must differ from agent.model." };
+  }
   return {
     ok: true,
     agent: {
@@ -128,6 +137,14 @@ const normalizeSpaceAgentConfig = (
       ...(raw.model === undefined
         ? {}
         : { model: { providerId: raw.model.provider, modelId: raw.model.model } }),
+      ...(raw.fallbackModel === undefined
+        ? {}
+        : {
+            fallbackModel: {
+              providerId: raw.fallbackModel.provider,
+              modelId: raw.fallbackModel.model,
+            },
+          }),
       ...(raw.checkIns === undefined ? {} : { checkIns: raw.checkIns }),
       ...(raw.quietHours === undefined ? {} : { quietHours: raw.quietHours }),
       dailyWakeLimit: raw.dailyWakeLimit ?? SPACE_AGENT_DEFAULT_DAILY_WAKE_LIMIT,

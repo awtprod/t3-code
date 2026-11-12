@@ -25,6 +25,47 @@ whole config invalid, like any other malformed Space file.
 canonical block is `Space.agent` and is projected to `command_center_spaces.agent_json`.
 Model resolution is `agent.model`, then the Space's `routing` default, then Opus 5.5.
 
+### Fallback model
+
+`agent.fallbackModel` (same shape as `model`; when `model` is set explicitly
+it must differ from it) is optional. Without it the waker never looks at how a
+wake's run ended: an accepted wake is counted, and a run that then fails inside
+the provider is lost.
+
+```json
+"fallbackModel": { "provider": "codex", "model": "<model id>" }
+```
+
+With it, the waker remembers the last wake it dispatched and reads the agent
+thread's latest run on the following ticks (`SpaceAgent.turnOutcome`), before
+quiet hours and backoff are evaluated. A run is a failure when it failed with
+any class except `permission_error` or `validation_error`, including a failure
+with no class.
+
+- A failed primary run: the waker re-sends the same wake text once on the
+  fallback, without touching the wake ledger (the wake was already counted),
+  and holds the primary until the provider's `usageLimitResetAt` (capped at 7
+  days), or for 30 minutes when there is none. While held, every wake, manual
+  ones included, goes straight to the fallback. Because the check runs first, a
+  wake that failed just before quiet hours may be re-sent during them. A
+  re-send that is rejected (for example, the thread is busy) is dropped, not
+  retried.
+- A failed fallback run (a re-send or a held wake) is never re-sent, but it
+  ends the hold, so the next wake tries the primary again. A wake therefore
+  costs at most one extra dispatch, even while both models are down.
+
+A manual wake settles the previous wake first, so a failed wake is re-sent
+before the manual one runs, and the manual wake may then be answered "busy".
+Changing `agent.model` or `agent.fallbackModel` drops the hold and the pending
+wake. When `agent.model` is unset the primary comes from the Space's routing
+defaults, which the waker does not see, so changing only those keeps the hold
+until it expires or the server restarts.
+
+A run still unresolved after 15 minutes is no longer watched. The switch is an
+ordinary provider switch on the same thread, so the agent keeps its history and
+tools; the next primary turn switches back. The pending wake and the hold live
+in memory only, so a restart forgets them and wakes go back to the primary.
+
 ## Thread and scope
 
 - The thread id is `cc-space-agent-<spaceId>` (`SpaceAgentIds.ts`). It is not a
