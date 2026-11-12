@@ -59,7 +59,8 @@ const epoch = (iso: string) => DateTime.toEpochMillis(DateTime.makeUnsafe(iso));
 /**
  * A fake agent: records each wake turn, and fails while `failWith` is set.
  * Each accepted turn starts a visible running run (`run-<n>`) unless
- * `hideNewRuns` is set; `outcome` is what `turnOutcome` reports.
+ * `hideNewRuns` is set; `outcome` is what `turnOutcome` reports. With
+ * `busyWhileRunning`, a turn sent while that run is running is a conflict.
  */
 const makeAgentDouble = () => {
   const turns: Array<{
@@ -73,12 +74,14 @@ const makeAgentDouble = () => {
     outcome: SpaceAgent.SpaceAgentTurnOutcome;
     outcomeFails: boolean;
     hideNewRuns: boolean;
+    busyWhileRunning: boolean;
     turnOutcomeCalls: number;
   } = {
     failWith: undefined,
     outcome: { state: "idle", latestRunId: null },
     outcomeFails: false,
     hideNewRuns: false,
+    busyWhileRunning: false,
     turnOutcomeCalls: 0,
   };
   const service = SpaceAgent.SpaceAgent.of({
@@ -94,9 +97,14 @@ const makeAgentDouble = () => {
       }),
     sendTurn: (spaceId, input) =>
       Effect.suspend(() => {
-        if (control.failWith !== undefined) {
+        const failWith =
+          control.failWith ??
+          (control.busyWhileRunning && control.outcome.state === "running"
+            ? "conflict"
+            : undefined);
+        if (failWith !== undefined) {
           return Effect.fail(
-            new CommandCenterError({ reason: control.failWith, message: "agent unavailable" }),
+            new CommandCenterError({ reason: failWith, message: "agent unavailable" }),
           );
         }
         turns.push({
@@ -164,6 +172,12 @@ const insertSpace = (id: string, agent: string, lifecycle = "active") =>
         '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
       )
     `;
+  });
+
+const updateAgent = (agent: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`UPDATE command_center_spaces SET agent_json = ${agent} WHERE id = ${SPACE}`;
   });
 
 let activitySequence = 0;
@@ -1006,6 +1020,124 @@ describe("SpaceAgentWaker", () => {
         yield* recordActivity({ occurredAt: "2026-10-09T14:08:00.000Z", title: "Third" });
         expect(yield* tickAt("2026-10-09T14:09:00.000Z")).toBe("event");
         expect(fallbackFlags(harness)).toEqual([false, true, true, false]);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("re-sends a failed wake before a manual one, which then finds the agent busy", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        harness.control.busyWhileRunning = true;
+        yield* insertSpace(SPACE, agentJson({ debounceMinutes: 1, fallbackModel: true }));
+        yield* tickAt("2026-10-09T13:59:00.000Z");
+        yield* recordActivity({ occurredAt: "2026-10-09T14:00:00.000Z", title: "Lost?" });
+        expect(yield* tickAt("2026-10-09T14:01:00.000Z")).toBe("event");
+        const before = yield* readState;
+        harness.endLatestRun(usageLimit("2026-10-10T14:00:00.000Z"));
+
+        // Before the next tick.
+        yield* TestClock.setTime(epoch("2026-10-09T14:01:10.000Z"));
+        const waker = yield* SpaceAgentWaker;
+        const error = yield* Effect.flip(waker.deliverWake(SPACE, { kind: "manual" }));
+        expect(error).toMatchObject({ reason: "conflict" });
+        expect(harness.turns).toEqual([
+          expect.objectContaining({ useFallbackModel: false }),
+          {
+            spaceId: SPACE,
+            text: harness.turns[0]?.text,
+            reason: "wake",
+            useFallbackModel: true,
+          },
+        ]);
+        expect(yield* readState).toEqual(before);
+        expect(yield* tickAt("2026-10-09T14:01:30.000Z")).toBe("idle");
+        expect(harness.turns).toHaveLength(2);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("delivers a manual wake on the primary when no failed wake is pending", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        harness.control.busyWhileRunning = true;
+        yield* insertSpace(SPACE, agentJson({ debounceMinutes: 1, fallbackModel: true }));
+        const waker = yield* SpaceAgentWaker;
+        yield* TestClock.setTime(epoch("2026-10-09T14:00:00.000Z"));
+        yield* waker.deliverWake(SPACE, { kind: "manual" });
+        expect((yield* readState)?.wakesToday).toBe(1);
+
+        harness.endLatestRun({ state: "completed" });
+        yield* TestClock.setTime(epoch("2026-10-09T14:00:10.000Z"));
+        yield* waker.deliverWake(SPACE, { kind: "manual" });
+        expect(fallbackFlags(harness)).toEqual([false, false]);
+        expect(harness.turns.map((turn) => turn.reason)).toEqual(["manual", "manual"]);
+        expect((yield* readState)?.wakesToday).toBe(2);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    const heldAgent = JSON.parse(agentJson({ debounceMinutes: 1, fallbackModel: true }));
+    it.effect.each([
+      {
+        changed: "model",
+        agent: { ...heldAgent, model: { providerId: "claudeAgent", modelId: "claude-sonnet-5-5" } },
+      },
+      {
+        changed: "fallbackModel",
+        agent: { ...heldAgent, fallbackModel: { providerId: "codex", modelId: "gpt-6.1-terra" } },
+      },
+    ])("drops a long hold when the agent's $changed changes", ({ agent }) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* insertSpace(SPACE, JSON.stringify(heldAgent));
+        yield* tickAt("2026-10-09T13:59:00.000Z");
+        yield* recordActivity({ occurredAt: "2026-10-09T14:00:00.000Z", title: "First" });
+        expect(yield* tickAt("2026-10-09T14:01:00.000Z")).toBe("event");
+        harness.endLatestRun(usageLimit("2026-10-12T14:00:00.000Z"));
+        expect(yield* tickAt("2026-10-09T14:01:30.000Z")).toBe("failed-over");
+        harness.endLatestRun({ state: "completed" });
+
+        yield* updateAgent(JSON.stringify(agent));
+        yield* recordActivity({ occurredAt: "2026-10-09T15:00:00.000Z", title: "Second" });
+        expect(yield* tickAt("2026-10-09T15:01:00.000Z")).toBe("event");
+        expect(fallbackFlags(harness)).toEqual([false, true, false]);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("drops the hold when the fallback model is removed", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* failOverFirstWake(harness);
+        harness.endLatestRun({ state: "completed" });
+
+        yield* updateAgent(agentJson({ debounceMinutes: 1 }));
+        yield* recordActivity({ occurredAt: "2026-10-09T14:05:00.000Z", title: "Second" });
+        const calls = harness.control.turnOutcomeCalls;
+        expect(yield* tickAt("2026-10-09T14:06:00.000Z")).toBe("event");
+        expect(harness.turns[2]).not.toHaveProperty("useFallbackModel");
+        expect(harness.control.turnOutcomeCalls).toBe(calls);
+
+        // Restoring the same fallback does not bring the old hold back.
+        yield* updateAgent(agentJson({ debounceMinutes: 1, fallbackModel: true }));
+        yield* recordActivity({ occurredAt: "2026-10-09T14:08:00.000Z", title: "Third" });
+        expect(yield* tickAt("2026-10-09T14:09:00.000Z")).toBe("event");
+        expect(fallbackFlags(harness)).toEqual([false, true, undefined, false]);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("keeps the hold through an unrelated agent config change", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* failOverFirstWake(harness);
+        harness.endLatestRun({ state: "completed" });
+        yield* updateAgent(
+          agentJson({
+            debounceMinutes: 1,
+            fallbackModel: true,
+            dailyWakeLimit: 3,
+            quietHours: { start: "23:00", end: "06:00" },
+          }),
+        );
+        yield* recordActivity({ occurredAt: "2026-10-09T14:05:00.000Z", title: "Second" });
+        expect(yield* tickAt("2026-10-09T14:06:00.000Z")).toBe("event");
+        expect(fallbackFlags(harness)).toEqual([false, true, true]);
       }).pipe(Effect.provide(harness.layer));
     });
   });

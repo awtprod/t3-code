@@ -54,6 +54,13 @@ with no class.
   ends the hold, so the next wake tries the primary again. A wake therefore
   costs at most one extra dispatch, even while both models are down.
 
+A manual wake settles the previous wake first, so a failed wake is re-sent
+before the manual one runs, and the manual wake may then be answered "busy".
+Changing `agent.model` or `agent.fallbackModel` drops the hold and the pending
+wake. When `agent.model` is unset the primary comes from the Space's routing
+defaults, which the waker does not see, so changing only those keeps the hold
+until it expires or the server restarts.
+
 A run still unresolved after 15 minutes is no longer watched. The switch is an
 ordinary provider switch on the same thread, so the agent keeps its history and
 tools; the next primary turn switches back. The pending wake and the hold live
