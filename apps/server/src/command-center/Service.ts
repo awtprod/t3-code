@@ -544,6 +544,10 @@ export interface CommandCenterSubmitOptions {
   readonly automationId?: string;
 }
 
+/** Space agent Memory may name the approved Memory it corrects. */
+export type SpaceAgentMemoryInput = CommandCenterMemoryRememberInput &
+  Pick<CommandCenterMemoryProposeInput, "contradictionOf">;
+
 export interface CommandCenterServiceShape {
   readonly bootstrap: Effect.Effect<CommandCenterBootstrap, CommandCenterError>;
   readonly syncConfiguration: (input?: {
@@ -678,7 +682,7 @@ export interface CommandCenterServiceShape {
   ) => Effect.Effect<MemoryType, CommandCenterError>;
   /** Approved Memory written by a Space agent, attributed to its thread. */
   readonly rememberFromSpaceAgent: (
-    input: CommandCenterMemoryRememberInput,
+    input: SpaceAgentMemoryInput,
     source: { readonly threadId: string },
   ) => Effect.Effect<MemoryType, CommandCenterError>;
   readonly proposeMemory: (
@@ -3637,14 +3641,119 @@ export const layer = Layer.effect(
       },
     );
 
+    const memoryDecisionStatus = (decision: CommandCenterMemoryReviewInput["decision"]) =>
+      decision === "approve" ? "approved" : decision === "expire" ? "expired" : "rejected";
+
+    /** Decides one Memory inside the caller's transaction; false when its status moved first. */
+    const applyMemoryDecision = Effect.fn("CommandCenter.applyMemoryDecision")(function* (
+      row: Pick<MemoryRow, "id" | "spaceId" | "repositoryRef" | "kind" | "status">,
+      decision: CommandCenterMemoryReviewInput["decision"],
+      now: string,
+      actorKind: "user" | "agent",
+    ) {
+      const nextStatus = memoryDecisionStatus(decision);
+      const decided = yield* sql<{ readonly id: string }>`
+        UPDATE command_center_memories
+        SET status = ${nextStatus}, updated_at = ${now}
+        WHERE id = ${row.id} AND status = ${row.status}
+        RETURNING id
+      `;
+      if (decided.length === 0) return false;
+      yield* sql`
+        UPDATE command_center_memory_candidates
+        SET status = ${decision === "approve" ? "promoted" : "rejected"},
+          resolved_at = ${now}
+        WHERE id = ${row.id} AND status = 'pending'
+      `;
+      const closedItem = yield* sql<{ readonly id: string }>`
+        UPDATE command_center_items
+        SET status = 'done', updated_at = ${now},
+          metadata_json = ${stringify({
+            type: "memory-candidate",
+            memoryId: row.id,
+            decision,
+            ...(row.repositoryRef === null ? {} : { repositoryId: row.repositoryRef }),
+          })}
+        WHERE id = ${`memory-review:${row.id}`} AND status = 'review'
+        RETURNING id
+      `;
+      yield* appendAudit({
+        eventId: `memory-review:${row.id}:${nextStatus}`,
+        actorKind,
+        action: "cc.memory.changed",
+        spaceId: row.spaceId,
+        payload: {
+          memoryId: row.id,
+          change: "updated",
+          kind: row.kind,
+          status: nextStatus,
+        },
+        occurredAt: now,
+      });
+      if (closedItem.length > 0) {
+        yield* appendAudit({
+          eventId: `memory-review:${row.id}:item-done`,
+          actorKind,
+          action: "cc.items.changed",
+          spaceId: row.spaceId,
+          payload: {
+            itemId: `memory-review:${row.id}`,
+            change: "updated",
+            kind: "decision",
+            status: "done",
+          },
+          occurredAt: now,
+        });
+      }
+      return true;
+    });
+
+    const requireRetirableMemory = Effect.fn("CommandCenter.requireRetirableMemory")(function* (
+      targetId: string,
+      input: {
+        readonly requestId: string;
+        readonly spaceId: string;
+        readonly repositoryId?: string | undefined;
+      },
+    ) {
+      const invalid = (message: string) =>
+        new CommandCenterError({ reason: "validation", message });
+      if (targetId === input.requestId) {
+        return yield* invalid("A Memory cannot contradict itself.");
+      }
+      const target = (yield* sql<
+        Pick<MemoryRow, "id" | "spaceId" | "repositoryRef" | "kind" | "status">
+      >`
+        SELECT id, space_id AS "spaceId", repository_ref AS "repositoryRef", kind, status
+        FROM command_center_memories
+        WHERE id = ${targetId}
+        LIMIT 1
+      `)[0];
+      if (target === undefined || target.spaceId !== input.spaceId) {
+        return yield* invalid(`The contradicted Memory '${targetId}' was not found in this Space.`);
+      }
+      if ((target.repositoryRef ?? undefined) !== input.repositoryId) {
+        return yield* invalid(
+          `The contradicted Memory '${targetId}' is in a different repository scope.`,
+        );
+      }
+      if (target.status !== "approved") {
+        return yield* invalid(
+          `The contradicted Memory '${targetId}' is ${target.status}, not approved.`,
+        );
+      }
+      return target;
+    });
+
     const storeMemory = Effect.fn("CommandCenter.storeMemory")(
       function* (
-        input: CommandCenterMemoryRememberInput | CommandCenterMemoryProposeInput,
+        input: SpaceAgentMemoryInput | CommandCenterMemoryProposeInput,
         status: "approved" | "candidate",
         confidence: number,
         approvedBy: "user" | "agent" = "user",
       ) {
         const actorKind = status === "approved" ? approvedBy : "agent";
+        const contradictionOf = "contradictionOf" in input ? input.contradictionOf : undefined;
         const configuredSpace = yield* requireConfiguredSpace(input.spaceId);
         if (
           input.repositoryId !== undefined &&
@@ -3670,11 +3779,10 @@ export const layer = Layer.effect(
             stored.content !== input.content ||
             stored.kind !== input.kind ||
             stored.provenance.sourceRef !== input.sourceRef ||
+            stored.contradictionOf !== contradictionOf ||
             (status === "candidate" &&
               (stored.confidence !== confidence ||
-                stored.expiresAt !== ("expiresAt" in input ? input.expiresAt : undefined) ||
-                stored.contradictionOf !==
-                  ("contradictionOf" in input ? input.contradictionOf : undefined)))
+                stored.expiresAt !== ("expiresAt" in input ? input.expiresAt : undefined)))
           ) {
             return yield* new CommandCenterError({
               reason: "conflict",
@@ -3687,6 +3795,11 @@ export const layer = Layer.effect(
           }
           return stored;
         }
+        // An approved write that names the Memory it corrects retires that Memory with it.
+        const retired =
+          status === "approved" && contradictionOf !== undefined
+            ? yield* requireRetirableMemory(contradictionOf, input)
+            : undefined;
         const now = DateTime.formatIso(yield* DateTime.now);
         const memory = yield* decodeMemory({
           id: input.requestId,
@@ -3704,11 +3817,7 @@ export const layer = Layer.effect(
           ...(status === "candidate" && "expiresAt" in input && input.expiresAt !== undefined
             ? { expiresAt: input.expiresAt }
             : {}),
-          ...(status === "candidate" &&
-          "contradictionOf" in input &&
-          input.contradictionOf !== undefined
-            ? { contradictionOf: input.contradictionOf }
-            : {}),
+          ...(contradictionOf === undefined ? {} : { contradictionOf }),
           createdAt: now,
           updatedAt: now,
         }).pipe(Effect.mapError((cause) => persistenceError("Could not store Memory.", cause)));
@@ -3736,6 +3845,15 @@ export const layer = Layer.effect(
               payload: { memoryId: memory.id, kind: memory.kind, status },
               occurredAt: now,
             });
+            if (
+              retired !== undefined &&
+              !(yield* applyMemoryDecision(retired, "expire", now, actorKind))
+            ) {
+              return yield* new CommandCenterError({
+                reason: "conflict",
+                message: "The contradicted Memory changed while it was being retired; retry.",
+              });
+            }
           }),
         );
         return memory;
@@ -3848,12 +3966,7 @@ export const layer = Layer.effect(
             message: "The Memory candidate was not found in the requested scope.",
           });
         }
-        const nextStatus =
-          input.decision === "approve"
-            ? "approved"
-            : input.decision === "expire"
-              ? "expired"
-              : "rejected";
+        const nextStatus = memoryDecisionStatus(input.decision);
         if (row.status === nextStatus) return yield* decodeMemoryRow(row);
         if (
           (input.decision === "expire" &&
@@ -3896,57 +4009,7 @@ export const layer = Layer.effect(
                 });
               }
             }
-            const decided = yield* sql<{ readonly id: string }>`
-              UPDATE command_center_memories
-              SET status = ${nextStatus}, updated_at = ${now}
-              WHERE id = ${row.id} AND status = ${row.status}
-              RETURNING id
-            `;
-            if (decided.length === 0) return false;
-            yield* sql`
-              UPDATE command_center_memory_candidates
-              SET status = ${input.decision === "approve" ? "promoted" : "rejected"},
-                resolved_at = ${now}
-              WHERE id = ${row.id} AND status = 'pending'
-            `;
-            yield* sql`
-              UPDATE command_center_items
-              SET status = 'done', updated_at = ${now},
-                metadata_json = ${stringify({
-                  type: "memory-candidate",
-                  memoryId: row.id,
-                  decision: input.decision,
-                  ...(row.repositoryRef === null ? {} : { repositoryId: row.repositoryRef }),
-                })}
-              WHERE id = ${`memory-review:${row.id}`} AND status = 'review'
-            `;
-            yield* appendAudit({
-              eventId: `memory-review:${row.id}:${nextStatus}`,
-              actorKind: "user",
-              action: "cc.memory.changed",
-              spaceId: row.spaceId,
-              payload: {
-                memoryId: row.id,
-                change: "updated",
-                kind: row.kind,
-                status: nextStatus,
-              },
-              occurredAt: now,
-            });
-            yield* appendAudit({
-              eventId: `memory-review:${row.id}:item-done`,
-              actorKind: "user",
-              action: "cc.items.changed",
-              spaceId: row.spaceId,
-              payload: {
-                itemId: `memory-review:${row.id}`,
-                change: "updated",
-                kind: "decision",
-                status: "done",
-              },
-              occurredAt: now,
-            });
-            return true;
+            return yield* applyMemoryDecision(row, input.decision, now, "user");
           }),
         );
         if (!wonDecision) {
