@@ -7,6 +7,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
+import { GMAIL_DRAFT_SOURCE_PREFIX } from "./GmailDrafts.ts";
 import * as SpaceAgent from "./SpaceAgent.ts";
 import { recordSpaceAgentReply, type SpaceAgentReplyKind } from "./SpaceAgentReplies.ts";
 import {
@@ -189,6 +190,7 @@ const recordActivity = (input: {
   readonly summary?: string;
   /** Defaults to a run id; the Google poller's rows use `gmail:` / `calendar:` ids. */
   readonly sourceId?: string;
+  readonly sourceKind?: "thread" | "run";
   readonly status?: string;
   readonly url?: string;
 }) =>
@@ -200,7 +202,7 @@ const recordActivity = (input: {
         space_id, occurred_at, source_kind, source_id, project_id, title, status,
         summary, url, event_sequence
       ) VALUES (
-        ${input.spaceId ?? SPACE}, ${input.occurredAt}, 'run',
+        ${input.spaceId ?? SPACE}, ${input.occurredAt}, ${input.sourceKind ?? "run"},
         ${input.sourceId ?? `run-${activitySequence}`},
         NULL, ${input.title}, ${input.status ?? "completed"},
         ${input.summary ?? `${input.title} finished.`},
@@ -689,6 +691,127 @@ describe("SpaceAgentWaker", () => {
       expect(harness.turns[0]?.text).toContain("<replies>");
       expect(yield* pendingReplyCount).toBe(0);
     }).pipe(Effect.provide(harness.layer));
+  });
+
+  describe("routine rows", () => {
+    const recordRoutineRows = (occurredAt: string) =>
+      Effect.gen(function* () {
+        for (const status of ["completed", "interrupted", "settled"]) {
+          yield* recordActivity({
+            occurredAt,
+            sourceKind: "thread",
+            sourceId: `thread-${status}`,
+            title: `Thread ${status}`,
+            status,
+          });
+        }
+        yield* recordActivity({
+          occurredAt,
+          sourceId: `${GMAIL_DRAFT_SOURCE_PREFIX}draft-1`,
+          title: "Draft: Re: Quote",
+          status: "draft",
+        });
+      });
+
+    const maxActivityId = Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql<{ readonly maxId: number }>`
+        SELECT MAX(id) AS "maxId" FROM command_center_space_activity WHERE space_id = ${SPACE}
+      `;
+      return rows[0]?.maxId;
+    });
+
+    it.effect("never start an event wake, and ride along with the next one", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* insertSpace(SPACE, agentJson({ dailyWakeLimit: 1 }));
+        yield* tickAt("2026-10-09T13:59:00.000Z");
+        yield* recordRoutineRows("2026-10-09T14:00:00.000Z");
+        expect(yield* tickAt("2026-10-09T14:10:00.000Z")).toBe("idle");
+        expect(yield* tickAt("2026-10-09T20:00:00.000Z")).toBe("idle");
+        expect(harness.turns).toEqual([]);
+        expect((yield* readState)?.pendingSince).toBeNull();
+
+        // Debounced from the mail row, not from the older routine rows.
+        yield* recordActivity({
+          occurredAt: "2026-10-09T20:01:00.000Z",
+          sourceId: "gmail:thread-a:1",
+          title: "Mail: Quote",
+          status: "new",
+        });
+        expect(yield* tickAt("2026-10-09T20:10:30.000Z")).toBe("idle");
+        expect((yield* readState)?.pendingSince).toBe("2026-10-09T20:01:00.000Z");
+        expect(yield* tickAt("2026-10-09T20:11:00.000Z")).toBe("event");
+
+        const text = harness.turns[0]?.text ?? "";
+        expect(text).toContain("Why you woke: 5 new events since your last wake.");
+        for (const title of [
+          "Mail: Quote",
+          "Thread completed",
+          "Thread interrupted",
+          "Thread settled",
+          "Draft: Re: Quote",
+        ]) {
+          expect(text).toContain(title);
+        }
+        expect((yield* readState)?.activityCursor).toBe(yield* maxActivityId);
+
+        // The cap is spent; routine rows still never count as pending.
+        yield* recordRoutineRows("2026-10-09T20:30:00.000Z");
+        expect(yield* tickAt("2026-10-09T21:00:00.000Z")).toBe("idle");
+        expect((yield* readState)?.pendingSince).toBeNull();
+        expect(harness.turns).toHaveLength(1);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect.each([
+      { name: "a failed thread", sourceKind: "thread", sourceId: "thread-x", status: "failed" },
+      { name: "a completed Run", sourceKind: "run", sourceId: "run-x", status: "completed" },
+      {
+        name: "a calendar row",
+        sourceKind: "run",
+        sourceId: "calendar:event-a:2026-10-09T14:30:00.000Z",
+        status: "upcoming",
+      },
+      {
+        name: "a phone row",
+        sourceKind: "run",
+        sourceId: "phone-start:call-1",
+        status: "completed",
+      },
+    ] as const)("$name starts an event wake", ({ sourceKind, sourceId, status }) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* insertSpace(SPACE, agentJson());
+        yield* tickAt("2026-10-09T13:59:00.000Z");
+        yield* recordActivity({
+          occurredAt: "2026-10-09T14:00:00.000Z",
+          sourceKind,
+          sourceId,
+          title: "Needs a look",
+          status,
+        });
+        expect(yield* tickAt("2026-10-09T14:10:00.000Z")).toBe("event");
+        expect(harness.turns[0]?.text).toContain("Needs a look");
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("are delivered by the next check-in", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        // 08:30 New York (EDT) is 12:30Z.
+        yield* insertSpace(SPACE, agentJson({ checkIns: ["30 8 * * *"] }));
+        yield* tickAt("2026-10-09T05:59:00.000Z");
+        yield* recordRoutineRows("2026-10-09T06:00:00.000Z");
+        expect(yield* tickAt("2026-10-09T12:29:30.000Z")).toBe("idle");
+        expect(yield* tickAt("2026-10-09T12:30:00.000Z")).toBe("check-in");
+        expect(harness.turns[0]?.text).toContain(
+          "Morning check-in (08:30 America/New_York), with 4 new events",
+        );
+        expect(harness.turns[0]?.text).toContain("Thread settled");
+        expect((yield* readState)?.activityCursor).toBe(yield* maxActivityId);
+      }).pipe(Effect.provide(harness.layer));
+    });
   });
 
   describe("model failover", () => {

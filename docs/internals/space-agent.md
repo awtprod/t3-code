@@ -140,7 +140,13 @@ row per Space. A new row starts its activity cursor at the Space's newest
 activity row, so older history counts as brief context, not as a wake.
 
 - **Event wake.** New `command_center_space_activity` rows (id above the cursor)
-  set `pending_since` to the oldest one's time. The wake fires once
+  that need attention set `pending_since` to the oldest one's time. Routine rows
+  do not: thread rows with status `completed`, `interrupted` or `settled` (most
+  rows, from every thread in the Space's projects) and the agent's own
+  `gmail-draft:` rows. Waking the model for those spent the daily event budget
+  on "nothing needs doing". Failed threads, Runs, mail, calendar and phone rows
+  still trigger. Routine rows are not dropped: every wake, of any kind, delivers
+  all pending rows and moves the cursor past them. The wake fires once
   `pending_since + debounceMinutes` and `last_wake_at + debounceMinutes` have both
   passed, outside quiet hours, while the local day has fewer than `dailyWakeLimit`
   event wakes. Over the limit it waits for the next local day.
