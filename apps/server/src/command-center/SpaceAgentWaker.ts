@@ -9,9 +9,12 @@
  *   persisted before the turn is sent, so a restart never fires it twice.
  *   Check-ins do not use the event budget, and they deliver pending events.
  *   Their closing asks for the Space's check-in routine, not a quiet reply.
- * - event: new Space activity rows, debounced (`debounceMinutes` after the
- *   first undelivered row, and at least that long since the last wake),
- *   outside quiet hours, and under `dailyWakeLimit` event wakes per local day.
+ * - event: new Space activity rows that need attention, debounced
+ *   (`debounceMinutes` after the first such row, and at least that long since
+ *   the last wake), outside quiet hours, and under `dailyWakeLimit` event wakes
+ *   per local day. Routine rows (a thread turn that ended normally, a settle,
+ *   the agent's own Gmail draft) never start one; every wake still delivers
+ *   them and moves the cursor past them.
  *   When the delta lists new mail threads or soon-starting events (the
  *   poller's `gmail:` / `calendar:` rows), the closing also asks for the
  *   Space's mail or meeting routine. Every wake kind does this, because any
@@ -59,6 +62,7 @@ import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { isDigestQuietHour, localDateAt } from "./DigestPeriod.ts";
+import { GMAIL_DRAFT_SOURCE_PREFIX } from "./GmailDrafts.ts";
 import {
   GOOGLE_CALENDAR_SOURCE_PREFIX,
   GOOGLE_MAIL_SOURCE_PREFIX,
@@ -95,6 +99,11 @@ const FAILOVER_OUTCOME_WINDOW_MS = 15 * MINUTE_MS;
 const FAILOVER_DEFAULT_HOLD_MS = 30 * MINUTE_MS;
 /** Upper bound on a provider-reported reset time. */
 const FAILOVER_MAX_HOLD_MS = 7 * 24 * 60 * MINUTE_MS;
+/**
+ * Thread row statuses (`SpaceActivityReactor`) of a turn that ended normally
+ * or a settle. Such rows, like the agent's own drafts, never start an event wake.
+ */
+const ROUTINE_THREAD_STATUSES = ["completed", "interrupted", "settled"];
 
 export type SpaceAgentWakeKind = CommandCenterSpaceAgentWakeReason;
 
@@ -215,6 +224,8 @@ export interface SpaceAgentWakeDeltaRow {
   readonly status: string;
   readonly summary: string;
   readonly url: string | null;
+  /** 1 for a routine row (never starts an event wake); such rows yield space to the others. */
+  readonly routine?: number;
 }
 
 const oneLine = (text: string, max: number) => {
@@ -279,7 +290,8 @@ const fenceSafe = (text: string) => text.replace(/<\/?\s*replies\s*>/giu, "");
 
 /**
  * The wake message: why the agent woke, the activity delta (newest first,
- * bounded by row count and characters, marked as untrusted reference data),
+ * bounded by row count and characters with non-routine rows kept first, marked
+ * as untrusted reference data),
  * and what it may do about it. A scheduled check-in asks for its routine; the
  * other kinds get the allowed responses. Whichever applies, a wake whose shown
  * rows include mail or calendar rows then also asks for the mail or meeting
@@ -341,21 +353,31 @@ export const renderSpaceAgentWakeText = (input: {
               : []),
           ].join("\n"),
         ];
-  const lines: Array<string> = [];
-  let used = 0;
-  for (const row of input.rows.slice(0, SPACE_AGENT_WAKE_DELTA_MAX_ROWS)) {
-    const line = [
+  const candidates = input.rows.slice(0, SPACE_AGENT_WAKE_DELTA_MAX_ROWS).map((row) => ({
+    row,
+    line: [
       `- ${row.occurredAt.slice(0, 16).replace("T", " ")}Z`,
       oneLine(row.title, DELTA_TITLE_CHARS),
       row.status,
       ...(row.summary.trim().length === 0 ? [] : [oneLine(row.summary, DELTA_SNIPPET_CHARS)]),
       ...(row.url === null ? [] : [row.url]),
-    ].join(" | ");
-    if (used + line.length + 1 > SPACE_AGENT_WAKE_DELTA_MAX_CHARS) break;
-    lines.push(line);
-    used += line.length + 1;
+    ].join(" | "),
+  }));
+  // The character budget goes to rows that need attention first, so routine
+  // rows never push out the row that caused the wake; display order is kept.
+  const kept = new Set<(typeof candidates)[number]>();
+  let used = 0;
+  for (const candidate of [
+    ...candidates.filter((candidate) => !candidate.row.routine),
+    ...candidates.filter((candidate) => candidate.row.routine),
+  ]) {
+    if (used + candidate.line.length + 1 > SPACE_AGENT_WAKE_DELTA_MAX_CHARS) break;
+    kept.add(candidate);
+    used += candidate.line.length + 1;
   }
-  const shownRows = input.rows.slice(0, lines.length);
+  const shown = candidates.filter((candidate) => kept.has(candidate));
+  const lines = shown.map((candidate) => candidate.line);
+  const shownRows = shown.map((candidate) => candidate.row);
   const omitted = input.totalEvents - lines.length;
   const delta =
     input.totalEvents === 0
@@ -472,17 +494,25 @@ export const make = Effect.gen(function* () {
     Effect.mapError(persistenceError("Could not list Space agents.")),
   );
 
+  /** Routine rows never start an event wake and yield delta slots to the others. */
+  const routineRow = sql`(
+    (source_kind = 'thread' AND status IN ${sql.in(ROUTINE_THREAD_STATUSES)})
+    OR source_id LIKE ${`${GMAIL_DRAFT_SOURCE_PREFIX}%`}
+  )`;
+
+  /** Every undelivered row, and when the oldest non-routine one happened (null if none). */
   const pendingSummary = (spaceId: string, cursor: number) =>
     sql<{
       readonly total: number;
       readonly maxId: number | null;
-      readonly firstAt: string | null;
+      readonly firstTriggerAt: string | null;
     }>`
-      SELECT COUNT(*) AS total, MAX(id) AS "maxId", MIN(occurred_at) AS "firstAt"
+      SELECT COUNT(*) AS total, MAX(id) AS "maxId",
+        MIN(CASE WHEN ${routineRow} THEN NULL ELSE occurred_at END) AS "firstTriggerAt"
       FROM command_center_space_activity
       WHERE space_id = ${spaceId} AND id > ${cursor}
     `.pipe(
-      Effect.map((rows) => rows[0] ?? { total: 0, maxId: null, firstAt: null }),
+      Effect.map((rows) => rows[0] ?? { total: 0, maxId: null, firstTriggerAt: null }),
       Effect.mapError(persistenceError("Could not read Space activity.")),
     );
 
@@ -513,13 +543,17 @@ export const make = Effect.gen(function* () {
     const rows =
       pending.total === 0
         ? []
-        : yield* sql<SpaceAgentWakeDeltaRow>`
-            SELECT id, source_id AS "sourceId", occurred_at AS "occurredAt", title, status,
-              summary, url
-            FROM command_center_space_activity
-            WHERE space_id = ${spaceId} AND id > ${state.activityCursor} AND id <= ${maxId}
-            ORDER BY occurred_at DESC, id DESC
-            LIMIT ${SPACE_AGENT_WAKE_DELTA_MAX_ROWS}
+        : // Rows that need attention take the slots first; newest routine rows fill the rest.
+          yield* sql<SpaceAgentWakeDeltaRow>`
+            SELECT * FROM (
+              SELECT id, source_id AS "sourceId", occurred_at AS "occurredAt", title, status,
+                summary, url, CASE WHEN ${routineRow} THEN 1 ELSE 0 END AS routine
+              FROM command_center_space_activity
+              WHERE space_id = ${spaceId} AND id > ${state.activityCursor} AND id <= ${maxId}
+              ORDER BY routine, occurred_at DESC, id DESC
+              LIMIT ${SPACE_AGENT_WAKE_DELTA_MAX_ROWS}
+            )
+            ORDER BY "occurredAt" DESC, id DESC
           `.pipe(Effect.mapError(persistenceError("Could not read Space activity.")));
     const replies = yield* withSql(pendingSpaceAgentReplies(spaceId));
     const text = renderSpaceAgentWakeText({
@@ -724,12 +758,17 @@ export const make = Effect.gen(function* () {
     if (hold !== undefined && hold.untilMs > nowMs) return "backoff" as const;
 
     const pending = yield* pendingSummary(spaceId, state.activityCursor);
-    let pendingSince = state.pendingSince;
-    if (pending.total > 0 && pendingSince === null) {
-      const firstMs = pending.firstAt === null ? undefined : epochOf(pending.firstAt);
-      pendingSince = isoAt(firstMs === undefined ? nowMs : Math.min(firstMs, nowMs));
-    } else if (pending.total === 0) {
-      pendingSince = null;
+    // Routine rows ride along with the next wake; only the others start one.
+    // A late-recorded older row never pulls the anchor back; an anchor older
+    // than every pending trigger row (left by routine rows) moves up to it.
+    let pendingSince: string | null = null;
+    if (pending.firstTriggerAt !== null) {
+      const firstMs = epochOf(pending.firstTriggerAt);
+      const firstTrigger = isoAt(firstMs === undefined ? nowMs : Math.min(firstMs, nowMs));
+      pendingSince =
+        state.pendingSince === null || state.pendingSince < firstTrigger
+          ? firstTrigger
+          : state.pendingSince;
     }
     if (pendingSince !== state.pendingSince) {
       yield* sql`

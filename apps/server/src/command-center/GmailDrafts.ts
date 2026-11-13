@@ -39,7 +39,7 @@ import { SPACE_ACTIVITY_EXTERNAL_EVENT_SEQUENCE, SpaceActivity } from "./SpaceAc
 const GMAIL_DRAFT_LIMIT = 10;
 const GMAIL_DRAFT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const GMAIL_DRAFT_REQUESTED_ACTION = "cc.connections.google.gmail.draft.requested";
-const GMAIL_DRAFT_SOURCE_PREFIX = "gmail-draft:";
+export const GMAIL_DRAFT_SOURCE_PREFIX = "gmail-draft:";
 
 /**
  * Reservation event ids are `<action>:<spaceId>:<ISO time>:<nonce>`. The audit
