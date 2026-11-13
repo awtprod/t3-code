@@ -146,7 +146,11 @@ activity row, so older history counts as brief context, not as a wake.
   `gmail-draft:` rows. Waking the model for those spent the daily event budget
   on "nothing needs doing". Failed threads, Runs, mail, calendar and phone rows
   still trigger. Routine rows are not dropped: every wake, of any kind, delivers
-  all pending rows and moves the cursor past them. The wake fires once
+  all pending rows and moves the cursor past them. So `pendingEvents` in
+  `cc.spaceAgent.list` (every undelivered row, routine ones included) can be
+  non-zero with no wake due. In a Space with no check-ins and no rows that need
+  attention, routine rows are never delivered; the activity table's 500-row
+  retention eventually prunes them. The wake fires once
   `pending_since + debounceMinutes` and `last_wake_at + debounceMinutes` have both
   passed, outside quiet hours, while the local day has fewer than `dailyWakeLimit`
   event wakes. Over the limit it waits for the next local day.
@@ -165,6 +169,8 @@ activity row, so older history counts as brief context, not as a wake.
   delivered, clears `pending_since`, and records `last_wake_at/reason`.
 - **Wake text.** It states why the agent woke, then lists up to 20 activity rows
   (newest first, about 3,000 characters, marked as untrusted data), then closes.
+  Rows that need attention get both bounds first and routine rows fill what is
+  left, so hours of routine rows cannot push out the row that caused the wake.
   Event, reply and manual wakes close with the allowed responses (do nothing,
   update memory, create or update an Item, ask via a decision Item, or start an
   in-policy Run) and ask for one short line when nothing needs doing. A scheduled

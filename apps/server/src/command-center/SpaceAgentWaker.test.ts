@@ -796,6 +796,105 @@ describe("SpaceAgentWaker", () => {
       }).pipe(Effect.provide(harness.layer));
     });
 
+    const storePendingSince = (pendingSince: string) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`
+          UPDATE command_center_space_agent_state
+          SET pending_since = ${pendingSince} WHERE space_id = ${SPACE}
+        `;
+      });
+
+    it.effect("move a stored anchor older than the first trigger row up to it", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* insertSpace(SPACE, agentJson());
+        yield* tickAt("2026-10-09T13:59:00.000Z");
+        yield* recordRoutineRows("2026-10-09T14:00:00.000Z");
+        // As left behind by routine rows before they stopped anchoring.
+        yield* storePendingSince("2026-10-09T14:00:00.000Z");
+        yield* recordActivity({
+          occurredAt: "2026-10-09T20:01:00.000Z",
+          sourceId: "gmail:thread-a:1",
+          title: "Mail: Quote",
+          status: "new",
+        });
+        expect(yield* tickAt("2026-10-09T20:05:00.000Z")).toBe("idle");
+        expect((yield* readState)?.pendingSince).toBe("2026-10-09T20:01:00.000Z");
+        expect(yield* tickAt("2026-10-09T20:11:00.000Z")).toBe("event");
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("keep a stored anchor newer than the first trigger row", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* insertSpace(SPACE, agentJson());
+        yield* tickAt("2026-10-09T13:59:00.000Z");
+        // A row recorded late, after the anchor was set from a newer one.
+        yield* recordActivity({
+          occurredAt: "2026-10-09T14:00:00.000Z",
+          sourceId: "gmail:thread-a:1",
+          title: "Mail: Quote",
+          status: "new",
+        });
+        yield* storePendingSince("2026-10-09T14:05:00.000Z");
+        expect(yield* tickAt("2026-10-09T14:12:00.000Z")).toBe("idle");
+        expect((yield* readState)?.pendingSince).toBe("2026-10-09T14:05:00.000Z");
+        expect(yield* tickAt("2026-10-09T14:15:00.000Z")).toBe("event");
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("clear a stored anchor when only routine rows are pending", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* insertSpace(SPACE, agentJson());
+        yield* tickAt("2026-10-09T13:59:00.000Z");
+        yield* recordRoutineRows("2026-10-09T14:00:00.000Z");
+        yield* storePendingSince("2026-10-09T14:00:00.000Z");
+        expect(yield* tickAt("2026-10-09T14:30:00.000Z")).toBe("idle");
+        expect((yield* readState)?.pendingSince).toBeNull();
+        expect(harness.turns).toEqual([]);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
+    it.effect("never push the row that caused the wake out of the delta", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* insertSpace(SPACE, agentJson());
+        yield* tickAt("2026-10-09T13:59:00.000Z");
+        yield* recordActivity({
+          occurredAt: "2026-10-09T14:00:00.000Z",
+          sourceId: "gmail:thread-a:1",
+          title: "Mail: Quote",
+          status: "new",
+        });
+        for (let index = 1; index <= 25; index += 1) {
+          yield* recordActivity({
+            occurredAt: `2026-10-09T14:${String(index).padStart(2, "0")}:00.000Z`,
+            sourceKind: "thread",
+            sourceId: `thread-${index}`,
+            title: `Thread ${index}`,
+            status: "completed",
+          });
+        }
+        expect(yield* tickAt("2026-10-09T14:30:00.000Z")).toBe("event");
+
+        const text = harness.turns[0]?.text ?? "";
+        const delta = text.slice(text.indexOf("<activity>"), text.indexOf("</activity>"));
+        const lines = delta.split("\n").filter((line) => line.startsWith("- "));
+        expect(text).toContain("Why you woke: 26 new events since your last wake.");
+        expect(lines).toHaveLength(20);
+        // The mail row, then the 19 newest routine rows, newest first.
+        expect(lines.at(-1)).toContain("Mail: Quote");
+        expect(lines[0]).toContain("Thread 25 |");
+        expect(lines.at(-2)).toContain("Thread 7 |");
+        expect(delta).not.toContain("Thread 6 |");
+        expect(text).toContain("6 older events not shown; use cc_space_activity.");
+        expect(text).toContain(SPACE_AGENT_MAIL_ROUTINE_CLOSING);
+        expect((yield* readState)?.activityCursor).toBe(yield* maxActivityId);
+      }).pipe(Effect.provide(harness.layer));
+    });
+
     it.effect("are delivered by the next check-in", () => {
       const harness = makeHarness();
       return Effect.gen(function* () {
@@ -1447,6 +1546,20 @@ describe("renderSpaceAgentWakeText routine closings", () => {
     expect(text).not.toContain("Mail: Contract draft");
     expect(text).toContain("older event");
     expect(text.endsWith(`\n\n${EVENT_WAKE_CLOSING}`)).toBe(true);
+  });
+
+  it("spends the character budget on rows that need attention before routine rows", () => {
+    const filler = Array.from({ length: 19 }, (_, index) => ({
+      ...row(10 + index, `thread-${index}`, `Thread ${index}`, "y".repeat(240)),
+      routine: 1,
+    }));
+    const text = render([...filler, mailRow]);
+    const delta = text.slice(text.indexOf("<activity>"), text.indexOf("</activity>"));
+    const lines = delta.split("\n").filter((line) => line.startsWith("- "));
+    expect(lines.at(-1)).toContain("Mail: Contract draft");
+    expect(lines[0]).toContain("Thread 0 |");
+    expect(text).toContain(`${20 - lines.length} older event`);
+    expect(text).toContain(SPACE_AGENT_MAIL_ROUTINE_CLOSING);
   });
 });
 

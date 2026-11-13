@@ -224,6 +224,8 @@ export interface SpaceAgentWakeDeltaRow {
   readonly status: string;
   readonly summary: string;
   readonly url: string | null;
+  /** 1 for a routine row (never starts an event wake); such rows yield space to the others. */
+  readonly routine?: number;
 }
 
 const oneLine = (text: string, max: number) => {
@@ -288,7 +290,8 @@ const fenceSafe = (text: string) => text.replace(/<\/?\s*replies\s*>/giu, "");
 
 /**
  * The wake message: why the agent woke, the activity delta (newest first,
- * bounded by row count and characters, marked as untrusted reference data),
+ * bounded by row count and characters with non-routine rows kept first, marked
+ * as untrusted reference data),
  * and what it may do about it. A scheduled check-in asks for its routine; the
  * other kinds get the allowed responses. Whichever applies, a wake whose shown
  * rows include mail or calendar rows then also asks for the mail or meeting
@@ -350,21 +353,31 @@ export const renderSpaceAgentWakeText = (input: {
               : []),
           ].join("\n"),
         ];
-  const lines: Array<string> = [];
-  let used = 0;
-  for (const row of input.rows.slice(0, SPACE_AGENT_WAKE_DELTA_MAX_ROWS)) {
-    const line = [
+  const candidates = input.rows.slice(0, SPACE_AGENT_WAKE_DELTA_MAX_ROWS).map((row) => ({
+    row,
+    line: [
       `- ${row.occurredAt.slice(0, 16).replace("T", " ")}Z`,
       oneLine(row.title, DELTA_TITLE_CHARS),
       row.status,
       ...(row.summary.trim().length === 0 ? [] : [oneLine(row.summary, DELTA_SNIPPET_CHARS)]),
       ...(row.url === null ? [] : [row.url]),
-    ].join(" | ");
-    if (used + line.length + 1 > SPACE_AGENT_WAKE_DELTA_MAX_CHARS) break;
-    lines.push(line);
-    used += line.length + 1;
+    ].join(" | "),
+  }));
+  // The character budget goes to rows that need attention first, so routine
+  // rows never push out the row that caused the wake; display order is kept.
+  const kept = new Set<(typeof candidates)[number]>();
+  let used = 0;
+  for (const candidate of [
+    ...candidates.filter((candidate) => !candidate.row.routine),
+    ...candidates.filter((candidate) => candidate.row.routine),
+  ]) {
+    if (used + candidate.line.length + 1 > SPACE_AGENT_WAKE_DELTA_MAX_CHARS) break;
+    kept.add(candidate);
+    used += candidate.line.length + 1;
   }
-  const shownRows = input.rows.slice(0, lines.length);
+  const shown = candidates.filter((candidate) => kept.has(candidate));
+  const lines = shown.map((candidate) => candidate.line);
+  const shownRows = shown.map((candidate) => candidate.row);
   const omitted = input.totalEvents - lines.length;
   const delta =
     input.totalEvents === 0
@@ -481,6 +494,12 @@ export const make = Effect.gen(function* () {
     Effect.mapError(persistenceError("Could not list Space agents.")),
   );
 
+  /** Routine rows never start an event wake and yield delta slots to the others. */
+  const routineRow = sql`(
+    (source_kind = 'thread' AND status IN ${sql.in(ROUTINE_THREAD_STATUSES)})
+    OR source_id LIKE ${`${GMAIL_DRAFT_SOURCE_PREFIX}%`}
+  )`;
+
   /** Every undelivered row, and when the oldest non-routine one happened (null if none). */
   const pendingSummary = (spaceId: string, cursor: number) =>
     sql<{
@@ -489,11 +508,7 @@ export const make = Effect.gen(function* () {
       readonly firstTriggerAt: string | null;
     }>`
       SELECT COUNT(*) AS total, MAX(id) AS "maxId",
-        MIN(CASE
-          WHEN source_kind = 'thread' AND status IN ${sql.in(ROUTINE_THREAD_STATUSES)} THEN NULL
-          WHEN source_id LIKE ${`${GMAIL_DRAFT_SOURCE_PREFIX}%`} THEN NULL
-          ELSE occurred_at
-        END) AS "firstTriggerAt"
+        MIN(CASE WHEN ${routineRow} THEN NULL ELSE occurred_at END) AS "firstTriggerAt"
       FROM command_center_space_activity
       WHERE space_id = ${spaceId} AND id > ${cursor}
     `.pipe(
@@ -528,13 +543,17 @@ export const make = Effect.gen(function* () {
     const rows =
       pending.total === 0
         ? []
-        : yield* sql<SpaceAgentWakeDeltaRow>`
-            SELECT id, source_id AS "sourceId", occurred_at AS "occurredAt", title, status,
-              summary, url
-            FROM command_center_space_activity
-            WHERE space_id = ${spaceId} AND id > ${state.activityCursor} AND id <= ${maxId}
-            ORDER BY occurred_at DESC, id DESC
-            LIMIT ${SPACE_AGENT_WAKE_DELTA_MAX_ROWS}
+        : // Rows that need attention take the slots first; newest routine rows fill the rest.
+          yield* sql<SpaceAgentWakeDeltaRow>`
+            SELECT * FROM (
+              SELECT id, source_id AS "sourceId", occurred_at AS "occurredAt", title, status,
+                summary, url, CASE WHEN ${routineRow} THEN 1 ELSE 0 END AS routine
+              FROM command_center_space_activity
+              WHERE space_id = ${spaceId} AND id > ${state.activityCursor} AND id <= ${maxId}
+              ORDER BY routine, occurred_at DESC, id DESC
+              LIMIT ${SPACE_AGENT_WAKE_DELTA_MAX_ROWS}
+            )
+            ORDER BY "occurredAt" DESC, id DESC
           `.pipe(Effect.mapError(persistenceError("Could not read Space activity.")));
     const replies = yield* withSql(pendingSpaceAgentReplies(spaceId));
     const text = renderSpaceAgentWakeText({
