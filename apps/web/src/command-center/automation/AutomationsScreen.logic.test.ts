@@ -14,6 +14,7 @@ import {
   resolveAutomationsScreenStatus,
   resolveAutomationsSelection,
   scheduledTaskHealth,
+  scheduledTaskRunLabel,
   shouldAutosaveAutomationDraft,
   sortByHealth,
   summarizeRecurringHealth,
@@ -268,10 +269,25 @@ describe("recurring task health", () => {
     expect(scheduledTaskHealth(SAMPLE_FAILED_SCHEDULED_TASK)).toBe("failing");
     expect(scheduledTaskHealth(SAMPLE_SCHEDULED_TASK)).toBe("ok");
     expect(scheduledTaskHealth(SAMPLE_PAUSED_SCHEDULED_TASK)).toBe("paused");
-    expect(scheduledTaskHealth({ enabled: true, lastRunStatus: "running" })).toBe("running");
-    expect(scheduledTaskHealth({ enabled: true, lastRunStatus: "never" })).toBe("idle");
     // A failing task that was paused no longer needs anyone.
-    expect(scheduledTaskHealth({ enabled: false, lastRunStatus: "failed" })).toBe("paused");
+    expect(
+      scheduledTaskHealth({ enabled: false, lastRunStatus: "failed", lastRunOutcome: null }),
+    ).toBe("paused");
+  });
+
+  it.each([
+    ["never", null, "idle", "Not run yet"],
+    ["running", null, "running", "Running now"],
+    ["failed", null, "failing", "Failed 2h ago"],
+    // A dispatch only started the run; OK waits for the run to finish.
+    ["succeeded", null, "running", "Started 2h ago"],
+    ["succeeded", "completed", "ok", "OK 2h ago"],
+    ["succeeded", "failed", "failing", "Failed 2h ago"],
+    ["succeeded", "interrupted", "idle", "Stopped 2h ago"],
+  ] as const)("shows a %s dispatch with outcome %s as %s", (status, outcome, health, label) => {
+    const task = { enabled: true, lastRunStatus: status, lastRunOutcome: outcome };
+    expect(scheduledTaskHealth(task)).toBe(health);
+    expect(scheduledTaskRunLabel(task, "2h ago")).toBe(label);
   });
 
   it("judges a committed automation by its newest run, whatever order runs arrive in", () => {
@@ -325,6 +341,8 @@ describe("recurring task health", () => {
       paused: 2,
     });
     expect(countFailingRecurringTasks(input)).toBe(2);
+    const runFailed = { ...SAMPLE_SCHEDULED_TASK, lastRunOutcome: "failed" as const };
+    expect(countFailingRecurringTasks({ ...input, tasks: [...input.tasks, runFailed] })).toBe(3);
     expect(countFailingRecurringTasks({ tasks: [], automations: [], runs: [] })).toBe(0);
   });
 

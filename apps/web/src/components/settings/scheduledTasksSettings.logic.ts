@@ -5,6 +5,7 @@ import {
   type ProjectId,
   ScheduledTaskId,
   type ScheduledTask,
+  scheduledTaskLastRunResult,
   type ScheduledTaskUpsertSchedule,
   type ModelSelection,
   type RuntimeMode,
@@ -328,9 +329,33 @@ export function relativeLabel(value: string | null): string {
   return `in ${Math.round(hours / 24)}d`;
 }
 
-export function scheduledTaskStatusVariant(status: ScheduledTask["lastRunStatus"]) {
-  if (status === "failed") return "error";
-  if (status === "succeeded") return "success";
-  if (status === "running") return "info";
-  return "outline";
+type ScheduledTaskRunFields = Pick<ScheduledTask, "lastRunStatus" | "lastRunOutcome">;
+
+/** Success only once the run finished; a dispatch alone just started it. */
+export function scheduledTaskStatusVariant(task: ScheduledTaskRunFields) {
+  switch (scheduledTaskLastRunResult(task)) {
+    case "failed":
+      return "error";
+    case "completed":
+      return "success";
+    case "running":
+    case "started":
+      return "info";
+    case "interrupted":
+    case "never":
+      return "outline";
+  }
+}
+
+const RUN_BADGE_LABELS = {
+  never: "not run",
+  running: "running",
+  started: "started",
+  completed: "ok",
+  failed: "failed",
+  interrupted: "stopped",
+} as const;
+
+export function scheduledTaskStatusLabel(task: ScheduledTaskRunFields): string {
+  return RUN_BADGE_LABELS[scheduledTaskLastRunResult(task)];
 }

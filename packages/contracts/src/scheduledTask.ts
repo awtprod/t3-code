@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
@@ -187,6 +188,10 @@ export type ScheduledTaskUpsertSchedule = typeof ScheduledTaskUpsertSchedule.Typ
 export const ScheduledTaskRunStatus = Schema.Literals(["never", "running", "succeeded", "failed"]);
 export type ScheduledTaskRunStatus = typeof ScheduledTaskRunStatus.Type;
 
+/** How the run that a `succeeded` dispatch started ended. Null until it ends. */
+export const ScheduledTaskRunOutcome = Schema.Literals(["completed", "failed", "interrupted"]);
+export type ScheduledTaskRunOutcome = typeof ScheduledTaskRunOutcome.Type;
+
 export const ScheduledTaskWebhookEndpoint = Schema.Struct({
   path: TrimmedNonEmptyString,
   url: Schema.NullOr(TrimmedNonEmptyString),
@@ -214,10 +219,48 @@ export const ScheduledTask = Schema.Struct({
   lastRunAt: Schema.NullOr(IsoDateTime),
   lastRunStatus: ScheduledTaskRunStatus,
   lastRunError: Schema.NullOr(Schema.String),
+  lastRunOutcome: Schema.NullOr(ScheduledTaskRunOutcome).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(null)),
+  ),
+  lastRunOutcomeError: Schema.NullOr(Schema.String).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(null)),
+  ),
   runCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   webhook: Schema.optional(ScheduledTaskWebhookEndpoint),
 });
 export type ScheduledTask = typeof ScheduledTask.Type;
+
+/**
+ * The latest run as clients present it. A `succeeded` dispatch only started the
+ * run, so it reads as `started` until the run's own outcome arrives.
+ */
+export type ScheduledTaskLastRunResult =
+  | "never"
+  | "running"
+  | "started"
+  | "completed"
+  | "failed"
+  | "interrupted";
+
+export function scheduledTaskLastRunResult(
+  task: Pick<ScheduledTask, "lastRunStatus" | "lastRunOutcome">,
+): ScheduledTaskLastRunResult {
+  if (task.lastRunStatus !== "succeeded") return task.lastRunStatus;
+  return task.lastRunOutcome ?? "started";
+}
+
+/** Why the latest run failed: the dispatch error, or the started run's own failure. */
+export function scheduledTaskLastRunError(
+  task: Pick<
+    ScheduledTask,
+    "lastRunStatus" | "lastRunError" | "lastRunOutcome" | "lastRunOutcomeError"
+  >,
+): string | null {
+  if (task.lastRunStatus === "succeeded" && task.lastRunOutcome === "failed") {
+    return task.lastRunOutcomeError ?? "The run failed.";
+  }
+  return task.lastRunError;
+}
 
 export const ScheduledTaskListInput = Schema.Struct({});
 export type ScheduledTaskListInput = typeof ScheduledTaskListInput.Type;

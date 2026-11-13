@@ -205,7 +205,7 @@ describe("stacked Instagram migration manifest", () => {
 
 describe("released migration ids", () => {
   it("pins the id and name of every migration from orchestration V2 on", () => {
-    // 95-103 shipped under these ids and 104-113 are upstream 063-072 renumbered to follow them.
+    // 95-103 shipped under these ids, 104-113 are upstream 063-072 renumbered to follow them, 114 on are fork-owned.
     // Live databases record id + name, so renaming or reordering any of these breaks upgrades.
     assert.deepStrictEqual(
       migrationManifest.filter(([id]) => id >= 95),
@@ -229,6 +229,7 @@ describe("released migration ids", () => {
         [111, "PeerLinks"],
         [112, "PeerLinkFence"],
         [113, "WaitingLinkRequestIndex"],
+        [114, "ScheduledTaskRunOutcome"],
       ],
     );
   });

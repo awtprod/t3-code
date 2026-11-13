@@ -2194,6 +2194,8 @@ describe("OrchestratorMcpService provider resolution", () => {
       lastRunAt: null,
       lastRunStatus: "never",
       lastRunError: null,
+      lastRunOutcome: null,
+      lastRunOutcomeError: null,
       runCount: 0,
       webhook: {
         path: "/hooks/scheduled-task/secret",

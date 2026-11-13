@@ -3,12 +3,15 @@ import * as Schema from "effect/Schema";
 
 import {
   MIN_SCHEDULED_TASK_INTERVAL_MS,
+  ScheduledTask,
+  scheduledTaskLastRunError,
   ScheduledTaskSchedule,
   ScheduledTaskUpsertSchedule,
 } from "./scheduledTask.ts";
 
 const decodeSchedule = Schema.decodeUnknownSync(ScheduledTaskSchedule);
 const decodeUpsertSchedule = Schema.decodeUnknownSync(ScheduledTaskUpsertSchedule);
+const decodeTask = Schema.decodeSync(ScheduledTask);
 
 describe("ScheduledTaskSchedule", () => {
   it("keeps legacy sub-minute persisted schedules readable", () => {
@@ -21,6 +24,58 @@ describe("ScheduledTaskSchedule", () => {
       type: "interval",
       everyMs: MIN_SCHEDULED_TASK_INTERVAL_MS - 1,
     });
+  });
+});
+
+describe("ScheduledTask", () => {
+  it("decodes a task from a server that does not send the run outcome", () => {
+    const task = decodeTask({
+      id: "task-1",
+      title: "Weekly report",
+      prompt: "Write the report",
+      enabled: true,
+      schedule: { type: "interval", everyMs: MIN_SCHEDULED_TASK_INTERVAL_MS },
+      projectId: "project-1",
+      threadId: null,
+      workspaceStrategy: { type: "root" },
+      modelSelection: { instanceId: "codex", model: "gpt-5" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdBy: "user",
+      creationSource: "web",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      nextRunAt: null,
+      lastRunAt: "2026-01-01T00:00:00.000Z",
+      lastRunStatus: "succeeded",
+      lastRunError: null,
+      runCount: 1,
+    });
+    expect(task.lastRunOutcome).toBeNull();
+    expect(task.lastRunOutcomeError).toBeNull();
+  });
+
+  it("reports the started run's failure when the dispatch itself succeeded", () => {
+    const base = { lastRunError: null, lastRunOutcomeError: null } as const;
+    expect(
+      scheduledTaskLastRunError({
+        ...base,
+        lastRunStatus: "succeeded",
+        lastRunOutcome: "failed",
+        lastRunOutcomeError: "usage_limit (api_error_429)",
+      }),
+    ).toBe("usage_limit (api_error_429)");
+    expect(
+      scheduledTaskLastRunError({ ...base, lastRunStatus: "succeeded", lastRunOutcome: null }),
+    ).toBeNull();
+    expect(
+      scheduledTaskLastRunError({
+        ...base,
+        lastRunStatus: "failed",
+        lastRunOutcome: null,
+        lastRunError: "Thread not found",
+      }),
+    ).toBe("Thread not found");
   });
 });
 

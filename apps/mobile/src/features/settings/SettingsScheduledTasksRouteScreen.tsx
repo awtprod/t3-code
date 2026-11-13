@@ -3,6 +3,7 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   AuthOrchestrationOperateScope,
   resolveProjectProviderInstanceEnabled,
+  scheduledTaskLastRunError,
 } from "@t3tools/contracts";
 import { readEnvironmentScope } from "../../state/session";
 import type {
@@ -1357,9 +1358,9 @@ function EnvironmentTasks({
                     ? ` · ${formatNextScheduledTaskRun(task.nextRunAt, now)}`
                     : ""}
               </Text>
-              {task.lastRunError ? (
+              {scheduledTaskLastRunError(task) ? (
                 <Text className="text-sm text-danger-foreground" numberOfLines={2}>
-                  Last run failed: {task.lastRunError}
+                  Last run failed: {scheduledTaskLastRunError(task)}
                 </Text>
               ) : null}
             </Pressable>
