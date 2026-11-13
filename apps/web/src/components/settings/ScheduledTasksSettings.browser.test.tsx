@@ -35,6 +35,8 @@ const task: ScheduledTask = {
   lastRunAt: null,
   lastRunStatus: "never",
   lastRunError: null,
+  lastRunOutcome: null,
+  lastRunOutcomeError: null,
   runCount: 0,
 };
 

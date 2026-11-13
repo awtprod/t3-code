@@ -143,6 +143,7 @@ import * as McpOAuth from "./auth/McpOAuth.ts";
 import * as McpOAuthHttp from "./auth/mcpOAuthHttp.ts";
 import {
   relayHookBaseUrl,
+  ScheduledTaskService,
   ScheduledTaskWebhookOrigin,
 } from "./scheduledTasks/ScheduledTaskService.ts";
 import {
@@ -641,6 +642,10 @@ const layerThreadSettlementWorker = Layer.effectDiscard(
   ThreadSettlementService.make.pipe(Effect.flatMap((service) => service.start())),
 ).pipe(Layer.provide(layerPullRequestService), Layer.provide(ProjectionStoreV2.layer));
 
+const layerScheduledTaskRunOutcomeWorker = Layer.effectDiscard(
+  ScheduledTaskService.pipe(Effect.flatMap((service) => service.followRunOutcomes())),
+);
+
 const layerIdleCompactionWorker = Layer.effectDiscard(
   IdleCompactionService.make.pipe(Effect.flatMap((service) => service.start())),
 ).pipe(Layer.provide(ProjectionStoreV2.layer));
@@ -1027,6 +1032,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   layerCommandCenterRuntime,
   HeldHooksWaker.layer,
   layerThreadSettlementWorker,
+  layerScheduledTaskRunOutcomeWorker,
   layerIdleCompactionWorker,
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
   DatabaseStorage.layer.pipe(

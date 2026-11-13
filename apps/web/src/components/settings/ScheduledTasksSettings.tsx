@@ -66,7 +66,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { WorktreeBaseBranchPicker } from "../WorktreeBaseBranchPicker";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { ConnectionStatusDot, connectionPhaseDotClassName } from "../ConnectionStatusDot";
-import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { AuthOrchestrationOperateScope, scheduledTaskLastRunError } from "@t3tools/contracts";
 import { readEnvironmentScope } from "~/state/session";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { EnvironmentRow, environmentTransportLabel } from "./EnvironmentRow";
@@ -81,6 +81,7 @@ import {
   scheduleFromDraft,
   scheduleLabel,
   scheduledTaskDefaultModel,
+  scheduledTaskStatusLabel,
   scheduledTaskStatusVariant,
   taskToDraft,
   type DraftState,
@@ -662,6 +663,7 @@ function ScheduledTaskRow({
   const [busy, setBusy] = useState(false);
   const [deliveriesOpen, setDeliveriesOpen] = useState(false);
   const isWebhook = task.schedule.type === "webhook";
+  const lastRunError = scheduledTaskLastRunError(task);
   const toggle = useAtomCommand(serverEnvironment.setScheduledTaskEnabled, {
     label: "scheduled task enabled",
   });
@@ -712,11 +714,11 @@ function ScheduledTaskRow({
             )}
           </span>
           {task.lastRunStatus !== "never" ? (
-            <Badge variant={scheduledTaskStatusVariant(task.lastRunStatus)}>
-              {task.lastRunStatus}
+            <Badge variant={scheduledTaskStatusVariant(task)}>
+              {scheduledTaskStatusLabel(task)}
             </Badge>
           ) : null}
-          {task.lastRunError ? <span className="text-destructive">{task.lastRunError}</span> : null}
+          {lastRunError ? <span className="text-destructive">{lastRunError}</span> : null}
         </div>
       }
       control={

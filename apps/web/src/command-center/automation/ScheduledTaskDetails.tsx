@@ -1,4 +1,9 @@
-import type { ScheduledTask } from "@t3tools/contracts";
+import {
+  type ScheduledTask,
+  type ScheduledTaskLastRunResult,
+  scheduledTaskLastRunError,
+  scheduledTaskLastRunResult,
+} from "@t3tools/contracts";
 import {
   CalendarClockIcon,
   LoaderCircleIcon,
@@ -27,11 +32,13 @@ export interface ScheduledTaskDetailsProps {
   readonly onEdit?: ((task: ScheduledTask) => void) | undefined;
 }
 
-const STATUS_LABELS: Record<ScheduledTask["lastRunStatus"], string> = {
+const STATUS_LABELS: Record<ScheduledTaskLastRunResult, string> = {
   never: "Not run yet",
   running: "Running",
-  succeeded: "Last run succeeded",
+  started: "Last run started",
+  completed: "Last run finished",
   failed: "Last run failed",
+  interrupted: "Last run stopped",
 };
 
 const WORKSPACE_LABELS: Record<ScheduledTask["workspaceStrategy"]["type"], string> = {
@@ -85,6 +92,7 @@ export function ScheduledTaskDetails({
   onEdit,
 }: ScheduledTaskDetailsProps) {
   const isWebhook = task.schedule.type === "webhook";
+  const lastRunError = scheduledTaskLastRunError(task);
   const nextRun = !task.enabled
     ? "Paused"
     : isWebhook
@@ -105,8 +113,8 @@ export function ScheduledTaskDetails({
             Scheduled task · {scheduleLabel(task.schedule)}
           </p>
         </div>
-        <Badge variant={task.enabled ? scheduledTaskStatusVariant(task.lastRunStatus) : "outline"}>
-          {task.enabled ? STATUS_LABELS[task.lastRunStatus] : "Paused"}
+        <Badge variant={task.enabled ? scheduledTaskStatusVariant(task) : "outline"}>
+          {task.enabled ? STATUS_LABELS[scheduledTaskLastRunResult(task)] : "Paused"}
         </Badge>
       </header>
 
@@ -128,7 +136,7 @@ export function ScheduledTaskDetails({
         </Fact>
       </dl>
 
-      {task.lastRunError ? <LastRunError error={task.lastRunError} /> : null}
+      {lastRunError ? <LastRunError error={lastRunError} /> : null}
 
       <section aria-label="Prompt" className="flex min-h-0 flex-1 flex-col">
         <h3 className="text-2xs font-medium text-muted-foreground">Prompt</h3>

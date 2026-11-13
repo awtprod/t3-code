@@ -97,6 +97,7 @@ const SAMPLE_SCHEDULED_TASK_SOURCE = {
   lastRunAt: "2026-10-24T18:29:00.000Z",
   lastRunStatus: "succeeded",
   lastRunError: null,
+  lastRunOutcome: "completed",
   runCount: 1,
 };
 

@@ -284,7 +284,7 @@ describe("AutomationsScreen", () => {
       expect(html).toContain('aria-label="Scheduled task Editing opportunity watch"');
       expect(html).toContain("Daily at 17:00");
       expect(html).toContain("Open thread");
-      expect(html).toContain("Last run succeeded");
+      expect(html).toContain("Last run finished");
     },
     SSR_RENDER_TIMEOUT_MS,
   );

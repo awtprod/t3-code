@@ -5,10 +5,11 @@ import type {
   Run,
   Space,
 } from "@command-center/core";
-import type {
-  EnvironmentId,
-  ExecutionEnvironmentPlatformOs,
-  ScheduledTask,
+import {
+  type EnvironmentId,
+  type ExecutionEnvironmentPlatformOs,
+  type ScheduledTask,
+  scheduledTaskLastRunResult,
 } from "@t3tools/contracts";
 import { describeAutomationSchedule } from "@t3tools/shared/automationSchedule";
 
@@ -238,19 +239,41 @@ const HEALTH_RANK: Record<RecurringHealth, number> = {
   paused: 4,
 };
 
-export function scheduledTaskHealth(
-  task: Pick<ScheduledTask, "enabled" | "lastRunStatus">,
-): RecurringHealth {
+type ScheduledTaskRunFields = Pick<ScheduledTask, "enabled" | "lastRunStatus" | "lastRunOutcome">;
+
+export function scheduledTaskHealth(task: ScheduledTaskRunFields): RecurringHealth {
   if (!task.enabled) return "paused";
-  switch (task.lastRunStatus) {
+  switch (scheduledTaskLastRunResult(task)) {
     case "failed":
       return "failing";
     case "running":
       return "running";
-    case "succeeded":
+    case "completed":
       return "ok";
+    // Started with no outcome yet may never get one (deleted thread, steered prompt); stay neutral.
+    case "started":
+    case "interrupted":
     case "never":
       return "idle";
+  }
+}
+
+/** "OK" only once the run finished; a dispatched run reads "Started" until it ends. */
+export function scheduledTaskRunLabel(task: ScheduledTaskRunFields, ago: string): string {
+  if (!task.enabled) return "Paused";
+  switch (scheduledTaskLastRunResult(task)) {
+    case "never":
+      return "Not run yet";
+    case "running":
+      return "Running now";
+    case "started":
+      return `Started ${ago}`;
+    case "completed":
+      return `OK ${ago}`;
+    case "failed":
+      return `Failed ${ago}`;
+    case "interrupted":
+      return `Stopped ${ago}`;
   }
 }
 

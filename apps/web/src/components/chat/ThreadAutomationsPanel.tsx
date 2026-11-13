@@ -7,6 +7,8 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type ScheduledTask,
+  type ScheduledTaskLastRunResult,
+  scheduledTaskLastRunResult,
   type ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -31,11 +33,13 @@ import {
   THREAD_DETAILS_PANEL_ROW_CONTENT_CLASS,
 } from "./threadDetailsPanelStyles";
 
-const STATUS_DOT_CLASS: Record<ScheduledTask["lastRunStatus"], string> = {
+const STATUS_DOT_CLASS: Record<ScheduledTaskLastRunResult, string> = {
   never: "bg-muted-foreground/40",
   running: "bg-sky-500",
-  succeeded: "bg-emerald-500",
+  started: "bg-muted-foreground/40",
+  completed: "bg-emerald-500",
   failed: "bg-destructive",
+  interrupted: "bg-muted-foreground/40",
 };
 
 function taskScheduleLine(task: ScheduledTask) {
@@ -168,7 +172,7 @@ export function ThreadAutomationsPanel(props: {
               <span
                 className={cn(
                   "absolute -right-1 -top-1 size-1.5 rounded-full",
-                  STATUS_DOT_CLASS[task.lastRunStatus],
+                  STATUS_DOT_CLASS[scheduledTaskLastRunResult(task)],
                 )}
                 aria-hidden
               />

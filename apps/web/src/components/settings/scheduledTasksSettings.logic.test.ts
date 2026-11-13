@@ -18,6 +18,8 @@ import { resolveSettingsScope, type SettingsScopeSearch } from "./settingsScope"
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import {
   scheduledTaskDefaultModel,
+  scheduledTaskStatusLabel,
+  scheduledTaskStatusVariant,
   matchesScheduledTaskScope,
   scheduleFromDraft,
   taskToDraft,
@@ -140,8 +142,26 @@ const legacyTask: ScheduledTask = {
   lastRunAt: null,
   lastRunStatus: "never",
   lastRunError: null,
+  lastRunOutcome: null,
+  lastRunOutcomeError: null,
   runCount: 0,
 };
+
+describe("scheduled task run badge", () => {
+  it.each([
+    ["never", null, "outline", "not run"],
+    ["running", null, "info", "running"],
+    ["failed", null, "error", "failed"],
+    ["succeeded", null, "outline", "started"],
+    ["succeeded", "completed", "success", "ok"],
+    ["succeeded", "failed", "error", "failed"],
+    ["succeeded", "interrupted", "outline", "stopped"],
+  ] as const)("shows a %s dispatch with outcome %s as %s %s", (status, outcome, variant, label) => {
+    const task = { lastRunStatus: status, lastRunOutcome: outcome };
+    expect(scheduledTaskStatusVariant(task)).toBe(variant);
+    expect(scheduledTaskStatusLabel(task)).toBe(label);
+  });
+});
 
 describe("editing scheduled task branch settings", () => {
   it("keeps an omitted origin flag on the local base branch", () => {

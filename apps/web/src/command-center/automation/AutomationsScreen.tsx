@@ -54,6 +54,7 @@ import {
   latestAutomationRun,
   resolveAutomationsSelection,
   scheduledTaskHealth,
+  scheduledTaskRunLabel,
   sortByHealth,
   summarizeRecurringHealth,
 } from "./AutomationsScreen.logic";
@@ -156,16 +157,7 @@ function scheduledTaskRowLabels(task: ScheduledTask): {
   readonly secondary: string;
 } {
   const health = scheduledTaskHealth(task);
-  const primary =
-    health === "paused"
-      ? "Paused"
-      : health === "failing"
-        ? `Failed ${relativeLabel(task.lastRunAt)}`
-        : health === "running"
-          ? "Running now"
-          : health === "ok"
-            ? `OK ${relativeLabel(task.lastRunAt)}`
-            : "Not run yet";
+  const primary = scheduledTaskRunLabel(task, relativeLabel(task.lastRunAt));
   const secondary =
     task.enabled && task.schedule.type !== "webhook" && task.nextRunAt !== null
       ? `next ${relativeLabel(task.nextRunAt)}`

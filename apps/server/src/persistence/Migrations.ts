@@ -122,6 +122,8 @@ import Migration0110 from "./Migrations/110_ThreadMessageSearch.ts";
 import Migration0111 from "./Migrations/111_PeerLinks.ts";
 import Migration0112 from "./Migrations/112_PeerLinkFence.ts";
 import Migration0113 from "./Migrations/113_WaitingLinkRequestIndex.ts";
+// Fork-owned migrations after the renumbered upstream block (never renumber).
+import Migration0114 from "./Migrations/114_ScheduledTaskRunOutcome.ts";
 
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -241,6 +243,7 @@ export const migrationEntries = [
   [111, "PeerLinks", Migration0111],
   [112, "PeerLinkFence", Migration0112],
   [113, "WaitingLinkRequestIndex", Migration0113],
+  [114, "ScheduledTaskRunOutcome", Migration0114],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
