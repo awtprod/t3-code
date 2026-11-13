@@ -732,6 +732,24 @@ describe("cc_memory_propose confidence", () => {
     }),
   );
 
+  it.effect("forwards the contradicted Memory in remember mode", () =>
+    Effect.gen(function* () {
+      const remember = yield* invokeWriteTool(
+        itemScope({ capabilities: new Set(["cc.memory.propose"]), memoryWriteMode: "remember" }),
+        "cc_memory_propose",
+        { ...proposal(1), contradictionOf: "memory-old" },
+      );
+      expect(remember.outputs).toEqual([false]);
+      expect(remember.calls).toEqual([
+        {
+          method: "rememberFromSpaceAgent",
+          input: { ...remembered, contradictionOf: "memory-old" },
+          actor: { threadId: "cc-space-agent-acme" },
+        },
+      ]);
+    }),
+  );
+
   it.effect("rejects a non-numeric confidence before the handler runs", () =>
     Effect.gen(function* () {
       const { outputs, calls } = yield* invokeWriteTool(

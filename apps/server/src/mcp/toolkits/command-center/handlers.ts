@@ -425,7 +425,15 @@ const handlers = {
       }
       // Space agent Memory is approved but attributed to the agent thread.
       return yield* scope.role === "space-agent"
-        ? service.rememberFromSpaceAgent(memory, { threadId: scope.threadId })
+        ? service.rememberFromSpaceAgent(
+            {
+              ...memory,
+              ...(input.contradictionOf === undefined
+                ? {}
+                : { contradictionOf: input.contradictionOf }),
+            },
+            { threadId: scope.threadId },
+          )
         : service.remember(memory);
     }),
   cc_space_brief: ({ spaceId }) =>

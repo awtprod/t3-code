@@ -100,6 +100,11 @@ in memory only, so a restart forgets them and wakes go back to the primary.
   router conversation.
 - `cc_memory_propose` from a Space agent stores approved Memory with
   `provenance.kind = "agent"` and `sourceRef` set to the agent thread id.
+- An agent corrects a memory by writing the complete new fact with
+  `contradictionOf` set to the old memory's id. The same transaction expires the
+  old memory, so only the correction reaches later briefs. A missing, unapproved or
+  out-of-scope target fails the call and stores nothing; without that link, both
+  versions stay approved and both are injected into every wake.
 
 ## Brief
 
