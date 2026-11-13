@@ -279,8 +279,8 @@ describe("recurring task health", () => {
     ["never", null, "idle", "Not run yet"],
     ["running", null, "running", "Running now"],
     ["failed", null, "failing", "Failed 2h ago"],
-    // A dispatch only started the run; OK waits for the run to finish.
-    ["succeeded", null, "running", "Started 2h ago"],
+    // A dispatch only started the run; OK waits for it, and an unlinked run must not look active.
+    ["succeeded", null, "idle", "Started 2h ago"],
     ["succeeded", "completed", "ok", "OK 2h ago"],
     ["succeeded", "failed", "failing", "Failed 2h ago"],
     ["succeeded", "interrupted", "idle", "Stopped 2h ago"],
@@ -343,6 +343,13 @@ describe("recurring task health", () => {
     expect(countFailingRecurringTasks(input)).toBe(2);
     const runFailed = { ...SAMPLE_SCHEDULED_TASK, lastRunOutcome: "failed" as const };
     expect(countFailingRecurringTasks({ ...input, tasks: [...input.tasks, runFailed] })).toBe(3);
+    const started = { ...SAMPLE_SCHEDULED_TASK, lastRunOutcome: null };
+    expect(summarizeRecurringHealth({ ...input, tasks: [...input.tasks, started] })).toEqual({
+      total: 6,
+      failing: 2,
+      running: 0,
+      paused: 2,
+    });
     expect(countFailingRecurringTasks({ tasks: [], automations: [], runs: [] })).toBe(0);
   });
 

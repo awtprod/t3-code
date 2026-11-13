@@ -5,4 +5,5 @@ export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN last_run_outcome TEXT`;
   yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN last_run_outcome_error TEXT`;
+  yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN last_run_thread_id TEXT`;
 });

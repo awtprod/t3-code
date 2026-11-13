@@ -6,7 +6,7 @@ Tasks that need you come first. A task whose last run failed is at the top, then
 
 A scheduled task's last run reads:
 
-- **Started**: the task sent its prompt and the run has not finished yet.
+- **Started**: the task sent its prompt and no result is recorded yet. The run may still be going, or the prompt was sent as a steer into another turn; open the thread to check.
 - **OK**: the run finished. It means the agent completed its turn, not that it achieved what the task asked for; open the thread to check the result.
 - **Failed**: the task could not start the run, or the run itself failed, for example on a provider usage limit. Both count as failing.
 - **Stopped**: the run was interrupted or cancelled before it finished.

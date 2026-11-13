@@ -339,8 +339,8 @@ export function scheduledTaskStatusVariant(task: ScheduledTaskRunFields) {
     case "completed":
       return "success";
     case "running":
-    case "started":
       return "info";
+    case "started":
     case "interrupted":
     case "never":
       return "outline";

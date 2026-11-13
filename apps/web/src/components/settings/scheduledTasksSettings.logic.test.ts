@@ -152,7 +152,7 @@ describe("scheduled task run badge", () => {
     ["never", null, "outline", "not run"],
     ["running", null, "info", "running"],
     ["failed", null, "error", "failed"],
-    ["succeeded", null, "info", "started"],
+    ["succeeded", null, "outline", "started"],
     ["succeeded", "completed", "success", "ok"],
     ["succeeded", "failed", "error", "failed"],
     ["succeeded", "interrupted", "outline", "stopped"],

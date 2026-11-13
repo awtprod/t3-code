@@ -236,9 +236,15 @@ export interface ScheduledTaskRunUpdate {
   readonly threadId: string;
   readonly userMessageId: string;
   readonly status: string;
+  /** Null when the run never started, such as a queued run promoted to a steer. */
+  readonly startedAt?: unknown;
+  readonly restartContinuationOfRunId?: string | null | undefined;
 }
 
 const DISPATCH_MESSAGE_PREFIX = "scheduled-task-message:";
+
+/** Restart continuation chains stop at three hops; one more covers the dispatch's own run. */
+const MAX_CONTINUATION_HOPS = 4;
 
 const RUN_OUTCOMES: ReadonlyMap<string, ScheduledTaskRunOutcome> = new Map([
   ["completed", "completed"],
@@ -263,6 +269,7 @@ interface DispatchRow {
   readonly task_id: string;
   readonly last_run_at: string;
   readonly last_run_webhook_delivery_id: string | null;
+  readonly last_run_thread_id: string | null;
 }
 
 /** Message ids the task's latest dispatch may have sent; the trigger is not stored. */
@@ -279,20 +286,12 @@ function latestDispatchMessageIds(row: DispatchRow): ReadonlyArray<string> {
   );
 }
 
+/** Structured parts only: provider messages can carry local paths or stderr. */
 function runFailureSummary(
-  failure:
-    | {
-        readonly class: string | null;
-        readonly code: string | null;
-        readonly message: string | null;
-      }
-    | undefined,
+  failure: { readonly class: string | null; readonly code: string | null } | undefined,
 ): string {
   if (failure?.class == null) return "The run failed.";
-  if (failure.code !== null) return `${failure.class} (${failure.code})`;
-  const message = failure.message ?? "";
-  const short = message.length > 200 ? `${message.slice(0, 199)}…` : message;
-  return short === "" ? failure.class : `${failure.class}: ${short}`;
+  return failure.code === null ? failure.class : `${failure.class} (${failure.code})`;
 }
 
 export class ScheduledTaskService extends Context.Service<
@@ -730,7 +729,8 @@ export const layer = Layer.effect(
             last_run_status = 'running',
             last_run_error = NULL,
             last_run_outcome = NULL,
-            last_run_outcome_error = NULL
+            last_run_outcome_error = NULL,
+            last_run_thread_id = NULL
         WHERE task_id = ${id}
         RETURNING task_id
       `.pipe(
@@ -748,6 +748,7 @@ export const layer = Layer.effect(
       readonly nextRunAtIso: string | null;
       readonly status: "succeeded" | "failed";
       readonly error: string | null;
+      readonly threadId: string | null;
       readonly startedAtIso: string;
     }) =>
       sql`
@@ -756,6 +757,7 @@ export const layer = Layer.effect(
             next_run_at = ${input.nextRunAtIso},
             last_run_status = ${input.status},
             last_run_error = ${input.error},
+            last_run_thread_id = ${input.threadId},
             run_count = run_count + 1
         WHERE task_id = ${input.id}
           AND last_run_status = 'running'
@@ -804,12 +806,10 @@ export const layer = Layer.effect(
       sql<{
         readonly failure_class: string | null;
         readonly failure_code: string | null;
-        readonly failure_message: string | null;
       }>`
         SELECT
           json_extract(payload_json, '$.failure.class') AS failure_class,
-          json_extract(payload_json, '$.failure.code') AS failure_code,
-          json_extract(payload_json, '$.failure.message') AS failure_message
+          json_extract(payload_json, '$.failure.code') AS failure_code
         FROM orchestration_v2_projection_turn_items
         WHERE thread_id = ${run.threadId} AND run_id = ${run.id} AND type = 'error'
         ORDER BY updated_at DESC, ordinal DESC
@@ -818,33 +818,67 @@ export const layer = Layer.effect(
         NodeSqliteClient.readOnly,
         Effect.map(([row]) =>
           runFailureSummary(
-            row === undefined
-              ? undefined
-              : { class: row.failure_class, code: row.failure_code, message: row.failure_message },
+            row === undefined ? undefined : { class: row.failure_class, code: row.failure_code },
           ),
         ),
       );
+
+    const findRun = (threadId: string, runId: string) =>
+      sql<ScheduledTaskRunUpdate>`
+        SELECT
+          run_id AS id,
+          thread_id AS threadId,
+          json_extract(payload_json, '$.userMessageId') AS userMessageId,
+          status,
+          json_extract(payload_json, '$.startedAt') AS startedAt,
+          json_extract(payload_json, '$.restartContinuationOfRunId') AS restartContinuationOfRunId
+        FROM orchestration_v2_projection_runs
+        WHERE run_id = ${runId} AND thread_id = ${threadId}
+      `.pipe(
+        NodeSqliteClient.readOnly,
+        Effect.map(([row]) => row),
+      );
+
+    const isDispatchRun = (run: ScheduledTaskRunUpdate) =>
+      typeof run.userMessageId === "string" &&
+      run.userMessageId.startsWith(DISPATCH_MESSAGE_PREFIX);
 
     const recordRunOutcome: ScheduledTaskService["Service"]["recordRunOutcome"] = Effect.fn(
       "ScheduledTaskService.recordRunOutcome",
     )(
       function* (run) {
         const outcome = RUN_OUTCOMES.get(run.status);
-        if (outcome === undefined || !run.userMessageId.startsWith(DISPATCH_MESSAGE_PREFIX)) return;
+        if (outcome === undefined) return;
+        // A queued run cancelled before it started was promoted to a steer or dropped; its prompt
+        // did not end here.
+        if (run.status === "cancelled" && run.startedAt == null) return;
+        // A restart continuation carries its own message; follow it back to the dispatched run.
+        let dispatched = run;
+        for (let hops = 0; !isDispatchRun(dispatched); hops += 1) {
+          const sourceId = dispatched.restartContinuationOfRunId;
+          if (sourceId == null || hops >= MAX_CONTINUATION_HOPS) return;
+          const source = yield* findRun(run.threadId, sourceId);
+          if (source === undefined) return;
+          dispatched = source;
+        }
+        // Null compares unequal, so only a continuation may replace an earlier interruption.
+        const replaceable = dispatched === run ? null : "interrupted";
         const rows = yield* sql<DispatchRow>`
-          SELECT task_id, last_run_at, last_run_webhook_delivery_id
+          SELECT task_id, last_run_at, last_run_webhook_delivery_id, last_run_thread_id
           FROM scheduled_tasks
-          WHERE last_run_at IS NOT NULL AND last_run_outcome IS NULL
-            AND substr(${run.userMessageId}, 1, length(${DISPATCH_MESSAGE_PREFIX} || task_id || ':'))
+          WHERE last_run_at IS NOT NULL
+            AND (last_run_outcome IS NULL OR last_run_outcome = ${replaceable})
+            AND substr(${dispatched.userMessageId}, 1, length(${DISPATCH_MESSAGE_PREFIX} || task_id || ':'))
               = ${DISPATCH_MESSAGE_PREFIX} || task_id || ':'
         `.pipe(NodeSqliteClient.readOnly);
         // Only the latest dispatch's message matches; older runs ending late are ignored.
         const row = rows.find((candidate) =>
-          latestDispatchMessageIds(candidate).includes(run.userMessageId),
+          latestDispatchMessageIds(candidate).includes(dispatched.userMessageId),
         );
         if (row === undefined) return;
         const error = outcome === "failed" ? yield* runFailure(run) : null;
-        // First terminal status wins, so repeats and a later rollback leave it alone.
+        // First terminal status wins, except that a continuation's result replaces the
+        // interruption of the run a restart cancelled.
         const updated = yield* sql<{ task_id: string }>`
           UPDATE scheduled_tasks
           SET last_run_outcome = ${outcome},
@@ -852,7 +886,7 @@ export const layer = Layer.effect(
           WHERE task_id = ${row.task_id}
             AND last_run_at = ${row.last_run_at}
             AND last_run_webhook_delivery_id IS ${row.last_run_webhook_delivery_id}
-            AND last_run_outcome IS NULL
+            AND (last_run_outcome IS NULL OR last_run_outcome = ${replaceable})
           RETURNING task_id
         `;
         if (updated.length > 0) yield* notifyChanged;
@@ -869,27 +903,40 @@ export const layer = Layer.effect(
     );
 
     // Catch-up for runs that ended while the server was down or before the follower started.
+    // Reads only the dispatch's thread through its index; rows without a stored thread are skipped.
     const reconcileRunOutcomes = Effect.fn("ScheduledTaskService.reconcileRunOutcomes")(
       function* () {
         const rows = yield* sql<DispatchRow>`
-          SELECT task_id, last_run_at, last_run_webhook_delivery_id
+          SELECT task_id, last_run_at, last_run_webhook_delivery_id, last_run_thread_id
           FROM scheduled_tasks
-          WHERE last_run_at IS NOT NULL AND last_run_outcome IS NULL
+          WHERE last_run_at IS NOT NULL AND last_run_thread_id IS NOT NULL
+            AND (last_run_outcome IS NULL OR last_run_outcome = 'interrupted')
         `.pipe(NodeSqliteClient.readOnly);
-        const messageIds = rows.flatMap(latestDispatchMessageIds);
-        if (messageIds.length === 0) return;
-        const runs = yield* sql<ScheduledTaskRunUpdate>`
-          SELECT
-            run_id AS id,
-            thread_id AS threadId,
-            json_extract(payload_json, '$.userMessageId') AS userMessageId,
-            status
-          FROM orchestration_v2_projection_runs
-          WHERE status IN ${sql.in([...RUN_OUTCOMES.keys()])}
-            AND json_extract(payload_json, '$.userMessageId') IN ${sql.in(messageIds)}
-          ORDER BY completed_at ASC, ordinal ASC
-        `.pipe(NodeSqliteClient.readOnly);
-        yield* Effect.forEach(runs, recordRunOutcome, { discard: true });
+        yield* Effect.forEach(
+          rows,
+          (row) =>
+            Effect.gen(function* () {
+              const messageIds = latestDispatchMessageIds(row);
+              if (messageIds.length === 0 || row.last_run_thread_id === null) return;
+              const runs = yield* sql<ScheduledTaskRunUpdate>`
+                SELECT
+                  run_id AS id,
+                  thread_id AS threadId,
+                  json_extract(payload_json, '$.userMessageId') AS userMessageId,
+                  status,
+                  json_extract(payload_json, '$.startedAt') AS startedAt,
+                  json_extract(payload_json, '$.restartContinuationOfRunId') AS restartContinuationOfRunId
+                FROM orchestration_v2_projection_runs
+                WHERE thread_id = ${row.last_run_thread_id}
+                  AND status IN ${sql.in([...RUN_OUTCOMES.keys()])}
+                  AND (json_extract(payload_json, '$.userMessageId') IN ${sql.in(messageIds)}
+                    OR json_extract(payload_json, '$.restartContinuationOfRunId') IS NOT NULL)
+                ORDER BY completed_at ASC, ordinal ASC
+              `.pipe(NodeSqliteClient.readOnly);
+              yield* Effect.forEach(runs, recordRunOutcome, { discard: true });
+            }),
+          { discard: true },
+        );
       },
     );
 
@@ -1120,6 +1167,7 @@ export const layer = Layer.effect(
             nextRunAtIso: completed.nextRunAt,
             status: lastRunStatus,
             error: lastRunError,
+            threadId,
             startedAtIso,
           });
           if (webhook === undefined) yield* completion;

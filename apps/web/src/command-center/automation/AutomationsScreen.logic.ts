@@ -247,10 +247,11 @@ export function scheduledTaskHealth(task: ScheduledTaskRunFields): RecurringHeal
     case "failed":
       return "failing";
     case "running":
-    case "started":
       return "running";
     case "completed":
       return "ok";
+    // Started with no outcome yet may never get one (deleted thread, steered prompt); stay neutral.
+    case "started":
     case "interrupted":
     case "never":
       return "idle";

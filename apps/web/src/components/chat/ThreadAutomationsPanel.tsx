@@ -36,7 +36,7 @@ import {
 const STATUS_DOT_CLASS: Record<ScheduledTaskLastRunResult, string> = {
   never: "bg-muted-foreground/40",
   running: "bg-sky-500",
-  started: "bg-sky-500",
+  started: "bg-muted-foreground/40",
   completed: "bg-emerald-500",
   failed: "bg-destructive",
   interrupted: "bg-muted-foreground/40",
