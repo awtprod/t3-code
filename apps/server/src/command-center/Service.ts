@@ -3665,7 +3665,7 @@ export const layer = Layer.effect(
           resolved_at = ${now}
         WHERE id = ${row.id} AND status = 'pending'
       `;
-      yield* sql`
+      const closedItem = yield* sql<{ readonly id: string }>`
         UPDATE command_center_items
         SET status = 'done', updated_at = ${now},
           metadata_json = ${stringify({
@@ -3675,6 +3675,7 @@ export const layer = Layer.effect(
             ...(row.repositoryRef === null ? {} : { repositoryId: row.repositoryRef }),
           })}
         WHERE id = ${`memory-review:${row.id}`} AND status = 'review'
+        RETURNING id
       `;
       yield* appendAudit({
         eventId: `memory-review:${row.id}:${nextStatus}`,
@@ -3689,19 +3690,21 @@ export const layer = Layer.effect(
         },
         occurredAt: now,
       });
-      yield* appendAudit({
-        eventId: `memory-review:${row.id}:item-done`,
-        actorKind,
-        action: "cc.items.changed",
-        spaceId: row.spaceId,
-        payload: {
-          itemId: `memory-review:${row.id}`,
-          change: "updated",
-          kind: "decision",
-          status: "done",
-        },
-        occurredAt: now,
-      });
+      if (closedItem.length > 0) {
+        yield* appendAudit({
+          eventId: `memory-review:${row.id}:item-done`,
+          actorKind,
+          action: "cc.items.changed",
+          spaceId: row.spaceId,
+          payload: {
+            itemId: `memory-review:${row.id}`,
+            change: "updated",
+            kind: "decision",
+            status: "done",
+          },
+          occurredAt: now,
+        });
+      }
       return true;
     });
 
@@ -3726,11 +3729,8 @@ export const layer = Layer.effect(
         WHERE id = ${targetId}
         LIMIT 1
       `)[0];
-      if (target === undefined) {
-        return yield* invalid(`The contradicted Memory '${targetId}' does not exist.`);
-      }
-      if (target.spaceId !== input.spaceId) {
-        return yield* invalid(`The contradicted Memory '${targetId}' belongs to another Space.`);
+      if (target === undefined || target.spaceId !== input.spaceId) {
+        return yield* invalid(`The contradicted Memory '${targetId}' was not found in this Space.`);
       }
       if ((target.repositoryRef ?? undefined) !== input.repositoryId) {
         return yield* invalid(

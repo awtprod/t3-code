@@ -26,6 +26,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 
 import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 import { resolveGoogleDraftAttachmentPaths } from "./AutomationRuns.ts";
@@ -3023,9 +3024,9 @@ it.effect("a Space agent correction stores nothing when its target cannot be ret
     const before = yield* readMemoryStatuses;
 
     const cases = [
-      { target: "missing-fact", message: "does not exist" },
+      { target: "missing-fact", message: "was not found in this Space" },
       { target: "studio-candidate", message: "is candidate, not approved" },
-      { target: "other-space-fact", message: "belongs to another Space" },
+      { target: "other-space-fact", message: "was not found in this Space" },
       { target: "repository-fact", message: "different repository scope" },
       { target: "correction", message: "cannot contradict itself" },
     ];
@@ -3063,6 +3064,68 @@ it.effect("a Space agent correction stores nothing when its target cannot be ret
     expect(blocked).toMatchObject({ reason: "persistence" });
     expect(yield* readMemoryStatuses).toEqual(before);
     expect(yield* countMemoryExpiredAudits("studio-fact")).toBe(0);
+  }).pipe(Effect.provide(makeTestLayer(withStudioAgent(loadedConfig)))),
+);
+
+const approveReviewedMemory = (requestId: string) =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    yield* service.proposeMemory(
+      decodeProposal({
+        requestId,
+        spaceId: studioSpace.id,
+        kind: "fact",
+        content: `Reviewed fact ${requestId}.`,
+        confidence: 0.6,
+      }),
+    );
+    yield* service.reviewMemory(
+      decodeMemoryReview({ memoryId: requestId, spaceId: studioSpace.id, decision: "approve" }),
+    );
+    yield* TestClock.adjust("1 minute");
+  });
+const readItemDoneAudits = (memoryId: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    return yield* sql<{ readonly actorKind: string }>`
+      SELECT actor_kind AS "actorKind" FROM command_center_audit_events
+      WHERE event_id = ${`memory-review:${memoryId}:item-done`}
+    `;
+  });
+
+it.effect("expires a Memory approved through review at a later time", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    yield* approveReviewedMemory("reviewed-fact");
+    const expired = yield* service.reviewMemory(
+      decodeMemoryReview({
+        memoryId: "reviewed-fact",
+        spaceId: studioSpace.id,
+        decision: "expire",
+      }),
+    );
+    expect(expired.status).toBe("expired");
+    expect(yield* readItemDoneAudits("reviewed-fact")).toEqual([{ actorKind: "user" }]);
+  }).pipe(Effect.provide(makeTestLayer())),
+);
+
+it.effect("a Space agent correction retires a Memory approved through review", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    yield* approveReviewedMemory("reviewed-fact");
+    yield* service.rememberFromSpaceAgent(
+      decodeAgentCorrection({
+        requestId: "reviewed-fact-correction",
+        content: "The corrected reviewed fact.",
+        contradictionOf: "reviewed-fact",
+      }),
+      agentMemorySource,
+    );
+    expect(yield* readMemoryStatuses).toEqual([
+      { id: "reviewed-fact", status: "expired" },
+      { id: "reviewed-fact-correction", status: "approved" },
+    ]);
+    expect(yield* readItemDoneAudits("reviewed-fact")).toEqual([{ actorKind: "user" }]);
   }).pipe(Effect.provide(makeTestLayer(withStudioAgent(loadedConfig)))),
 );
 
