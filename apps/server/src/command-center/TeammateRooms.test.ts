@@ -2,6 +2,9 @@ import { Space } from "@command-center/core";
 import * as Schema from "effect/Schema";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -20,6 +23,7 @@ import { CommandCenterService } from "./Service.ts";
 import { SpaceAgent } from "./SpaceAgent.ts";
 import {
   ThreadManagementService,
+  ThreadManagementThreadNotFoundError,
   type ThreadManagementSendResult,
 } from "../orchestration-v2/ThreadManagementService.ts";
 import { ThreadLaunchService } from "../orchestration-v2/ThreadLaunchService.ts";
@@ -225,6 +229,136 @@ describe("Teammate rooms", () => {
         ),
       ),
     ),
+  );
+  it.effect.each(["receipt", "admission", "send-success", "send-failure"] as const)(
+    "serves corrections during stalled %s and guards late drain results",
+    (stall) =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let held = false;
+        let sends = 0;
+        const pause = Effect.gen(function* () {
+          if (held) return;
+          held = true;
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+        });
+        const shell = {
+          id: ThreadId.make("ada-thread"),
+          projectId: ProjectId.make("project"),
+          deletedAt: null,
+          archivedAt: null,
+          runtimeMode: "auto",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+        } as OrchestrationV2ThreadShell;
+        const transport = Layer.mock(ThreadManagementService)({
+          hasReceipt: () => (stall === "receipt" ? pause : Effect.void).pipe(Effect.as(false)),
+          getThreadShell: () => Effect.succeed(shell),
+          sendToThread: () =>
+            Effect.gen(function* () {
+              sends++;
+              if (stall.startsWith("send")) yield* pause;
+              if (stall === "send-failure")
+                return yield* new ThreadManagementThreadNotFoundError({
+                  projectId: shell.projectId,
+                  threadId: shell.id,
+                });
+              return {
+                run: { id: RunId.make("late-run") },
+                delivery: "queued",
+              } as ThreadManagementSendResult;
+            }),
+        });
+        yield* Effect.gen(function* () {
+          yield* setup;
+          const sql = yield* SqlClient.SqlClient;
+          const rooms = yield* TeammateRooms;
+          yield* sql`INSERT INTO teammate_agents(id,space_id,name,job,enabled,role,thread_id,project_id,model_json) VALUES('ada','space','Ada','Work',1,'specialist','ada-thread','project','{"instanceId":"codex","model":"test"}')`;
+          yield* sql`INSERT INTO teammate_members(room_id,agent_id) VALUES('room','ada')`;
+          yield* rooms.request(owner, { ...post("stalled"), recipients: ["ada"] });
+          yield* rooms.request(
+            { kind: "agent", threadId: ThreadId.make("ada-thread") },
+            { ...post("source-before-removal"), causeSequence: 1 },
+          );
+          yield* sql`INSERT INTO orchestration_v2_projection_subagents(subagent_id,thread_id,parent_node_id,provider,origin,status,updated_at,payload_json) VALUES('task','main-thread','parent','codex','app_owned','completed','2026-11-15T00:00:00Z','{}')`;
+          yield* rooms.request(owner, {
+            operation: "link_work",
+            roomId: "room",
+            requestId: "link",
+            taskId: "task",
+          });
+          const first = yield* rooms.drain.pipe(Effect.forkChild({ startImmediately: true }));
+          yield* Effect.raceFirst(
+            Deferred.await(entered),
+            Fiber.join(first).pipe(Effect.andThen(Effect.die("drain finished before stall"))),
+          );
+          const second = yield* rooms.drain.pipe(Effect.forkChild({ startImmediately: true }));
+          const correction = yield* Effect.gen(function* () {
+            yield* rooms.request(owner, { operation: "read", roomId: "room", after: 0 });
+            yield* rooms.request(owner, { ...post("correction"), recipients: [] });
+            yield* rooms.request(owner, {
+              operation: "remove",
+              roomId: "room",
+              requestId: "remove",
+              agentId: "ada",
+            });
+            yield* rooms.request(owner, {
+              operation: "recruit",
+              roomId: "room",
+              requestId: "rejoin",
+              agentId: "ada",
+            });
+          }).pipe(
+            Effect.timeout("1 second"),
+            Effect.result,
+            Effect.forkChild({ startImmediately: true }),
+          );
+          yield* TestClock.adjust("1 second");
+          assert.strictEqual((yield* Fiber.join(correction))._tag, "Success");
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(first);
+          yield* Fiber.join(second);
+          assert.strictEqual(sends, stall.startsWith("send") ? 1 : 0);
+          const rows =
+            yield* sql`SELECT state,error,run_id FROM teammate_deliveries ORDER BY sequence`;
+          assert.deepStrictEqual(rows, [
+            {
+              state: stall === "send-success" ? "accepted" : "failed",
+              error: "membership removed",
+              run_id: stall === "send-success" ? "late-run" : null,
+            },
+            { state: "failed", error: "membership removed", run_id: null },
+          ]);
+          assert.strictEqual(
+            (yield* sql<{
+              n: number;
+            }>`SELECT COUNT(*) AS n FROM teammate_events WHERE kind='result'`)[0]?.n,
+            1,
+          );
+          assert.strictEqual(
+            (yield* sql<{
+              n: number;
+            }>`SELECT COUNT(*) AS n FROM teammate_members WHERE agent_id='ada'`)[0]?.n,
+            1,
+          );
+        }).pipe(
+          Effect.provide(
+            layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  dependencies,
+                  transport,
+                  Layer.mock(OrchestrationBridge)({
+                    admitThread: () => (stall === "admission" ? pause : Effect.void),
+                  }),
+                ),
+              ),
+              Layer.provideMerge(NodeSqliteClient.layerMemory()),
+            ),
+          ),
+        );
+      }),
   );
   it.effect("rejects spoofed and disabled authors and bounds delivery failure", () =>
     Effect.gen(function* () {

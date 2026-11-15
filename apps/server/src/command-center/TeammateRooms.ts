@@ -80,6 +80,7 @@ const make = Effect.gen(function* () {
   const launch = yield* Launch.ThreadLaunchService;
   const bridge = yield* Bridge.OrchestrationBridge;
   const lock = yield* Semaphore.make(1);
+  const drainLock = yield* Semaphore.make(1);
   const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
   const activeSpace = Effect.fn("TeammateRooms.activeSpace")(function* (spaceId: string) {
     const space = yield* spaces.getConfiguredSpace(spaceId);
@@ -392,17 +393,19 @@ const make = Effect.gen(function* () {
       FROM teammate_work w JOIN orchestration_v2_projection_subagents t ON t.subagent_id=w.task_id
       WHERE w.completed_sequence IS NULL AND t.status IN ('completed','failed','cancelled','interrupted') LIMIT 16`;
     for (const task of completed)
-      yield* sql.withTransaction(
-        Effect.gen(function* () {
-          const seq = yield* sql<{
-            sequence: number;
-          }>`UPDATE teammate_rooms SET sequence=sequence+1 WHERE id=${task.room_id} RETURNING sequence`;
-          const sequence = seq[0]!.sequence;
-          yield* sql`INSERT INTO teammate_events(room_id,sequence,author,kind,text,recipients_json,cause_sequence,root_sequence,created_at)
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const seq = yield* sql<{
+              sequence: number;
+            }>`UPDATE teammate_rooms SET sequence=sequence+1 WHERE id=${task.room_id} RETURNING sequence`;
+            const sequence = seq[0]!.sequence;
+            yield* sql`INSERT INTO teammate_events(room_id,sequence,author,kind,text,recipients_json,cause_sequence,root_sequence,created_at)
         VALUES(${task.room_id},${sequence},'system:delegation',${task.status === "completed" ? "result" : "failure"},${encodeJson(task)},'[]',NULL,${sequence},${timestamp})`;
-          yield* sql`UPDATE teammate_work SET completed_sequence=${sequence} WHERE room_id=${task.room_id} AND task_id=${task.task_id}`;
-        }),
-      );
+            yield* sql`UPDATE teammate_work SET completed_sequence=${sequence} WHERE room_id=${task.room_id} AND task_id=${task.task_id}`;
+          }),
+        )
+        .pipe(lock.withPermits(1));
     const pending = yield* sql<{
       room_id: string;
       sequence: number;
@@ -413,16 +416,22 @@ const make = Effect.gen(function* () {
       runtime_mode: string;
       interaction_mode: string;
     }>`SELECT room_id,sequence,agent_id,attempts,error,deadline,runtime_mode,interaction_mode FROM teammate_deliveries WHERE state='queued' AND next_attempt_at<=${timestamp} ORDER BY next_attempt_at LIMIT 16`;
-    for (const delivery of pending) {
+    for (const pendingDelivery of pending) {
+      let delivery = pendingDelivery;
       const { room_id: roomId, sequence, agent_id: agentId } = delivery;
       const key = `room-delivery:${yield* hash(`${roomId}:${sequence}:${agentId}`)}`;
       const accepted = yield* threads.hasReceipt(CommandId.make(key));
+      const current = yield* sql<
+        typeof pendingDelivery
+      >`SELECT room_id,sequence,agent_id,attempts,error,deadline,runtime_mode,interaction_mode FROM teammate_deliveries WHERE room_id=${roomId} AND sequence=${sequence} AND agent_id=${agentId} AND state='queued'`;
+      if (!current[0]) continue;
+      delivery = current[0];
       if (!accepted && delivery.error === "membership removed") {
         yield* sql`UPDATE teammate_deliveries SET state='failed' WHERE room_id=${roomId} AND sequence=${sequence} AND agent_id=${agentId}`;
         continue;
       }
       if (!accepted && (delivery.attempts >= 3 || delivery.deadline <= timestamp)) {
-        yield* sql`UPDATE teammate_deliveries SET state='failed',error='delivery budget exhausted' WHERE room_id=${roomId} AND sequence=${sequence} AND agent_id=${agentId}`;
+        yield* sql`UPDATE teammate_deliveries SET state='failed',error=CASE WHEN error='membership removed' THEN error ELSE 'delivery budget exhausted' END WHERE room_id=${roomId} AND sequence=${sequence} AND agent_id=${agentId}`;
         continue;
       }
       yield* sql`UPDATE teammate_deliveries SET attempts=attempts+1 WHERE room_id=${roomId} AND sequence=${sequence} AND agent_id=${agentId}`;
@@ -465,6 +474,10 @@ const make = Effect.gen(function* () {
               return yield* new RoomError({ reason: "forbidden" });
           }
         }
+        // Removal during admission remains authoritative even if the member has rejoined.
+        const claim =
+          yield* sql`SELECT 1 FROM teammate_deliveries WHERE room_id=${roomId} AND sequence=${sequence} AND agent_id=${agentId} AND state='queued' AND attempts=${delivery.attempts + 1} AND (${Number(accepted)} OR error IS NULL OR error<>'membership removed')`;
+        if (!claim.length) return yield* new RoomError({ reason: "forbidden" });
         return yield* threads
           .sendToThread({
             projectId: shell.projectId,
@@ -490,11 +503,11 @@ const make = Effect.gen(function* () {
           );
       }).pipe(Effect.timeout("15 seconds"), Effect.result);
       if (dispatched._tag === "Success")
-        yield* sql`UPDATE teammate_deliveries SET state='accepted',run_id=${dispatched.success.run.id},delivery=${dispatched.success.delivery} WHERE room_id=${roomId} AND sequence=${sequence} AND agent_id=${agentId}`;
+        yield* sql`UPDATE teammate_deliveries SET state='accepted',run_id=${dispatched.success.run.id},delivery=${dispatched.success.delivery} WHERE room_id=${roomId} AND sequence=${sequence} AND agent_id=${agentId} AND state='queued' AND attempts=${delivery.attempts + 1}`;
       else
-        yield* sql`UPDATE teammate_deliveries SET state=${delivery.attempts >= 3 ? "failed" : "queued"},error=${accepted ? "receipt reconciliation failed" : "dispatch failed"},next_attempt_at=${DateTime.formatIso(DateTime.add(DateTime.makeUnsafe(timestamp), { seconds: 30 }))} WHERE room_id=${roomId} AND sequence=${sequence} AND agent_id=${agentId}`;
+        yield* sql`UPDATE teammate_deliveries SET state=${delivery.attempts >= 3 ? "failed" : "queued"},error=CASE WHEN error='membership removed' THEN error ELSE ${accepted ? "receipt reconciliation failed" : "dispatch failed"} END,next_attempt_at=CASE WHEN error='membership removed' THEN ${timestamp} ELSE ${DateTime.formatIso(DateTime.add(DateTime.makeUnsafe(timestamp), { seconds: 30 }))} END WHERE room_id=${roomId} AND sequence=${sequence} AND agent_id=${agentId} AND state='queued' AND attempts=${delivery.attempts + 1}`;
     }
-  }).pipe(lock.withPermits(1), Effect.mapError(mapError));
+  }).pipe(drainLock.withPermits(1), Effect.mapError(mapError));
   return TeammateRooms.of({ request, drain });
 });
 export const layer = Layer.effect(TeammateRooms, make);
