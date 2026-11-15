@@ -1,3 +1,5 @@
+import { TeammateToolkit } from "./toolkits/teammates/tools.ts";
+import * as TeammateHandlers from "./toolkits/teammates/handlers.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -1222,6 +1224,7 @@ export const layerTools = Layer.mergeAll(
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,
+  toolkitRegistration(TeammateToolkit, TeammateHandlers.layer),
   layerCommandCenterToolkit,
   layerSupabaseToolkit,
   layerDeviceToolkit,

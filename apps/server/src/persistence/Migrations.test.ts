@@ -231,6 +231,7 @@ describe("released migration ids", () => {
         [113, "WaitingLinkRequestIndex"],
         [114, "CommandCenterKnowledge"],
         [115, "CommandCenterConversations"],
+        [116, "TeammateRooms"],
       ],
     );
   });

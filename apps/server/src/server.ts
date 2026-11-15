@@ -1,3 +1,6 @@
+import * as Schedule from "effect/Schedule";
+import * as TeammateRoomHttp from "./command-center/TeammateRoomHttp.ts";
+import * as TeammateRooms from "./command-center/TeammateRooms.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Random from "effect/Random";
@@ -954,7 +957,24 @@ const layerInstagramRunner = InstagramPublish.runnerLayer.pipe(
   Layer.provideMerge(layerInstagramPublish),
 );
 
+const layerTeammateRooms = TeammateRooms.layer.pipe(
+  Layer.provide(layerCommandCenterBase),
+  Layer.provide(layerSpaceAgent),
+  Layer.provide(layerCommandCenterOrchestrationBridge),
+  Layer.provide(layerPersistence),
+);
 const layerCommandCenter = Layer.mergeAll(
+  layerTeammateRooms,
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const rooms = yield* TeammateRooms.TeammateRooms;
+      yield* rooms.drain.pipe(
+        Effect.catch(() => Effect.logWarning("Teammate delivery scan failed")),
+        Effect.repeat(Schedule.spaced("5 seconds")),
+        Effect.forkScoped,
+      );
+    }),
+  ).pipe(Layer.provide(layerTeammateRooms)),
   layerResponsibilities,
   layerInstagramRunner,
   layerAutomationScheduleInterpreter,
@@ -1198,6 +1218,7 @@ const layerMakeRoutes = Layer.mergeAll(
     webhookHttpRouteLayer,
     PhoneWebhook.phoneWebhookHttpRouteLayer,
     conferenceRoutesLayer,
+    TeammateRoomHttp.layer,
     Ws.layer,
   ),
   McpHttpServer.layer.pipe(
