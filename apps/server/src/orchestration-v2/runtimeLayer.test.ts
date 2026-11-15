@@ -5598,6 +5598,47 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
   );
 });
 
+it.layer(Layer.fresh(layerTest))("stored event log head", (it) => {
+  it.effect("reports the newest stored sequence, after which nothing stored replays", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const createThread = (name: string) =>
+        orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`runtime-layer-log-head-${name}`),
+          threadId: ThreadId.make(`runtime-layer-log-head-${name}`),
+          projectId: ProjectId.make("runtime-layer-log-head-project"),
+          title: name,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        });
+
+      yield* createThread("first");
+      const stored = yield* eventSink
+        .readByCommandId({ commandId: CommandId.make("runtime-layer-log-head-first") })
+        .pipe(Stream.runCollect);
+      const head = yield* orchestrator.latestStoredEventSequence;
+      assert.isAbove(head, 0);
+      assert.equal(head, Math.max(...stored.map((event) => event.sequence)));
+
+      yield* createThread("second");
+      const next = yield* orchestrator
+        .streamStoredEventsFrom({ afterSequence: head })
+        .pipe(Stream.runHead);
+      assert.equal(
+        Option.getOrThrow(next).commandId,
+        CommandId.make("runtime-layer-log-head-second"),
+      );
+    }),
+  );
+});
+
 it.layer(layerSharedApplicationDataPlaneTest)("pending provider interruption", (it) => {
   it.effect("interrupts a pending provider start without launching provider work", () =>
     Effect.gen(function* () {

@@ -944,15 +944,11 @@ export const layer = Layer.effect(
       forkParked(
         Effect.gen(function* () {
           // Read the head first so updates committed during the catch-up are still streamed.
-          const [head] = yield* sql<{
-            readonly sequence: number | null;
-          }>`SELECT MAX(sequence) AS sequence FROM orchestration_v2_events`.pipe(
-            NodeSqliteClient.readOnly,
-          );
+          const head = yield* threadManagement.latestStoredEventSequence;
           yield* reconcileRunOutcomes();
           yield* Stream.runForEach(
             threadManagement.streamStoredEventsFrom({
-              afterSequence: head?.sequence ?? 0,
+              afterSequence: head,
               eventType: "run.updated",
             }),
             (stored) =>

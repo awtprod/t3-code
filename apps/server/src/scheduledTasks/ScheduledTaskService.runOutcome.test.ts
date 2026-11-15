@@ -26,6 +26,7 @@ import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
 const threadId = ThreadId.make("thread:outcome");
 const taskId = ScheduledTaskId.make("task:outcome");
+const eventLogHead = 41;
 
 const makeLayer = (
   sent: Ref.Ref<ReadonlyArray<MessageId>>,
@@ -39,6 +40,7 @@ const makeLayer = (
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           sendToThread: (input) =>
             Ref.update(sent, (ids) => [...ids, input.messageId]).pipe(Effect.as({} as never)),
+          latestStoredEventSequence: Effect.succeed(eventLogHead),
           streamStoredEventsFrom: (input) =>
             Stream.unwrap(
               Ref.set(followedFrom, input?.afterSequence).pipe(
@@ -246,13 +248,6 @@ it.effect("catches up on a run that ended before it followed, then follows new r
         retryable: true,
       });
 
-      yield* sql`INSERT INTO orchestration_v2_events ${sql.insert({
-        event_id: "event:1",
-        thread_id: threadId,
-        event_type: "run.updated",
-        occurred_at: "2026-11-02T09:00:05.000Z",
-        payload_json: "{}",
-      })}`;
       // Waits on the change notification, so the outcome write must publish one.
       const awaitTask = (outcome: string) =>
         service.subscribeList().pipe(
@@ -269,7 +264,7 @@ it.effect("catches up on a run that ended before it followed, then follows new r
 
       const next = yield* dispatch();
       yield* Queue.offer(events, {
-        sequence: 2,
+        sequence: eventLogHead + 1,
         event: {
           type: "run.updated",
           payload: { id: "run:2", threadId, userMessageId: next, status: "completed" },
@@ -278,7 +273,7 @@ it.effect("catches up on a run that ended before it followed, then follows new r
       const followed = yield* awaitTask("completed");
       assert.isNull(followed?.lastRunOutcomeError);
       // The stream resumes after the head read before catch-up, so nothing in between is lost.
-      assert.equal(yield* Ref.get(followedFrom), 1);
+      assert.equal(yield* Ref.get(followedFrom), eventLogHead);
     }).pipe(Effect.scoped),
   ),
 );

@@ -417,6 +417,8 @@ export interface OrchestratorV2Shape {
     readonly afterSequence?: number;
     readonly eventType?: OrchestrationV2DomainEvent["type"];
   }) => Stream.Stream<OrchestrationV2StoredEvent, OrchestratorV2Error>;
+  /** Newest sequence `streamStoredEventsFrom` can return (0 for an empty log). */
+  readonly latestStoredEventSequence: Effect.Effect<number, OrchestratorV2Error>;
   readonly streamDomainEvents: Stream.Stream<OrchestrationV2DomainEvent, OrchestratorV2Error>;
 }
 
@@ -13473,6 +13475,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       ),
+    latestStoredEventSequence: eventSink
+      .latestSequence()
+      .pipe(Effect.mapError((cause) => new OrchestratorDomainEventStreamError({ cause }))),
     // Start at the latest sequence; awareness needs no historical replay.
     streamDomainEvents: Stream.unwrap(
       eventSink

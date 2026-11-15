@@ -224,6 +224,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
     delegatedTaskResultPending: unused,
     streamStoredEvents: Stream.empty,
     streamStoredEventsFrom: () => Stream.empty,
+    latestStoredEventSequence: Effect.die("unused latestStoredEventSequence"),
     streamDomainEvents: options.domainEvents ?? Stream.empty,
   });
   const publications: Array<{
