@@ -23,10 +23,12 @@ class RoomCliError extends Schema.TaggedError<RoomCliError>()("RoomCliError", {
     "stdin-required",
     "json-required",
     "input-too-large",
+    "invalid-input",
     "server-not-running",
     "request-rejected",
   ]),
   status: Schema.optional(Schema.Number),
+  cause: Schema.optional(Schema.Defect()),
 }) {
   override readonly [Runtime.errorReported] = false;
   override get message() {
@@ -62,7 +64,9 @@ const runRequest = Effect.fn("cli.room.request")(function* (flags: {
     Effect.map((value) => value.text),
     Effect.timeout("10 seconds"),
   );
-  const request = yield* decodeRequest(input);
+  const request = yield* decodeRequest(input).pipe(
+    Effect.mapError((cause) => new RoomCliError({ reason: "invalid-input", cause })),
+  );
   const logLevel = yield* GlobalFlag.LogLevel;
   const config = yield* resolveCliAuthConfig(flags, logLevel);
   return yield* Effect.gen(function* () {
