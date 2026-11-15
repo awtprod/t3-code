@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as ByteSize from "effect/ByteSize";
 import * as NodePath from "node:path";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
 
 import type { ProviderDriverKind, RuntimeMode, ThreadId } from "@t3tools/contracts";
@@ -9,9 +10,11 @@ import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
-import type * as Path from "effect/Path";
+import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+
+import { withServerSettingsFileLock } from "../../serverSettingsFileLock.ts";
 
 import { trustedHostExecutablePath, unsafeHostGitConfigKey } from "../../vcs/HostGitSecurity.ts";
 
@@ -1243,6 +1246,251 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
     commonGitDir: canonicalCommonDir,
   } satisfies CommandCenterManagedGitMetadata;
 });
+
+const WorkspaceProvenance = Schema.Struct({
+  version: Schema.Literal(1),
+  workspace: Schema.String,
+  workspaceIdentity: Schema.String,
+  claim: Schema.String,
+  phase: Schema.Literals(["pending", "bound"]),
+  gitIdentity: Schema.NullOr(Schema.String),
+});
+const encodeWorkspaceProvenance = Schema.encodeEffect(Schema.fromJsonString(WorkspaceProvenance));
+const decodeWorkspaceProvenance = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(WorkspaceProvenance),
+  { onExcessProperty: "error" },
+);
+
+export class CommandCenterWorkspaceProvenanceError extends Schema.TaggedError<CommandCenterWorkspaceProvenanceError>()(
+  "CommandCenterWorkspaceProvenanceError",
+  { cause: Schema.optional(Schema.Defect()) },
+) {
+  override get message(): string {
+    return "Command Center could not verify the workspace's native Git placeholder provenance.";
+  }
+}
+
+const isWorkspaceProvenanceError = Schema.is(CommandCenterWorkspaceProvenanceError);
+
+export const prepareCommandCenterWorkspaceProvenance = Effect.fn(
+  "CommandCenterProviderIsolation.prepareWorkspaceProvenance",
+)(
+  function* (input: {
+    readonly cwd: string;
+    readonly stateDir: string;
+    readonly worktreesDir: string;
+    readonly fileSystem: FileSystem.FileSystem;
+    readonly path: Path.Path;
+    readonly crypto: Crypto.Crypto;
+  }) {
+    const { fileSystem: fs, path } = input;
+    const refuse = (cause?: unknown) =>
+      new CommandCenterWorkspaceProvenanceError(cause === undefined ? {} : { cause });
+    const cwd = path.resolve(input.cwd);
+    const dotGit = path.join(cwd, ".git");
+    const root = path.join(path.resolve(input.stateDir), "provider-workspace-provenance");
+    for (const writable of [cwd, path.resolve(input.worktreesDir)]) {
+      if (isWithinRoot(path, root, writable)) return yield* refuse();
+    }
+    const rejectSymlink = Effect.fn("WorkspaceProvenance.rejectSymlink")(function* (
+      target: string,
+    ) {
+      yield* fs.readLink(target).pipe(
+        Effect.flatMap(() => Effect.fail(refuse())),
+        Effect.catchTags({
+          PlatformError: (error) =>
+            isNotFound(error) || isNotSymlink(error) ? Effect.void : Effect.fail(error),
+        }),
+      );
+    });
+    const directoryIdentity = Effect.fn("WorkspaceProvenance.directoryIdentity")(function* (
+      target: string,
+      includeContents: boolean,
+    ) {
+      yield* rejectSymlink(target);
+      const info = yield* fs.stat(target);
+      if (
+        info.type !== "Directory" ||
+        Option.isNone(info.ino) ||
+        Option.isNone(info.birthtime) ||
+        Option.isNone(info.uid) ||
+        (includeContents && Option.isNone(info.mtime)) ||
+        (yield* fs.realPath(target)) !== target
+      )
+        return yield* refuse();
+      return [
+        info.dev,
+        info.ino.value,
+        info.birthtime.value.getTime(),
+        info.uid.value,
+        info.mode,
+        ...(includeContents ? [Option.getOrNull(info.mtime)?.getTime(), info.size] : []),
+      ].join(":");
+    });
+    const workspaceIdentity = yield* directoryIdentity(cwd, false);
+    yield* fs.makeDirectory(root, { recursive: true, mode: 0o700 });
+    const rootIdentity = yield* directoryIdentity(root, false);
+    const rootStat = yield* fs.stat(root);
+    if ((rootStat.mode & 0o077) !== 0) return yield* refuse();
+    const digest = Hex.encode(yield* input.crypto.digest("SHA-256", new TextEncoder().encode(cwd)));
+    const recordPath = path.join(root, `${digest}.json`);
+    const claim = yield* input.crypto.randomUUIDv4();
+    const validateRoots = Effect.fn("WorkspaceProvenance.validateRoots")(function* () {
+      if (
+        (yield* directoryIdentity(root, false)) !== rootIdentity ||
+        (yield* directoryIdentity(cwd, false)) !== workspaceIdentity
+      )
+        return yield* refuse();
+    });
+    const read = Effect.fn("WorkspaceProvenance.read")(function* () {
+      yield* validateRoots();
+      yield* rejectSymlink(recordPath);
+      if (!(yield* fs.exists(recordPath))) return null;
+      const before = yield* fs.stat(recordPath);
+      if (
+        before.type !== "File" ||
+        Option.getOrUndefined(before.nlink) !== 1n ||
+        Option.getOrUndefined(before.uid) !== Option.getOrUndefined(rootStat.uid) ||
+        (before.mode & 0o777) !== 0o600 ||
+        before.size > ByteSize.bytes(4096)
+      )
+        return yield* refuse();
+      const bytes = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const file = yield* fs.open(recordPath, { flag: "r" });
+          if (
+            !sameControlFileIdentity(
+              secureControlFileIdentity(before),
+              secureControlFileIdentity(yield* file.stat),
+            )
+          )
+            return yield* refuse();
+          return yield* file.readAlloc(4097);
+        }),
+      );
+      if (
+        Option.isNone(bytes) ||
+        bytes.value.length !== Number(before.size) ||
+        !sameControlFileIdentity(
+          secureControlFileIdentity(before),
+          secureControlFileIdentity(yield* fs.stat(recordPath)),
+        ) ||
+        (yield* fs.realPath(recordPath)) !== recordPath
+      )
+        return yield* refuse();
+      const text = yield* Effect.try(() =>
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes.value),
+      );
+      const record = yield* decodeWorkspaceProvenance(text);
+      if (
+        record.workspace !== cwd ||
+        record.workspaceIdentity !== workspaceIdentity ||
+        !/^[0-9a-f-]{36}$/u.test(record.claim) ||
+        (record.phase === "pending" && record.gitIdentity !== null)
+      )
+        return yield* refuse();
+      return record;
+    });
+    const gitIdentity = Effect.fn("WorkspaceProvenance.gitIdentity")(function* () {
+      yield* rejectSymlink(dotGit);
+      if (!(yield* fs.exists(dotGit))) return null;
+      const before = yield* directoryIdentity(dotGit, true);
+      const entry = yield* Effect.acquireUseRelease(
+        Effect.tryPromise(() => NodeFSP.opendir(dotGit)),
+        (dir) => Effect.tryPromise(() => dir.read()),
+        (dir) => Effect.promise(() => dir.close()),
+      );
+      if (entry !== null || (yield* directoryIdentity(dotGit, true)) !== before)
+        return yield* refuse();
+      return before;
+    });
+    const withLock = Effect.fn("WorkspaceProvenance.withLock")(
+      function* <A, E, R>(effect: Effect.Effect<A, E, R>) {
+        yield* validateRoots();
+        const lockPath = `${recordPath}.lock.sqlite`;
+        yield* rejectSymlink(lockPath);
+        if (yield* fs.exists(lockPath)) {
+          const info = yield* fs.stat(lockPath);
+          if (info.type !== "File" || Option.getOrUndefined(info.nlink) !== 1n)
+            return yield* refuse();
+        }
+        return yield* withServerSettingsFileLock(recordPath, effect).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+        );
+      },
+      Effect.mapError((cause) => (isWorkspaceProvenanceError(cause) ? cause : refuse(cause))),
+    );
+    const persist = Effect.fn("WorkspaceProvenance.persist")(function* (
+      record: typeof WorkspaceProvenance.Type,
+      initial: boolean,
+    ) {
+      yield* validateRoots();
+      const encoded = yield* encodeWorkspaceProvenance(record);
+      if (initial) {
+        yield* fs.writeFileString(recordPath, encoded, { flag: "wx", mode: 0o600 });
+      } else {
+        const temporary = `${recordPath}.${claim}.tmp`;
+        yield* fs.writeFileString(temporary, encoded, { flag: "wx", mode: 0o600 });
+        yield* fs.rename(temporary, recordPath);
+      }
+    });
+    const classified = yield* withLock(
+      Effect.gen(function* () {
+        const record = yield* read();
+        yield* rejectSymlink(dotGit);
+        const present = yield* fs.exists(dotGit);
+        if (record === null && present) return "repository" as const;
+        if (record !== null) {
+          if (record.phase !== "bound" || (yield* gitIdentity()) !== record.gitIdentity)
+            return yield* refuse();
+          if (record.gitIdentity !== null) return "bound" as const;
+        }
+        // The durable claim precedes native startup; an interrupted claimant is never adopted.
+        yield* persist(
+          {
+            version: 1,
+            workspace: cwd,
+            workspaceIdentity,
+            claim,
+            phase: "pending",
+            gitIdentity: null,
+          },
+          record === null,
+        );
+        return "pending" as const;
+      }),
+    );
+    let bound = classified === "bound";
+    const verify = Effect.fn("WorkspaceProvenance.verify")(function* (bind: boolean) {
+      return yield* withLock(
+        Effect.gen(function* () {
+          if (classified === "repository") {
+            yield* validateRoots();
+            return true;
+          }
+          const record = yield* read();
+          if (record === null) return yield* refuse();
+          const actual = yield* gitIdentity();
+          if (record.phase === "pending") {
+            if (bound || classified !== "pending" || record.claim !== claim) return yield* refuse();
+            if (bind) {
+              yield* persist({ ...record, phase: "bound", gitIdentity: actual }, false);
+              bound = true;
+            }
+          } else if (record.gitIdentity !== actual) return yield* refuse();
+          return false;
+        }),
+      );
+    });
+    return { gitMetadataExpected: verify(false), bind: verify(true).pipe(Effect.asVoid) };
+  },
+  Effect.mapError((cause) =>
+    isWorkspaceProvenanceError(cause)
+      ? cause
+      : new CommandCenterWorkspaceProvenanceError({ cause }),
+  ),
+);
 
 export function commandCenterCodexIsolation(
   runtimeMode: RuntimeMode,

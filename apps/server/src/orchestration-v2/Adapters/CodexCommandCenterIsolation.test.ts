@@ -525,15 +525,25 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
         const requests: Array<{ readonly method: string; readonly cwd: unknown }> = [];
         const nativeThreadId = "acme-native-thread";
         const respond = (method: string, params: unknown) =>
-          Effect.sync(() => {
+          Effect.gen(function* () {
             requests.push({
               method,
               cwd: (params as { readonly cwd?: unknown } | undefined)?.cwd,
             });
             if (method === "command/exec") {
+              const script = (params as { command: string[] }).command.at(-1) ?? "";
+              if (
+                script.includes("git status") &&
+                (yield* fileSystem.exists(path.join(paths.workspace, ".git")))
+              ) {
+                return { exitCode: 128, stdout: "", stderr: "not a git repository" };
+              }
               return { exitCode: 0, stdout: "command-center-isolation-ok\n", stderr: "" };
             }
             if (method === "thread/start") {
+              yield* fileSystem.makeDirectory(path.join(paths.workspace, ".git"), {
+                recursive: true,
+              });
               return {
                 thread: {
                   id: nativeThreadId,
@@ -582,16 +592,31 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
         } as unknown as CodexClient.CodexAppServerClient["Service"];
 
         let metadataUnavailable = false;
+        const serverConfig = yield* makeReplayServerConfig("cc-codex-spawn-cwd").pipe(Effect.orDie);
         const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
           instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
           settings: { ...DEFAULT_SETTINGS, homePath: paths.sourceHome },
           environment: { PATH: "/usr/bin:/bin", HOME: paths.root },
           clientFactory: {
             open: (openInput) =>
-              Effect.sync(() => {
+              Effect.gen(function* () {
+                const recordsRoot = path.join(
+                  serverConfig.stateDir,
+                  "provider-workspace-provenance",
+                );
+                const records = yield* fileSystem.readDirectory(recordsRoot);
+                const record = JSON.parse(
+                  yield* fileSystem.readFileString(
+                    path.join(
+                      recordsRoot,
+                      records.find((file) => file.endsWith(".json"))!,
+                    ),
+                  ),
+                );
+                NodeAssert.equal(record.phase, opened.length === 0 ? "pending" : "bound");
                 opened.push(openInput);
                 return client;
-              }),
+              }).pipe(Effect.orDie),
           },
           crypto: yield* Crypto.Crypto,
           fileSystem: {
@@ -609,7 +634,7 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
                 : fileSystem.exists(target),
           },
           idAllocator: yield* IdAllocator.IdAllocatorV2,
-          serverConfig: yield* makeReplayServerConfig("cc-codex-spawn-cwd").pipe(Effect.orDie),
+          serverConfig,
           commandCenterPlatform: "linux",
           commandCenterArchitecture: "x64",
           commandCenterRuntimeCommandPath: paths.commandPath,
@@ -640,6 +665,17 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
           [{ method: "command/exec", cwd: paths.workspace }],
         );
 
+        const competing = yield* adapter
+          .openSession({
+            threadId: ThreadId.make("cc:interactive:competing"),
+            providerSessionId: ProviderSessionId.make("provider-session-cc-competing"),
+            modelSelection,
+            runtimePolicy: policy(paths.workspace),
+          })
+          .pipe(Effect.result);
+        NodeAssert.equal(competing._tag, "Failure");
+        NodeAssert.equal(opened.length, 1);
+
         const providerThread = yield* runtime.ensureThread({
           threadId,
           modelSelection,
@@ -649,6 +685,19 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
           requests.filter((request) => request.method === "thread/start"),
           [{ method: "thread/start", cwd: paths.workspace }],
         );
+
+        // Native thread startup leaves a protected mount target across session restarts.
+        const restarted = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-cc-restarted"),
+          modelSelection,
+          runtimePolicy: policy(paths.workspace),
+        });
+        yield* restarted.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy: policy(paths.workspace),
+        });
 
         // Reusing the session from another workspace never reaches Codex.
         const sent = requests.length;
@@ -682,7 +731,7 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
           })
           .pipe(Effect.result);
         NodeAssert.equal(blocked._tag, "Failure");
-        NodeAssert.equal(requests.filter((request) => request.method === "command/exec").length, 1);
+        NodeAssert.equal(requests.filter((request) => request.method === "command/exec").length, 2);
       }).pipe(
         Effect.scoped,
         Effect.provide(Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer)),
