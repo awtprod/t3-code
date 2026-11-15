@@ -37,6 +37,12 @@ export const RoomRequest = Schema.Union([
     causeSequence: Schema.optional(sequence),
   }),
   Schema.Struct({
+    operation: Schema.Literal("remove"),
+    roomId: id,
+    requestId: id,
+    agentId: reference,
+  }),
+  Schema.Struct({
     operation: Schema.Literal("recruit"),
     roomId: id,
     requestId: id,

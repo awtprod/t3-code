@@ -111,6 +111,121 @@ describe("Teammate rooms", () => {
         ),
       ),
   );
+  it.effect("removes retired members without reviving queued deliveries or losing authors", () =>
+    Effect.gen(function* () {
+      yield* setup;
+      const sql = yield* SqlClient.SqlClient;
+      const rooms = yield* TeammateRooms;
+      for (let i = 0; i < 7; i++) {
+        yield* sql`INSERT INTO teammate_agents(id,space_id,name,job,enabled,role,thread_id,project_id,model_json) VALUES(${`s${i}`},'space',${`Specialist ${i}`},'Work',1,'specialist',${`s-thread${i}`},'project','{}')`;
+        yield* sql`INSERT INTO teammate_members(room_id,agent_id) VALUES('room',${`s${i}`})`;
+      }
+      yield* sql`UPDATE teammate_agents SET model_json='{"instanceId":"codex","model":"test"}'`;
+      yield* sql`INSERT INTO teammate_agents(id,space_id,name,job,enabled,role,thread_id,project_id,model_json) VALUES('extra','space','Extra','Work',1,'specialist','extra-thread','project','{"instanceId":"codex","model":"test"}')`;
+      const recruit = {
+        operation: "recruit",
+        roomId: "room",
+        requestId: "extra",
+        agentId: "extra",
+      };
+      assert.strictEqual(
+        (yield* rooms.request(owner, recruit).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      yield* rooms.request(owner, { ...post("target"), recipients: ["s0"] });
+      const caller = { kind: "agent", threadId: ThreadId.make("s-thread0") } as const;
+      yield* rooms.request(caller, { ...post("source"), causeSequence: 1 });
+      const remove = { operation: "remove", roomId: "room", requestId: "remove", agentId: "s0" };
+      assert.strictEqual(
+        (yield* rooms.request(caller, remove).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      assert.strictEqual(
+        (yield* rooms.request(owner, { ...remove, agentId: "main:space" }).pipe(Effect.result))
+          ._tag,
+        "Failure",
+      );
+      yield* sql`UPDATE teammate_agents SET enabled=0 WHERE id='s0'`;
+      yield* sql`INSERT INTO command_center_spaces(id) VALUES('other')`;
+      yield* sql`INSERT INTO teammate_rooms(id,space_id,title) VALUES('other-room','other','Other')`;
+      assert.strictEqual(
+        (yield* rooms.request(owner, { ...remove, roomId: "other-room" }).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      const receipt = yield* rooms.request(owner, remove);
+      assert.deepStrictEqual(yield* rooms.request(owner, remove), receipt);
+      assert.strictEqual(
+        (yield* rooms.request(owner, { ...remove, agentId: "s1" }).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      assert.strictEqual(
+        (yield* sql<{ n: number }>`SELECT COUNT(*) AS n FROM teammate_members`)[0]?.n,
+        7,
+      );
+      assert.strictEqual(
+        (yield* rooms
+          .request(caller, { operation: "read", roomId: "room", after: 0 })
+          .pipe(Effect.result))._tag,
+        "Failure",
+      );
+      yield* rooms.request(owner, recruit);
+      assert.strictEqual(
+        (yield* sql<{ n: number }>`SELECT COUNT(*) AS n FROM teammate_members`)[0]?.n,
+        8,
+      );
+      yield* rooms.request(owner, { ...remove, requestId: "remove-extra", agentId: "extra" });
+      // Rejoining cannot revive delivery or reply authority from before removal.
+      yield* sql`UPDATE teammate_agents SET enabled=1 WHERE id='s0'`;
+      assert.strictEqual(
+        (yield* rooms
+          .request(caller, { operation: "read", roomId: "room", after: 0 })
+          .pipe(Effect.result))._tag,
+        "Failure",
+      );
+      yield* rooms.request(owner, { ...recruit, requestId: "rejoin", agentId: "s0" });
+      assert.strictEqual(
+        (yield* rooms.request(caller, { ...post("stale"), causeSequence: 1 }).pipe(Effect.result))
+          ._tag,
+        "Failure",
+      );
+      yield* rooms.drain;
+      assert.deepStrictEqual(
+        yield* sql`SELECT state,error FROM teammate_deliveries ORDER BY sequence`,
+        [
+          { state: "failed", error: "membership removed" },
+          { state: "failed", error: "membership removed" },
+        ],
+      );
+      const history = yield* rooms.request(owner, { operation: "read", roomId: "room", after: 0 });
+      assert.include(JSON.stringify(history), '"author_name":"Specialist 0"');
+      assert.strictEqual(
+        (yield* sql<{ n: number }>`SELECT COUNT(*) AS n FROM teammate_events`)[0]?.n,
+        6,
+      );
+    }).pipe(
+      Effect.provide(
+        layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              dependencies,
+              Layer.mock(OrchestrationBridge)({ admitThread: () => Effect.void }),
+              Layer.mock(ThreadManagementService)({
+                hasReceipt: () => Effect.succeed(false),
+                getThreadShell: () =>
+                  Effect.succeed({
+                    id: ThreadId.make("main-thread"),
+                    projectId: ProjectId.make("project"),
+                    deletedAt: null,
+                    archivedAt: null,
+                  } as OrchestrationV2ThreadShell),
+              }),
+            ),
+          ),
+          Layer.provideMerge(NodeSqliteClient.layerMemory()),
+        ),
+      ),
+    ),
+  );
   it.effect("rejects spoofed and disabled authors and bounds delivery failure", () =>
     Effect.gen(function* () {
       yield* setup;
@@ -166,6 +281,13 @@ describe("Teammate rooms", () => {
         sendToThread: (input) =>
           Effect.sync(() => {
             calls++;
+            if (calls === 1)
+              assert.include(
+                input.text,
+                "Route implementation to approved specialists with cc_room recruit/post",
+              );
+            if (calls === 1) assert.notInclude(input.text, "Use delegate_task for implementation");
+            else assert.include(input.text, "only within your existing orchestration grants");
             assert.match(String(input.commandId), /^room-delivery:/);
             assert.strictEqual(String(input.commandId), String(input.messageId));
             return {
@@ -186,6 +308,22 @@ describe("Teammate rooms", () => {
         assert.deepStrictEqual(yield* sql`SELECT state,run_id FROM teammate_deliveries`, [
           { state: "accepted", run_id: "accepted-run" },
         ]);
+        yield* sql`INSERT INTO teammate_agents(id,space_id,name,job,enabled,role,thread_id,project_id,model_json) VALUES('ada','space','Ada','Work',1,'specialist','ada-thread','project','{}')`;
+        yield* sql`INSERT INTO teammate_members(room_id,agent_id) VALUES('room','ada')`;
+        yield* rooms.request(owner, { ...post("ada"), recipients: ["ada"] });
+        yield* rooms.request(owner, {
+          operation: "remove",
+          roomId: "room",
+          requestId: "remove-ada",
+          agentId: "ada",
+        });
+        yield* rooms.drain;
+        assert.strictEqual(calls, 2);
+        assert.deepStrictEqual(
+          yield* sql`SELECT state,run_id FROM teammate_deliveries WHERE agent_id='ada'`,
+          [{ state: "accepted", run_id: "accepted-run" }],
+        );
+        assert.deepStrictEqual(yield* sql`SELECT * FROM teammate_members WHERE agent_id='ada'`, []);
       }).pipe(
         Effect.provide(
           layer.pipe(
