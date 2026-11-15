@@ -143,6 +143,7 @@ export function isCommandCenterIsolationProbeAccepted(
 export function buildCommandCenterIsolationProbeScript(
   writable: boolean,
   blockedNetworkPort?: number,
+  gitMetadataExpected = true,
 ): string {
   const workspaceCheck = writable
     ? [
@@ -173,13 +174,23 @@ export function buildCommandCenterIsolationProbeScript(
     ...(blockedNetworkPort === undefined
       ? []
       : [`if (: > /dev/tcp/127.0.0.1/${blockedNetworkPort}) 2>/dev/null; then`, "  exit 79", "fi"]),
-    "if test -e .git; then",
+    ...(gitMetadataExpected ? ["test -e .git || exit 78"] : []),
+    "if test -e .git || test -L .git; then",
     "  test ! -w .git || exit 75",
-    "  /usr/bin/git status --porcelain=v1 >/dev/null",
-    "  git_dir=$(/usr/bin/git rev-parse --git-dir 2>/dev/null || true)",
-    '  test -z "$git_dir" || test ! -w "$git_dir" || exit 76',
-    "  common_git_dir=$(/usr/bin/git rev-parse --git-common-dir 2>/dev/null || true)",
-    '  test -z "$common_git_dir" || test ! -w "$common_git_dir" || exit 77',
+    ...(gitMetadataExpected
+      ? [
+          "  /usr/bin/git status --porcelain=v1 >/dev/null",
+          "  git_dir=$(/usr/bin/git rev-parse --git-dir 2>/dev/null || true)",
+          '  test -z "$git_dir" || test ! -w "$git_dir" || exit 76',
+          "  common_git_dir=$(/usr/bin/git rev-parse --git-common-dir 2>/dev/null || true)",
+          '  test -z "$common_git_dir" || test ! -w "$common_git_dir" || exit 77',
+        ]
+      : [
+          // Codex mounts an empty read-only .git placeholder even in non-repository workspaces.
+          "  test -d .git && test ! -L .git || exit 78",
+          "  git_entries=$(/usr/bin/find .git -mindepth 1 -maxdepth 1 -printf x -quit) || exit 78",
+          '  test -z "$git_entries" || exit 78',
+        ]),
     "fi",
     ...workspaceCheck,
     `printf '${COMMAND_CENTER_ISOLATION_PROBE_SUCCESS}\\n'`,
@@ -330,6 +341,7 @@ export const verifyCommandCenterCodexIsolation = Effect.fn("CodexCommandCenterIs
     readonly cwd: string;
     readonly permissionProfile: string;
     readonly platform: NodeJS.Platform;
+    readonly gitMetadataExpected?: boolean;
   }) {
     const writable = input.permissionProfile === COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE;
     if (!writable && input.permissionProfile !== COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE) {
@@ -362,7 +374,11 @@ export const verifyCommandCenterCodexIsolation = Effect.fn("CodexCommandCenterIs
               : [
                   "/usr/bin/bash",
                   "-c",
-                  buildCommandCenterIsolationProbeScript(writable, networkProbe.port),
+                  buildCommandCenterIsolationProbeScript(
+                    writable,
+                    networkProbe.port,
+                    input.gitMetadataExpected,
+                  ),
                 ];
         return yield* input.client
           .request("command/exec", {

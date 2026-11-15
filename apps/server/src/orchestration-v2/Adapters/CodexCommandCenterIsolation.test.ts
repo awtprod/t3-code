@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
 import {
@@ -123,6 +124,11 @@ describe("Command Center native sandbox admission", () => {
     const linux = buildCommandCenterIsolationProbeScript(true);
     const darwin = buildCommandCenterDarwinIsolationProbeScript(true);
     const windows = buildCommandCenterWindowsIsolationProbeScript(false);
+    const nonRepository = buildCommandCenterIsolationProbeScript(true, undefined, false);
+    NodeAssert.match(nonRepository, /git_entries=/u);
+    NodeAssert.doesNotMatch(nonRepository, /git status/u);
+    NodeAssert.match(linux, /git status/u);
+    NodeAssert.match(linux, /test -e .git \|\| exit 78/u);
     NodeAssert.doesNotMatch(linux, /\/proc\//u);
     NodeAssert.match(linux, /CC_PROVIDER_ISOLATION_SENTINEL/u);
     NodeAssert.match(linux, /T3_MCP_BEARER_TOKEN/u);
@@ -209,6 +215,22 @@ describe("Command Center live isolation probe", () => {
       NodeAssert.equal(error._tag, "CodexCommandCenterIsolationProbeError");
       if (error._tag === "CodexCommandCenterIsolationProbeError") {
         NodeAssert.equal(error.exitCode, 70);
+      }
+
+      for (const exitCode of [70, 71, 73, 74, 75, 76, 77, 78, 79, 80, 128]) {
+        for (const permissionProfile of [
+          COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE,
+          COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE,
+        ]) {
+          const rejected = yield* verifyCommandCenterCodexIsolation({
+            client: probeClient({ exitCode, stdout: "" }).client,
+            cwd: "/workspace",
+            permissionProfile,
+            platform: "linux",
+            gitMetadataExpected: false,
+          }).pipe(Effect.result);
+          NodeAssert.equal(rejected._tag, "Failure");
+        }
       }
 
       // A read-only profile that could write is refused even with a success marker.
@@ -559,6 +581,7 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
           awaitTermination: Effect.never,
         } as unknown as CodexClient.CodexAppServerClient["Service"];
 
+        let metadataUnavailable = false;
         const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
           instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
           settings: { ...DEFAULT_SETTINGS, homePath: paths.sourceHome },
@@ -571,7 +594,20 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
               }),
           },
           crypto: yield* Crypto.Crypto,
-          fileSystem,
+          fileSystem: {
+            ...fileSystem,
+            exists: (target) =>
+              metadataUnavailable && target === path.join(paths.workspace, ".git")
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "exists",
+                      pathOrDescriptor: target,
+                    }),
+                  )
+                : fileSystem.exists(target),
+          },
           idAllocator: yield* IdAllocator.IdAllocatorV2,
           serverConfig: yield* makeReplayServerConfig("cc-codex-spawn-cwd").pipe(Effect.orDie),
           commandCenterPlatform: "linux",
@@ -636,6 +672,17 @@ it.layer(NodeServices.layer)("Command Center isolated Codex launch", (it) => {
           "CodexCommandCenterSessionRefusedError",
         );
         NodeAssert.equal(requests.length, sent);
+        metadataUnavailable = true;
+        const blocked = yield* adapter
+          .openSession({
+            threadId: ThreadId.make("cc:interactive:metadata-unavailable"),
+            providerSessionId: ProviderSessionId.make("provider-session-metadata-unavailable"),
+            modelSelection,
+            runtimePolicy: policy(paths.workspace),
+          })
+          .pipe(Effect.result);
+        NodeAssert.equal(blocked._tag, "Failure");
+        NodeAssert.equal(requests.filter((request) => request.method === "command/exec").length, 1);
       }).pipe(
         Effect.scoped,
         Effect.provide(Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer)),
