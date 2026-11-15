@@ -1383,6 +1383,22 @@ export function codexThreadRuntimeParams(input: {
               http_headers: {
                 Authorization: mcpSession.authorizationHeader,
               },
+              // Only the app-issued endpoint receives these overrides; handlers still authorize
+              // every call. Shell execution approvals and other MCP servers are unchanged.
+              tools: {
+                cc_room: {
+                  approval_mode:
+                    mcpSession.capabilities?.has("orchestration") ||
+                    mcpSession.capabilities?.has("cc.items.write")
+                      ? "approve"
+                      : "prompt",
+                },
+                delegate_task: {
+                  approval_mode: mcpSession.capabilities?.has("orchestration")
+                    ? "approve"
+                    : "prompt",
+                },
+              },
             },
           }),
     },

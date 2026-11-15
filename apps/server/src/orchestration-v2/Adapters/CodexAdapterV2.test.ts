@@ -252,6 +252,49 @@ describe("CodexAdapterV2 runtime policy", () => {
 
 // Fork: Command Center launch behavior (upstream pruned the surrounding spawn tests).
 describe("CodexAdapterV2 Command Center launch", () => {
+  it("limits native MCP approval to granted tools on the app-issued server", () => {
+    for (const [capabilities, room, delegate] of [
+      [undefined, "prompt", "prompt"],
+      [[], "prompt", "prompt"],
+      [["cc.items.read"], "prompt", "prompt"],
+      [["cc.items.write"], "approve", "prompt"],
+      [["orchestration"], "approve", "approve"],
+      [["preview", "cc.phone.call"], "prompt", "prompt"],
+    ] as const) {
+      const { config } = CodexAdapterV2.codexThreadRuntimeParams({
+        mcpSession: {
+          environmentId: EnvironmentId.make("environment-mcp"),
+          threadId: ThreadId.make("cc:teammate:test"),
+          providerSessionId: "session-mcp",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer test-token",
+          browserToolsAvailable: false,
+          ...(capabilities === undefined ? {} : { capabilities: new Set(capabilities) }),
+        },
+      });
+      assert.deepEqual(config["mcp_servers.t3-code"], {
+        url: "http://127.0.0.1:43123/mcp",
+        tool_timeout_sec: 3_900,
+        http_headers: { Authorization: "Bearer test-token" },
+        tools: {
+          cc_room: { approval_mode: room },
+          delegate_task: { approval_mode: delegate },
+        },
+      });
+      assert.deepEqual(
+        Object.keys(config).filter((key) => key.startsWith("mcp_servers")),
+        ["mcp_servers.t3-code"],
+      );
+      assert.notProperty(config, "approval_policy");
+      assert.notProperty(config, "sandbox_mode");
+    }
+    assert.notProperty(
+      CodexAdapterV2.codexThreadRuntimeParams({ mcpSession: undefined }).config,
+      "mcp_servers.t3-code",
+    );
+  });
+
   it("points subagents of a manager-model (Astra) thread at the worker model", () => {
     const params = (model: string) =>
       CodexAdapterV2.codexThreadRuntimeParams({ mcpSession: undefined, modelSelection: { model } })
@@ -1535,6 +1578,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               url: "http://127.0.0.1:43123/mcp",
               tool_timeout_sec: 3_900,
               http_headers: { Authorization: "Bearer secret-codex-token" },
+              tools: {
+                cc_room: { approval_mode: "prompt" },
+                delegate_task: { approval_mode: "prompt" },
+              },
             },
           },
         },
