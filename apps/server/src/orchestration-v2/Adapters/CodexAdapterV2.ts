@@ -1798,6 +1798,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             cwd,
             permissionProfile: launch.permissionProfile,
             platform: launch.platform,
+            gitMetadataExpected: yield* fileSystem.exists(pathService.join(cwd, ".git")),
           });
         });
         const commandCenterProfileFor = (
