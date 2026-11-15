@@ -382,10 +382,29 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
         writableRoots: [root],
       } as const;
       const isolated = yield* prepareCommandCenterCodexHome(input);
-      yield* writeFile(path.join(isolated.homePath, "config.toml"), "[mcp_servers.ambient]\n");
-
-      const error = yield* prepareCommandCenterCodexHome(input).pipe(Effect.flip);
-      NodeAssert.match(error.issue, /refuses an isolated Codex home containing 'config\.toml'/u);
+      const configPath = path.join(isolated.homePath, "config.toml");
+      const trust = `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`;
+      for (const contents of [
+        "[mcp_servers.ambient]\n",
+        `${trust}\n[hooks]\n`,
+        `${trust}\nmodel = "ambient"\n`,
+        `${trust}\n${trust}`,
+        '[projects."relative"]\ntrust_level = "trusted"\n',
+        trust.replace('"trusted"', '"untrusted"'),
+        " ".repeat(16_385),
+        "",
+      ]) {
+        yield* writeFile(configPath, contents);
+        const error = yield* prepareCommandCenterCodexHome(input).pipe(Effect.flip);
+        NodeAssert.match(error.issue, /refuses an isolated Codex home containing 'config\.toml'/u);
+      }
+      yield* writeFile(configPath, trust);
+      const alias = path.join(root, "config-alias");
+      yield* fileSystem.link(configPath, alias);
+      yield* prepareCommandCenterCodexHome(input).pipe(Effect.flip);
+      yield* fileSystem.remove(configPath);
+      yield* fileSystem.symlink(alias, configPath);
+      yield* prepareCommandCenterCodexHome(input).pipe(Effect.flip);
     }),
   );
 
@@ -422,8 +441,24 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
       );
       yield* writeFile(path.join(isolated.homePath, "marketplaces", "openai-curated.json"), "{}\n");
 
+      yield* writeFile(
+        path.join(isolated.homePath, "config.toml"),
+        `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`,
+      );
+
       const reused = yield* prepareCommandCenterCodexHome(input);
       NodeAssert.equal(reused.homePath, isolated.homePath);
+      const isolation = commandCenterCodexIsolation(
+        "auto",
+        undefined,
+        NodeProcess.execPath,
+        reused,
+      );
+      NodeAssert.ok(
+        isolation?.appServerArgs.includes(
+          `projects={${JSON.stringify(root)}={trust_level="untrusted"}}`,
+        ),
+      );
 
       // config.toml still fails closed even alongside the tolerated plugin cache.
       yield* writeFile(path.join(isolated.homePath, "config.toml"), "[mcp_servers.ambient]\n");

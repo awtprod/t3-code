@@ -37,6 +37,7 @@ const COMMAND_CENTER_CODEX_DARWIN_RUNTIME_ALIASES = [
 ] as const;
 
 const MAX_LOCAL_GIT_CONFIG_BYTES = ByteSize.bytes(1024 * 1024);
+const decodeNativeTrustRoot = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.String));
 
 interface SecureControlFileIdentity {
   readonly type: FileSystem.File.Type;
@@ -251,6 +252,7 @@ export interface CommandCenterCodexHomeLayout {
   readonly xdgDataPath: string;
   readonly appDataPath: string;
   readonly localAppDataPath: string;
+  readonly untrustedProjectRoots?: ReadonlyArray<string>;
 }
 
 export interface PrepareCommandCenterCodexHomeInput {
@@ -607,15 +609,64 @@ export const prepareCommandCenterCodexHome = Effect.fn(
               ),
       }),
     );
-  // Fail closed only on `config.toml`: Codex never writes one, so its presence
-  // in a reused isolated home signals ambient-config injection. `plugins/`,
-  // `marketplaces` and `skills/` are Codex-written caches and inert (loading is
-  // disabled by the isolation args and the sandbox, verified before every turn).
-  for (const forbiddenEntry of ["config.toml"] as const) {
-    if (Option.isSome(yield* optionalStat(path.join(layout.homePath, forbiddenEntry)))) {
-      return yield* codexHomeError(
-        `Command Center refuses an isolated Codex home containing '${forbiddenEntry}'.`,
+  const untrustedProjectRoots: Array<string> = [];
+  const configPath = path.join(layout.homePath, "config.toml");
+  const configStat = yield* optionalStat(configPath);
+  if (Option.isSome(configStat)) {
+    const refuseConfig = () =>
+      codexHomeError("Command Center refuses an isolated Codex home containing 'config.toml'.");
+    const before = configStat.value;
+    const canonical = yield* fileSystem.realPath(configPath).pipe(Effect.mapError(refuseConfig));
+    if (
+      canonical !== configPath ||
+      before.type !== "File" ||
+      Option.getOrUndefined(before.nlink) !== 1n ||
+      before.size > ByteSize.bytes(16_384)
+    ) {
+      return yield* refuseConfig();
+    }
+    const bytes = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const file = yield* fileSystem.open(configPath, { flag: "r" });
+        if (
+          !sameControlFileIdentity(
+            secureControlFileIdentity(before),
+            secureControlFileIdentity(yield* file.stat),
+          )
+        ) {
+          return yield* refuseConfig();
+        }
+        return yield* file.readAlloc(16_385);
+      }),
+    ).pipe(Effect.mapError(refuseConfig));
+    const after = yield* fileSystem.stat(configPath).pipe(Effect.mapError(refuseConfig));
+    if (
+      Option.isNone(bytes) ||
+      bytes.value.length !== Number(before.size) ||
+      !sameControlFileIdentity(
+        secureControlFileIdentity(before),
+        secureControlFileIdentity(after),
+      ) ||
+      (yield* fileSystem.realPath(configPath).pipe(Effect.mapError(refuseConfig))) !== canonical
+    ) {
+      return yield* refuseConfig();
+    }
+    // Native thread/start writes this cache. Never let its trust entries enable project config.
+    const contents = new TextDecoder("utf-8", { fatal: true });
+    const text = yield* Effect.try({
+      try: () => contents.decode(bytes.value),
+      catch: refuseConfig,
+    });
+    for (const block of text.trim().split(/\r?\n\r?\n/u)) {
+      const match = /^\[projects\.("(?:[^"\\\r\n]|\\["\\])*")\]\r?\ntrust_level = "trusted"$/u.exec(
+        block,
       );
+      if (match === null || untrustedProjectRoots.length >= 16) return yield* refuseConfig();
+      const root = yield* decodeNativeTrustRoot(match[1]).pipe(Effect.mapError(refuseConfig));
+      if (!path.isAbsolute(root) || untrustedProjectRoots.includes(root)) {
+        return yield* refuseConfig();
+      }
+      untrustedProjectRoots.push(root);
     }
   }
 
@@ -864,7 +915,7 @@ export const prepareCommandCenterCodexHome = Effect.fn(
       ),
     );
 
-  return layout;
+  return { ...layout, untrustedProjectRoots };
 });
 
 /**
@@ -1197,7 +1248,10 @@ export function commandCenterCodexIsolation(
   runtimeMode: RuntimeMode,
   managedGitMetadata?: CommandCenterManagedGitMetadata,
   runtimeExecutablePath?: string,
-  codexHome?: Pick<CommandCenterCodexHomeLayout, "homePath" | "helperBinPath">,
+  codexHome?: Pick<
+    CommandCenterCodexHomeLayout,
+    "homePath" | "helperBinPath" | "untrustedProjectRoots"
+  >,
   platform: NodeJS.Platform = "linux",
 ): CommandCenterCodexIsolation | undefined {
   if (
@@ -1234,7 +1288,7 @@ export function commandCenterCodexIsolation(
       "-c",
       "marketplaces={}",
       "-c",
-      "projects={}",
+      `projects={${(codexHome.untrustedProjectRoots ?? []).map((root) => `${JSON.stringify(root)}={trust_level="untrusted"}`).join(",")}}`,
       "-c",
       "notify=[]",
       "-c",
