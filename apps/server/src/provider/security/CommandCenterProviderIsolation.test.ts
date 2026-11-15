@@ -887,6 +887,7 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
   );
 });
 
+// The production adapter invokes placeholder provenance only for Linux isolation.
 it.layer(NodeServices.layer)("Command Center workspace provenance", (it) => {
   const fixture = Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -916,7 +917,7 @@ it.layer(NodeServices.layer)("Command Center workspace provenance", (it) => {
     return { fs, path, cwd, root, stateDir, prepare, recordPath, dotGit: path.join(cwd, ".git") };
   });
 
-  it.effect(
+  it.effect.runIf(NodeProcess.platform === "linux")(
     "claims absence before startup, refuses competing or crashed claims and reuses bound identity",
     () =>
       Effect.gen(function* () {
@@ -946,7 +947,7 @@ it.layer(NodeServices.layer)("Command Center workspace provenance", (it) => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect(
+  it.effect.runIf(NodeProcess.platform === "linux")(
     "keeps unclassified metadata on strict repository checks and rejects changed provenance",
     () =>
       Effect.gen(function* () {
