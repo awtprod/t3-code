@@ -119,6 +119,7 @@ import {
 } from "../../provider/EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "../../provider/codexLaunchArgs.ts";
+import { prepareCommandCenterWorkspaceProvenance } from "../../provider/security/CommandCenterProviderIsolation.ts";
 import {
   type CommandCenterCodexLaunch,
   CodexCommandCenterSessionRefusedError,
@@ -1383,6 +1384,22 @@ export function codexThreadRuntimeParams(input: {
               http_headers: {
                 Authorization: mcpSession.authorizationHeader,
               },
+              // Only the app-issued endpoint receives these overrides; handlers still authorize
+              // every call. Shell execution approvals and other MCP servers are unchanged.
+              tools: {
+                cc_room: {
+                  approval_mode:
+                    mcpSession.capabilities?.has("orchestration") ||
+                    mcpSession.capabilities?.has("cc.items.write")
+                      ? "approve"
+                      : "prompt",
+                },
+                delegate_task: {
+                  approval_mode: mcpSession.capabilities?.has("orchestration")
+                    ? "approve"
+                    : "prompt",
+                },
+              },
             },
           }),
     },
@@ -1740,6 +1757,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ? {}
               : { runtimeCommandPath: adapterOptions.commandCenterRuntimeCommandPath }),
           });
+        const workspaceProvenance =
+          commandCenterLaunch?.platform === "linux"
+            ? yield* prepareCommandCenterWorkspaceProvenance({
+                cwd: commandCenterLaunch.cwd,
+                stateDir: serverConfig.stateDir,
+                worktreesDir: serverConfig.worktreesDir,
+                fileSystem,
+                path: pathService,
+                crypto,
+              })
+            : undefined;
         const isolationSentinel =
           commandCenterLaunch === undefined ? undefined : yield* crypto.randomUUIDv4();
         const client = yield* clientFactory.open({
@@ -1798,7 +1826,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             cwd,
             permissionProfile: launch.permissionProfile,
             platform: launch.platform,
-            gitMetadataExpected: yield* fileSystem.exists(pathService.join(cwd, ".git")),
+            gitMetadataExpected:
+              workspaceProvenance === undefined
+                ? yield* fileSystem.exists(pathService.join(cwd, ".git"))
+                : yield* workspaceProvenance.gitMetadataExpected,
           });
         });
         const commandCenterProfileFor = (
@@ -1836,6 +1867,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             params: CodexTurnStartParamsWithCollaborationMode,
           ) {
             const permissionProfile = yield* commandCenterProfileFor(launch, runtimeMode);
+            if (workspaceProvenance !== undefined) yield* workspaceProvenance.bind;
             const raw = yield* client.raw.request(
               "turn/start",
               commandCenterTurnStartParams(yield* withCommandCenterCwd(params), permissionProfile),
@@ -1859,7 +1891,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             );
             const mismatch = commandCenterPermissionProfileMismatch(permissionProfile, raw);
             if (mismatch !== undefined) return yield* mismatch;
-            return yield* decodeCodexThreadStartResponse(raw);
+            const response = yield* decodeCodexThreadStartResponse(raw);
+            if (workspaceProvenance !== undefined) yield* workspaceProvenance.bind;
+            return response;
           },
         );
         const additionalContextByThread = yield* Ref.make(
@@ -7083,6 +7117,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
                 Effect.flatMap(decodeCodexResumeMetadata),
               );
+              if (workspaceProvenance !== undefined) yield* workspaceProvenance.bind;
               return {
                 ...threadInput.providerThread,
                 providerSessionId: input.providerSessionId,
@@ -7926,6 +7961,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
+              if (workspaceProvenance !== undefined) yield* workspaceProvenance.bind;
               let forkedThread = response.thread;
               if (boundary.rollbackTurnCount > 0) {
                 const { historyMode } = yield* ensureInitialized.pipe(

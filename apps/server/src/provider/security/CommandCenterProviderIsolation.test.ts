@@ -19,6 +19,7 @@ import {
   commandCenterProviderPlatformIssue,
   isCommandCenterThreadId,
   prepareCommandCenterCodexHome,
+  prepareCommandCenterWorkspaceProvenance,
   resolveCommandCenterCodexRuntimeExecutable,
   resolveCommandCenterManagedGitMetadata,
 } from "./CommandCenterProviderIsolation.ts";
@@ -382,10 +383,29 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
         writableRoots: [root],
       } as const;
       const isolated = yield* prepareCommandCenterCodexHome(input);
-      yield* writeFile(path.join(isolated.homePath, "config.toml"), "[mcp_servers.ambient]\n");
-
-      const error = yield* prepareCommandCenterCodexHome(input).pipe(Effect.flip);
-      NodeAssert.match(error.issue, /refuses an isolated Codex home containing 'config\.toml'/u);
+      const configPath = path.join(isolated.homePath, "config.toml");
+      const trust = `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`;
+      for (const contents of [
+        "[mcp_servers.ambient]\n",
+        `${trust}\n[hooks]\n`,
+        `${trust}\nmodel = "ambient"\n`,
+        `${trust}\n${trust}`,
+        '[projects."relative"]\ntrust_level = "trusted"\n',
+        trust.replace('"trusted"', '"untrusted"'),
+        " ".repeat(16_385),
+        "",
+      ]) {
+        yield* writeFile(configPath, contents);
+        const error = yield* prepareCommandCenterCodexHome(input).pipe(Effect.flip);
+        NodeAssert.match(error.issue, /refuses an isolated Codex home containing 'config\.toml'/u);
+      }
+      yield* writeFile(configPath, trust);
+      const alias = path.join(root, "config-alias");
+      yield* fileSystem.link(configPath, alias);
+      yield* prepareCommandCenterCodexHome(input).pipe(Effect.flip);
+      yield* fileSystem.remove(configPath);
+      yield* fileSystem.symlink(alias, configPath);
+      yield* prepareCommandCenterCodexHome(input).pipe(Effect.flip);
     }),
   );
 
@@ -422,8 +442,24 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
       );
       yield* writeFile(path.join(isolated.homePath, "marketplaces", "openai-curated.json"), "{}\n");
 
+      yield* writeFile(
+        path.join(isolated.homePath, "config.toml"),
+        `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`,
+      );
+
       const reused = yield* prepareCommandCenterCodexHome(input);
       NodeAssert.equal(reused.homePath, isolated.homePath);
+      const isolation = commandCenterCodexIsolation(
+        "auto",
+        undefined,
+        NodeProcess.execPath,
+        reused,
+      );
+      NodeAssert.ok(
+        isolation?.appServerArgs.includes(
+          `projects={${JSON.stringify(root)}={trust_level="untrusted"}}`,
+        ),
+      );
 
       // config.toml still fails closed even alongside the tolerated plugin cache.
       yield* writeFile(path.join(isolated.homePath, "config.toml"), "[mcp_servers.ambient]\n");
@@ -848,5 +884,160 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
       }).pipe(Effect.flip);
       NodeAssert.match(error.issue, /outside its managed worktree directory/u);
     }),
+  );
+});
+
+// The production adapter invokes placeholder provenance only for Linux isolation.
+it.layer(NodeServices.layer)("Command Center workspace provenance", (it) => {
+  const fixture = Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const crypto = yield* Crypto.Crypto;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "cc-provenance-" });
+    const cwd = path.join(root, "workspace");
+    const stateDir = path.join(root, "state");
+    const worktreesDir = path.join(root, "worktrees");
+    yield* Effect.forEach([cwd, stateDir, worktreesDir], (dir) => fs.makeDirectory(dir));
+    const prepare = prepareCommandCenterWorkspaceProvenance({
+      cwd,
+      stateDir,
+      worktreesDir,
+      fileSystem: fs,
+      path,
+      crypto,
+    });
+    const recordPath = Effect.gen(function* () {
+      const directory = path.join(stateDir, "provider-workspace-provenance");
+      const files = yield* fs.readDirectory(directory);
+      return path.join(
+        directory,
+        files.find((file) => file.endsWith(".json"))!,
+      );
+    });
+    return { fs, path, cwd, root, stateDir, prepare, recordPath, dotGit: path.join(cwd, ".git") };
+  });
+
+  it.effect.runIf(NodeProcess.platform === "linux")(
+    "claims absence before startup, refuses competing or crashed claims and reuses bound identity",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const first = yield* f.prepare;
+        NodeAssert.equal(yield* first.gitMetadataExpected, false);
+        NodeAssert.equal((yield* f.prepare.pipe(Effect.result))._tag, "Failure");
+        yield* f.fs.makeDirectory(f.dotGit);
+        NodeAssert.equal((yield* f.prepare.pipe(Effect.result))._tag, "Failure");
+        yield* first.bind;
+        const record = yield* f.fs.readFileString(yield* f.recordPath);
+        const second = yield* f.prepare;
+        NodeAssert.equal(yield* second.gitMetadataExpected, false);
+        yield* second.bind;
+        NodeAssert.equal(yield* f.fs.readFileString(yield* f.recordPath), record);
+        yield* f.fs.writeFileString(f.path.join(f.dotGit, "config"), "corruption");
+        NodeAssert.equal((yield* first.bind.pipe(Effect.result))._tag, "Failure");
+        NodeAssert.equal((yield* second.gitMetadataExpected.pipe(Effect.result))._tag, "Failure");
+
+        const readOnly = yield* fixture;
+        const empty = yield* readOnly.prepare;
+        yield* empty.bind;
+        const writable = yield* readOnly.prepare;
+        yield* readOnly.fs.makeDirectory(readOnly.dotGit);
+        yield* writable.bind;
+        NodeAssert.equal(yield* writable.gitMetadataExpected, false);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.runIf(NodeProcess.platform === "linux")(
+    "keeps unclassified metadata on strict repository checks and rejects changed provenance",
+    () =>
+      Effect.gen(function* () {
+        for (const kind of ["empty", "repository", "worktree"]) {
+          const f = yield* fixture;
+          if (kind === "worktree")
+            yield* f.fs.writeFileString(f.dotGit, "gitdir: /managed/metadata");
+          else {
+            yield* f.fs.makeDirectory(f.dotGit);
+            if (kind === "repository")
+              yield* f.fs.writeFileString(f.path.join(f.dotGit, "HEAD"), "ref: refs/heads/dev");
+          }
+          const strict = yield* f.prepare;
+          NodeAssert.equal(yield* strict.gitMetadataExpected, true);
+        }
+        for (const mutation of [
+          "directory-replaced",
+          "workspace-replaced",
+          "workspace-symlink",
+          "nonempty",
+          "git-symlink",
+          "git-missing",
+          "record-missing",
+          "record-corrupt",
+          "record-symlink",
+          "record-hardlink",
+          "record-oversize",
+          "record-stale",
+          "record-mode",
+          "lock-symlink",
+          "state-inside-workspace",
+        ] as const) {
+          const f = yield* fixture;
+          const admitted = yield* f.prepare;
+          yield* f.fs.makeDirectory(f.dotGit);
+          yield* admitted.bind;
+          const record = yield* f.recordPath;
+          if (mutation === "directory-replaced") {
+            yield* f.fs.rename(f.dotGit, f.dotGit + ".original");
+            yield* f.fs.makeDirectory(f.dotGit);
+          } else if (mutation === "workspace-replaced" || mutation === "workspace-symlink") {
+            yield* f.fs.rename(f.cwd, f.cwd + ".original");
+            if (mutation === "workspace-symlink") yield* f.fs.symlink(f.cwd + ".original", f.cwd);
+            else yield* f.fs.makeDirectory(f.cwd);
+          } else if (mutation === "nonempty")
+            yield* f.fs.writeFileString(f.path.join(f.dotGit, "HEAD"), "bad");
+          else if (mutation === "git-symlink") {
+            yield* f.fs.rename(f.dotGit, f.dotGit + ".original");
+            yield* f.fs.symlink(f.dotGit + ".original", f.dotGit);
+          } else if (mutation === "git-missing")
+            yield* f.fs.rename(f.dotGit, f.dotGit + ".original");
+          else if (mutation === "record-missing") yield* f.fs.rename(record, record + ".original");
+          else if (mutation === "record-corrupt") yield* f.fs.writeFileString(record, "{}");
+          else if (mutation === "record-oversize")
+            yield* f.fs.writeFileString(record, "x".repeat(4097));
+          else if (mutation === "record-symlink") {
+            yield* f.fs.rename(record, record + ".original");
+            yield* f.fs.symlink(record + ".original", record);
+          } else if (mutation === "record-hardlink") yield* f.fs.link(record, record + ".alias");
+          else if (mutation === "record-mode") yield* f.fs.chmod(record, 0o666);
+          else if (mutation === "record-stale") {
+            const contents = JSON.parse(yield* f.fs.readFileString(record));
+            yield* f.fs.writeFileString(
+              record,
+              JSON.stringify({ ...contents, phase: "pending", gitIdentity: null }),
+            );
+          } else if (mutation === "lock-symlink") {
+            yield* f.fs.rename(record + ".lock.sqlite", record + ".original-lock");
+            yield* f.fs.symlink(record + ".original-lock", record + ".lock.sqlite");
+          } else {
+            const crypto = yield* Crypto.Crypto;
+            const result = yield* prepareCommandCenterWorkspaceProvenance({
+              cwd: f.cwd,
+              stateDir: f.cwd,
+              worktreesDir: f.path.join(f.root, "worktrees"),
+              fileSystem: f.fs,
+              path: f.path,
+              crypto,
+            }).pipe(Effect.result);
+            NodeAssert.equal(result._tag, "Failure", mutation);
+            continue;
+          }
+          NodeAssert.equal((yield* admitted.bind.pipe(Effect.result))._tag, "Failure", mutation);
+          const restarted = yield* f.prepare.pipe(Effect.result);
+          if (mutation === "record-missing") {
+            NodeAssert.equal(restarted._tag, "Success");
+            if (restarted._tag === "Success")
+              NodeAssert.equal(yield* restarted.success.gitMetadataExpected, true);
+          } else NodeAssert.equal(restarted._tag, "Failure", mutation);
+        }
+      }).pipe(Effect.scoped),
   );
 });

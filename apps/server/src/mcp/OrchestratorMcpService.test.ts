@@ -1467,7 +1467,7 @@ describe("OrchestratorMcpService provider resolution", () => {
     );
   });
 
-  it.effect("rejects delegation to a provider without a registered adapter", () =>
+  it.effect("rejects delegation without a grant or a registered provider adapter", () =>
     Effect.gen(function* () {
       const forkOnlyInstanceId = ProviderInstanceId.make("forkOnly");
       const forkShadow = yield* buildUnavailableProviderSnapshot({
@@ -1500,6 +1500,15 @@ describe("OrchestratorMcpService provider resolution", () => {
 
       yield* Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        for (const capabilities of [[], ["cc.items.write"]] as const) {
+          const denied = yield* service
+            .delegateTask(
+              { ...scope, capabilities: new Set(capabilities) },
+              { task: "Must not dispatch.", clientRequestId: "no-orchestration-grant" },
+            )
+            .pipe(Effect.flip);
+          assert.equal(denied.code, "capability_denied");
+        }
         const byInstance = yield* service
           .delegateTask(scope, {
             task: "Summarize the diff.",
