@@ -172,7 +172,7 @@ const unreleasedDeviceMessage = (
   [
     ...unreleased.map(
       (session) =>
-        `Device ${session.deviceId} left this thread, but agent-device ${session.outcome === "timed-out" ? "timed out ending" : "could not end"} its session${session.detail === undefined ? "" : ` (${session.detail})`}.`,
+        `Device ${session.deviceId} on host ${session.hostId} was closed, but agent-device ${session.outcome === "timed-out" ? "timed out ending" : "could not end"} its session${session.detail === undefined ? "" : ` (${session.detail})`}.`,
     ),
     "agent-device keeps its claim on a device when it cannot close the session's app, usually because the device is off or unreachable, so other sessions may get DEVICE_IN_USE until the claim goes.",
     "Calling device_close again will not release it, and rebooting the device may not either.",

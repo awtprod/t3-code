@@ -881,10 +881,6 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           (input.deviceId === undefined || session.deviceId === input.deviceId),
       );
       if (closing.length === 0) return { unreleased: [] };
-      const agentSessions = yield* Effect.forEach(closing, (session) =>
-        agentDeviceSession(session.threadId, session.hostId, session.deviceId),
-      ).pipe(Effect.provideService(Crypto.Crypto, crypto));
-      for (const session of agentSessions) unreleased.delete(session);
       // Powering off ends every session on the device, so all of them retire, and release, while it is on.
       const ending = (session: DeviceSession) =>
         closing.includes(session) ||
@@ -892,10 +888,29 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           closing.some(
             (closed) => closed.hostId === session.hostId && closed.deviceId === session.deviceId,
           ));
+      const endingSessions = state.sessions.filter(ending);
+      const agentSessions = yield* Effect.forEach(endingSessions, (session) =>
+        agentDeviceSession(session.threadId, session.hostId, session.deviceId),
+      ).pipe(Effect.provideService(Crypto.Crypto, crypto));
+      for (const session of agentSessions) unreleased.delete(session);
       yield* publish((current) => ({
         ...current,
         sessions: current.sessions.filter((session) => !ending(session)),
       }));
+      // The retirement above released these sessions under the launcher lock before returning.
+      const failures = endingSessions.flatMap((session, index) => {
+        const failure = unreleased.get(agentSessions[index]!);
+        if (failure?.outcome !== "failed" && failure?.outcome !== "timed-out") return [];
+        unreleased.delete(agentSessions[index]!);
+        return [
+          {
+            hostId: session.hostId,
+            deviceId: session.deviceId,
+            outcome: failure.outcome,
+            detail: failure.detail,
+          },
+        ];
+      });
       if (input.shutdown) {
         yield* Effect.forEach(
           closing,
@@ -903,22 +918,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           { discard: true },
         );
       }
-      // The retirement above released these sessions under the launcher lock before returning.
-      return {
-        unreleased: closing.flatMap((session, index) => {
-          const failure = unreleased.get(agentSessions[index]!);
-          if (failure?.outcome !== "failed" && failure?.outcome !== "timed-out") return [];
-          unreleased.delete(agentSessions[index]!);
-          return [
-            {
-              hostId: session.hostId,
-              deviceId: session.deviceId,
-              outcome: failure.outcome,
-              detail: failure.detail,
-            },
-          ];
-        }),
-      };
+      return { unreleased: failures };
     },
   );
 
@@ -1159,7 +1159,6 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
               return Option.none();
             const launcher = yield* launchers.bind({ session, targetArgs });
             boundLaunchers.set(session, launcher);
-            unreleased.delete(session);
             return Option.some(launcher);
           }),
         );

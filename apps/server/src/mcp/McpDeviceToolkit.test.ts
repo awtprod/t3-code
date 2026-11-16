@@ -615,7 +615,7 @@ describe("device targeting across hosts", () => {
           const result = yield* call("device_close", { deviceId: "emulator-5554" });
           expect(result.isError).toBe(true);
           expect(text(result)).toContain(
-            "Device emulator-5554 left this thread, but agent-device could not end its session (Error (COMMAND_FAILED): device offline).",
+            "Device emulator-5554 on host local was closed, but agent-device could not end its session (Error (COMMAND_FAILED): device offline).",
           );
           expect(text(result)).toContain("other sessions may get DEVICE_IN_USE");
           expect(text(result)).toContain("Calling device_close again will not release it");

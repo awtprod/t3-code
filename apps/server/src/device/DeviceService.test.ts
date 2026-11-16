@@ -1016,6 +1016,17 @@ it.effect("reports a close whose agent-device session did not end", () =>
     outcome = "closed";
     yield* openAndBind;
     expect(yield* service.close({ threadId })).toEqual({ unreleased: [] });
+
+    // A shutdown retires every thread's session on the device, so it reports each failed release.
+    outcome = "failed";
+    const otherThreadId = ThreadId.make("release-outcome-other");
+    yield* openAndBind;
+    yield* service.open({ threadId: otherThreadId, deviceId, platform: "ios" });
+    yield* service.agentLauncher({ ...target, threadId: otherThreadId, targetArgs: [] });
+    expect((yield* service.close({ threadId, shutdown: true })).unreleased).toMatchObject([
+      { deviceId, outcome: "failed" },
+      { deviceId, outcome: "failed" },
+    ]);
   }).pipe(Effect.provide(ServerSettings.layerTest({ enableDeviceSupport: true })), Effect.scoped),
 );
 
