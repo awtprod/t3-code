@@ -306,3 +306,18 @@ export const agentDeviceCloseOutcome = (result: {
       : result.stderr.includes("SESSION_NOT_FOUND")
         ? "no-session"
         : "failed";
+
+/** How ending one agent-device session went, with agent-device's last error line when it failed. */
+export interface AgentDeviceRelease {
+  readonly outcome: AgentDeviceCloseOutcome;
+  readonly detail?: string | undefined;
+}
+
+/** The last line agent-device wrote to stderr, shortened, which names why its close failed. */
+export const agentDeviceCloseDetail = (stderr: string): string | undefined => {
+  const line = stderr
+    .split("\n")
+    .map((part) => part.trim())
+    .findLast((part) => part.length > 0);
+  return line === undefined ? undefined : line.length > 200 ? `${line.slice(0, 199)}…` : line;
+};

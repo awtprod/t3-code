@@ -165,6 +165,20 @@ const pickDevice = Effect.fn("handlers.pickDevice")(function* (
 
 const toolError = (error: DeviceError | DeviceToolUnavailableError) => error;
 
+/** Why a closed device may still be claimed, for the agent that closed it to relay. */
+const unreleasedDeviceMessage = (
+  unreleased: ReadonlyArray<DeviceService.DeviceUnreleasedSession>,
+) =>
+  [
+    ...unreleased.map(
+      (session) =>
+        `Device ${session.deviceId} left this thread, but agent-device ${session.outcome === "timed-out" ? "timed out ending" : "could not end"} its session${session.detail === undefined ? "" : ` (${session.detail})`}.`,
+    ),
+    "agent-device keeps its claim on a device when it cannot close the session's app, usually because the device is off or unreachable, so other sessions may get DEVICE_IN_USE until the claim goes.",
+    "Calling device_close again will not release it, and rebooting the device may not either.",
+    "Tell the user the device may still be claimed. Do not remove or override the claim yourself.",
+  ].join(" ");
+
 const handlers = {
   device_list: McpToolAccess.readsAsCaller((input) =>
     Effect.gen(function* () {
@@ -314,12 +328,17 @@ const handlers = {
               .locateSession({ threadId: scope.thread.threadId, deviceId, hostId: input.hostId })
               .pipe(mapLocateErrors);
       const hostId = Option.isSome(open) ? open.value.hostId : input.hostId;
-      yield* devices.close({
+      const { unreleased } = yield* devices.close({
         threadId: scope.thread.threadId,
         ...(hostId === undefined ? {} : { hostId }),
         ...(deviceId === undefined ? {} : { deviceId }),
         ...(input.shutdown === undefined ? {} : { shutdown: input.shutdown }),
       });
+      if (unreleased.length > 0) {
+        return yield* new DeviceToolUnavailableError({
+          reason: unreleasedDeviceMessage(unreleased),
+        });
+      }
       return {};
     }).pipe(Effect.mapError(toolError)),
   ),
