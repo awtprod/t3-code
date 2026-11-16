@@ -3133,7 +3133,7 @@ export const layerWsRpc = (
           threadWorkspaceRoot(input.threadId).pipe(
             Effect.flatMap((workspaceRoot) => deviceService.open(input, { workspaceRoot })),
           ),
-        [WS_METHODS.deviceClose]: (input) => deviceService.close(input),
+        [WS_METHODS.deviceClose]: (input) => deviceService.close(input).pipe(Effect.asVoid),
         [WS_METHODS.deviceShutdown]: (input) => deviceService.shutdown(input),
         [WS_METHODS.deviceDetail]: (input) => deviceService.detail(input),
         [WS_METHODS.deviceAction]: (input) => deviceService.action(input),

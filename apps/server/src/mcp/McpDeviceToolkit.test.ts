@@ -133,7 +133,7 @@ const layerDeviceServiceMock = Layer.mock(DeviceService.DeviceService)({
         : Option.none(),
     ),
   screenshot: () => Effect.succeed({ device, png }),
-  close: () => Effect.void,
+  close: () => Effect.succeed({ unreleased: [] }),
   testHost: () => Effect.die("not used"),
   // As for an EAS device, agent-device knows the device by a different id than T3.
   agentTarget: () =>
@@ -380,6 +380,7 @@ describe("device targeting across hosts", () => {
       close: (input) =>
         Effect.sync(() => {
           closed.push({ hostId: input.hostId, deviceId: input.deviceId });
+          return { unreleased: [] };
         }),
       agentTarget: () =>
         Effect.succeed({
@@ -603,6 +604,35 @@ describe("device targeting across hosts", () => {
           { hostId: undefined, deviceId: "Pixel_9" },
         ]);
       }),
+    ),
+  );
+
+  it.effect("says a closed device may still be claimed when agent-device could not end it", () =>
+    run(
+      [session("local", "emulator-5554", "android")],
+      ({ call }) =>
+        Effect.gen(function* () {
+          const result = yield* call("device_close", { deviceId: "emulator-5554" });
+          expect(result.isError).toBe(true);
+          expect(text(result)).toContain(
+            "Device emulator-5554 on host local was closed, but agent-device could not end its session (Error (COMMAND_FAILED): device offline).",
+          );
+          expect(text(result)).toContain("other sessions may get DEVICE_IN_USE");
+          expect(text(result)).toContain("Calling device_close again will not release it");
+        }),
+      {
+        close: () =>
+          Effect.succeed({
+            unreleased: [
+              {
+                hostId: "local",
+                deviceId: DeviceId.make("emulator-5554"),
+                outcome: "failed" as const,
+                detail: "Error (COMMAND_FAILED): device offline",
+              },
+            ],
+          }),
+      },
     ),
   );
 });

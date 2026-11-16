@@ -38,7 +38,9 @@ import { resolveNodeExecutable, nodeRuntimeUnavailableMessage } from "@t3tools/s
 import * as Path from "effect/Path";
 import { ensureAgentDevice, ensureDeviceHub } from "./DeviceToolchain.ts";
 import {
+  agentDeviceCloseDetail,
   agentDeviceCloseOutcome,
+  type AgentDeviceRelease,
   bindAgentDeviceLauncher,
   ensureAgentDeviceShim,
   pruneAgentDeviceLaunchers,
@@ -190,7 +192,13 @@ export class DeviceService extends Context.Service<
       input: DeviceOpenInput,
       context?: DeviceHost.DeviceOpenContext,
     ) => Effect.Effect<DeviceSession, DeviceError>;
-    readonly close: (input: DeviceCloseInput) => Effect.Effect<void, DeviceError>;
+    /** Lists the closed sessions whose agent-device session may still claim the device. */
+    readonly close: (
+      input: DeviceCloseInput,
+    ) => Effect.Effect<
+      { readonly unreleased: ReadonlyArray<DeviceUnreleasedSession> },
+      DeviceError
+    >;
     readonly shutdown: (input: DeviceShutdownInput) => Effect.Effect<void, DeviceError>;
     readonly detail: (input: DeviceDetailInput) => Effect.Effect<DeviceDetail, DeviceError>;
     readonly action: (input: DeviceActionInput) => Effect.Effect<DeviceDetail, DeviceError>;
@@ -235,6 +243,14 @@ interface ServiceState {
   readonly state: DeviceServiceState;
 }
 
+/** A closed session whose agent-device session did not end, so agent-device may still claim the device. */
+export interface DeviceUnreleasedSession {
+  readonly hostId: DeviceHostId;
+  readonly deviceId: DeviceId;
+  readonly outcome: "failed" | "timed-out";
+  readonly detail?: string | undefined;
+}
+
 export interface AgentDeviceLaunchers {
   readonly bind: (input: {
     readonly session: string;
@@ -243,7 +259,7 @@ export interface AgentDeviceLaunchers {
   /** Removes every launcher whose session is not in `live`. */
   readonly prune: (live: ReadonlySet<string>) => Effect.Effect<void>;
   /** Ends the agent-device session behind a launcher, which releases its claim on the device. */
-  readonly release?: (launcher: string) => Effect.Effect<void>;
+  readonly release?: (launcher: string) => Effect.Effect<AgentDeviceRelease>;
 }
 
 export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* (
@@ -313,6 +329,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   const boundLaunchers = new Map<string, string>();
   /** Launchers on a session the host leases to every thread; the host ends it, not a retiring thread. */
   const hostSessionLaunchers = new Set<string>();
+  /** Releases that failed or timed out, by agent-device session, until a close reports them. */
+  const unreleased = new Map<string, AgentDeviceRelease>();
   // Binding and pruning read sessions under the lock, so neither acts on a session list the other has outdated.
   // A retired session's agent-device session ends before its launcher goes, and a reopen of the same
   // device waits for the lock, so the close cannot end the reopened session.
@@ -330,10 +348,20 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       const ending = retired.filter(([session]) => !hostSessionLaunchers.delete(session));
       const release = launchers.release;
       if (release)
-        yield* Effect.forEach(ending, ([, launcher]) => release(launcher), {
-          concurrency: "unbounded",
-          discard: true,
-        });
+        yield* Effect.forEach(
+          ending,
+          ([session, launcher]) =>
+            release(launcher).pipe(
+              Effect.tap((result) =>
+                Effect.sync(() =>
+                  result.outcome === "failed" || result.outcome === "timed-out"
+                    ? unreleased.set(session, result)
+                    : unreleased.delete(session),
+                ),
+              ),
+            ),
+          { concurrency: "unbounded", discard: true },
+        );
       yield* launchers.prune(live);
     }),
   );
@@ -852,7 +880,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           (input.hostId === undefined || session.hostId === input.hostId) &&
           (input.deviceId === undefined || session.deviceId === input.deviceId),
       );
-      if (closing.length === 0) return;
+      if (closing.length === 0) return { unreleased: [] };
       // Powering off ends every session on the device, so all of them retire, and release, while it is on.
       const ending = (session: DeviceSession) =>
         closing.includes(session) ||
@@ -860,10 +888,29 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           closing.some(
             (closed) => closed.hostId === session.hostId && closed.deviceId === session.deviceId,
           ));
+      const endingSessions = state.sessions.filter(ending);
+      const agentSessions = yield* Effect.forEach(endingSessions, (session) =>
+        agentDeviceSession(session.threadId, session.hostId, session.deviceId),
+      ).pipe(Effect.provideService(Crypto.Crypto, crypto));
+      for (const session of agentSessions) unreleased.delete(session);
       yield* publish((current) => ({
         ...current,
         sessions: current.sessions.filter((session) => !ending(session)),
       }));
+      // The retirement above released these sessions under the launcher lock before returning.
+      const failures = endingSessions.flatMap((session, index) => {
+        const failure = unreleased.get(agentSessions[index]!);
+        if (failure?.outcome !== "failed" && failure?.outcome !== "timed-out") return [];
+        unreleased.delete(agentSessions[index]!);
+        return [
+          {
+            hostId: session.hostId,
+            deviceId: session.deviceId,
+            outcome: failure.outcome,
+            detail: failure.detail,
+          },
+        ];
+      });
       if (input.shutdown) {
         yield* Effect.forEach(
           closing,
@@ -871,6 +918,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           { discard: true },
         );
       }
+      return { unreleased: failures };
     },
   );
 
@@ -1266,18 +1314,26 @@ export const make = Effect.gen(function* () {
         Effect.provideService(Path.Path, path),
         Effect.flatMap((result) => {
           const outcome = agentDeviceCloseOutcome(result);
+          const release: AgentDeviceRelease = {
+            outcome,
+            detail: agentDeviceCloseDetail(result.stderr),
+          };
           return outcome === "failed" || outcome === "timed-out"
             ? Effect.logWarning("Could not end the agent-device session", {
                 launcher,
                 outcome,
                 stderr: result.stderr.slice(-500),
-              })
-            : Effect.void;
+              }).pipe(Effect.as(release))
+            : Effect.succeed(release);
         }),
-        Effect.tapError((cause) =>
-          Effect.logWarning("Could not end the agent-device session", { launcher, cause }),
+        Effect.catch((cause) =>
+          Effect.logWarning("Could not end the agent-device session", { launcher, cause }).pipe(
+            Effect.as<AgentDeviceRelease>({
+              outcome: "failed",
+              detail: "agent-device could not be run.",
+            }),
+          ),
         ),
-        Effect.ignore,
       ),
   };
   const probeContext =

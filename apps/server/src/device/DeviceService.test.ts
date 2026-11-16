@@ -737,6 +737,7 @@ it.effect.each(["shutdown", "close"] as const)(
             Effect.sync(() => {
               released.push([launcher, launchers.has(launcher)]);
               releasedWhileBooted.push(booted);
+              return { outcome: "closed" as const };
             }),
         },
       ).pipe(Effect.provide(NodeCrypto.layer));
@@ -887,7 +888,11 @@ it.effect("leaves a session its host leases to every thread open when one thread
       {
         bind: ({ session }) => Effect.succeed(session),
         prune: () => Effect.void,
-        release: (launcher) => Effect.sync(() => void released.push(launcher)),
+        release: (launcher) =>
+          Effect.sync(() => {
+            released.push(launcher);
+            return { outcome: "closed" as const };
+          }),
       },
     ).pipe(Effect.provide(NodeCrypto.layer));
     const threads = [ThreadId.make("pool-a"), ThreadId.make("pool-b")];
@@ -906,6 +911,123 @@ it.effect("leaves a session its host leases to every thread open when one thread
     ),
     Effect.scoped,
   ),
+);
+
+it.effect("reports a close whose agent-device session did not end", () =>
+  Effect.gen(function* () {
+    const deviceId = DeviceId.make("44444444-4444-4444-4444-444444444444");
+    const http = HttpClient.make((request) =>
+      Effect.sync(() =>
+        new URL(request.url).pathname === "/api/devices"
+          ? HttpClientResponse.fromWeb(
+              request,
+              Response.json({
+                emulators: [],
+                simulators: [
+                  {
+                    id: deviceId,
+                    name: "iPhone",
+                    platform: "ios",
+                    version: "26",
+                    physical: false,
+                    booted: true,
+                  },
+                ],
+              }),
+            )
+          : HttpClientResponse.fromWeb(request, Response.json({ ok: true, id: deviceId })),
+      ),
+    );
+    const run = () => Effect.succeed({ code: 0, stdout: "", stderr: "" });
+    const ready: DeviceHost.DeviceHostReady = {
+      nodePath: process.execPath,
+      hub: { origin: "http://device.test" },
+      devices: makeDeviceHubOperations({
+        hostId: LOCAL_DEVICE_HOST_ID,
+        origin: "http://device.test",
+        http,
+        run,
+        androidAvailable: Effect.succeed(true),
+      }),
+      helpers: { serveSimAxSettings: null, serveSimCli: null },
+      run,
+    };
+    const host: DeviceHost.DeviceHost["Service"] = {
+      id: LOCAL_DEVICE_HOST_ID,
+      label: "This machine",
+      summary: Effect.succeed({
+        id: LOCAL_DEVICE_HOST_ID,
+        kind: "local",
+        label: "This machine",
+        platforms: [{ platform: "ios", available: true }],
+        hubInstalled: true,
+        agentDeviceInstalled: true,
+      }),
+      platformAvailability: (platform) => Effect.succeed({ platform, available: true }),
+      ensureReady: () => Effect.succeed(ready),
+      ensureAgentReady: () => Effect.die("Agent access is not used in this test"),
+      current: Effect.succeed(ready),
+      stopAgent: Effect.void,
+      stop: Effect.void,
+    };
+    let outcome: "closed" | "failed" | "timed-out" = "failed";
+    const service = yield* DeviceService.makeWithHosts(
+      new Map([[host.id, host]]),
+      undefined,
+      undefined,
+      undefined,
+      {
+        bind: ({ session }) => Effect.succeed(session),
+        prune: () => Effect.void,
+        release: () =>
+          Effect.succeed({
+            outcome,
+            ...(outcome === "failed" ? { detail: "Error (COMMAND_FAILED): device offline" } : {}),
+          }),
+      },
+    ).pipe(Effect.provide(NodeCrypto.layer));
+    const threadId = ThreadId.make("release-outcome");
+    const target = { threadId, hostId: LOCAL_DEVICE_HOST_ID, deviceId };
+    const openAndBind = Effect.gen(function* () {
+      yield* service.open({ threadId, deviceId, platform: "ios" });
+      yield* service.agentLauncher({ ...target, targetArgs: [] });
+    });
+
+    yield* openAndBind;
+    expect(yield* service.close({ threadId })).toEqual({
+      unreleased: [
+        {
+          hostId: LOCAL_DEVICE_HOST_ID,
+          deviceId,
+          outcome: "failed",
+          detail: "Error (COMMAND_FAILED): device offline",
+        },
+      ],
+    });
+    // Reported once: closing again finds nothing open.
+    expect(yield* service.close({ threadId })).toEqual({ unreleased: [] });
+
+    outcome = "timed-out";
+    yield* openAndBind;
+    expect((yield* service.close({ threadId })).unreleased).toMatchObject([
+      { deviceId, outcome: "timed-out" },
+    ]);
+
+    outcome = "closed";
+    yield* openAndBind;
+    expect(yield* service.close({ threadId })).toEqual({ unreleased: [] });
+
+    // A shutdown retires every thread's session on the device, so it reports each failed release.
+    outcome = "failed";
+    const otherThreadId = ThreadId.make("release-outcome-other");
+    yield* openAndBind;
+    yield* service.open({ threadId: otherThreadId, deviceId, platform: "ios" });
+    yield* service.agentLauncher({ ...target, threadId: otherThreadId, targetArgs: [] });
+    expect((yield* service.close({ threadId, shutdown: true })).unreleased).toMatchObject([
+      { deviceId, outcome: "failed" },
+      { deviceId, outcome: "failed" },
+    ]);
+  }).pipe(Effect.provide(ServerSettings.layerTest({ enableDeviceSupport: true })), Effect.scoped),
 );
 
 it.effect.each([
