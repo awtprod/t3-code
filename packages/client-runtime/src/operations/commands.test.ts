@@ -22,14 +22,17 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   AVAILABLE_CONNECTION_STATE,
   PrimaryConnectionTarget,
   type PreparedConnection,
+  type SupervisorConnectionState,
 } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as RpcSession from "../rpc/session.ts";
@@ -40,6 +43,7 @@ import {
   interruptThreadTurn,
   revertThreadCheckpoint,
   resumeThreadQueue,
+  settleThread,
   startThreadTurn,
 } from "./commands.ts";
 
@@ -57,6 +61,12 @@ const TARGET = new PrimaryConnectionTarget({
   httpBaseUrl: "https://environment.example.test",
   wsBaseUrl: "wss://environment.example.test",
 });
+
+const RECONNECTING: SupervisorConnectionState = {
+  ...AVAILABLE_CONNECTION_STATE,
+  desired: true,
+  phase: "connecting",
+};
 
 const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(function* (input: {
   readonly commands: OrchestrationV2Command[];
@@ -169,6 +179,52 @@ describe("V2 environment commands", () => {
       expect(commands).toEqual([
         { type: "thread.archive", commandId: "queued-command", threadId: "thread-1" },
       ]);
+    }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
+  it.effect("waits for a reconnect before sending settle or archive", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      const session = yield* SubscriptionRef.get(supervisor.session);
+      yield* SubscriptionRef.set(supervisor.state, RECONNECTING);
+      const threadId = ThreadId.make("thread-1");
+      for (const [type, run] of [
+        ["thread.settle", settleThread],
+        ["thread.archive", archiveThread],
+      ] as const) {
+        yield* SubscriptionRef.set(supervisor.session, Option.none());
+        const commandId = CommandId.make(type);
+        const dispatched = yield* run({ commandId, threadId }).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkChild({ startImmediately: true }),
+        );
+        expect(commands).not.toContainEqual({ type, commandId, threadId });
+        yield* SubscriptionRef.set(supervisor.session, session);
+        yield* Fiber.join(dispatched);
+        expect(commands.filter((command) => command.commandId === commandId)).toEqual([
+          { type, commandId, threadId },
+        ]);
+      }
+    }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
+  it.effect("fails without dispatching if the reconnect takes too long", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      yield* SubscriptionRef.set(supervisor.session, Option.none());
+      yield* SubscriptionRef.set(supervisor.state, RECONNECTING);
+      const dispatched = yield* archiveThread({ threadId: ThreadId.make("thread-1") }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.flip,
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* TestClock.adjust("5 seconds");
+      expect(yield* Fiber.join(dispatched)).toMatchObject({
+        _tag: "EnvironmentRpcUnavailableError",
+      });
+      expect(commands).toEqual([]);
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 
