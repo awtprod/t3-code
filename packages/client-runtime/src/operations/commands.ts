@@ -264,7 +264,9 @@ const allocateCommandId = Effect.fn("EnvironmentCommands.allocateCommandId")(fun
 });
 
 const dispatch = (command: OrchestrationV2Command) =>
-  request(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, command);
+  request(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, command, {
+    waitForReconnect: command.type === "thread.settle" || command.type === "thread.archive",
+  });
 
 const getProjection = (threadId: ThreadId) =>
   request(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, { threadId });

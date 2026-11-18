@@ -19,6 +19,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { RpcClientError } from "effect/rpc";
 
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import type { SupervisorConnectionState } from "../connection/model.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
 
@@ -132,22 +133,38 @@ export type EnvironmentRpcStreamFailure<TTag extends EnvironmentStreamRpcTag> =
     ? E
     : never;
 
-const currentSession = Effect.fn("EnvironmentRpc.currentSession")(function* () {
+const mayReconnect = ({ desired, network, phase }: SupervisorConnectionState) =>
+  desired &&
+  network !== "offline" &&
+  (phase === "connecting" || phase === "connected" || phase === "backoff");
+
+const currentSession = Effect.fn("EnvironmentRpc.currentSession")(function* (
+  waitForReconnect = false,
+) {
   const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-  return yield* SubscriptionRef.get(supervisor.session).pipe(
-    Effect.flatMap(
-      Option.match({
-        onNone: () =>
-          Effect.fail(
-            new EnvironmentRpcUnavailableError({
-              environmentId: supervisor.target.environmentId,
-              message: `${supervisor.target.label} is not connected.`,
-            }),
-          ),
-        onSome: Effect.succeed,
-      }),
-    ),
-  );
+  const session = yield* SubscriptionRef.get(supervisor.session);
+  if (Option.isSome(session)) return session.value;
+
+  if (waitForReconnect && mayReconnect(yield* SubscriptionRef.get(supervisor.state))) {
+    const ready = yield* Effect.raceFirst(
+      SubscriptionRef.changes(supervisor.session).pipe(
+        Stream.filter(Option.isSome),
+        Stream.runHead,
+        Effect.map(Option.flatten),
+      ),
+      SubscriptionRef.changes(supervisor.state).pipe(
+        Stream.filter((state) => !mayReconnect(state)),
+        Stream.runHead,
+        Effect.as(Option.none<RpcSession>()),
+      ),
+    ).pipe(Effect.timeoutOption("5 seconds"), Effect.map(Option.flatten));
+    if (Option.isSome(ready)) return ready.value;
+  }
+
+  return yield* new EnvironmentRpcUnavailableError({
+    environmentId: supervisor.target.environmentId,
+    message: `${supervisor.target.label} is not connected.`,
+  });
 });
 
 export const getInitialServerConfig = Effect.fn("EnvironmentRpc.getInitialServerConfig")(
@@ -192,13 +209,13 @@ const authorizeRequest = Effect.fn("EnvironmentRpc.authorize")(function* (
 
 export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
   TTag extends EnvironmentUnaryRpcTag,
->(tag: TTag, input: EnvironmentRpcInput<TTag>) {
+>(tag: TTag, input: EnvironmentRpcInput<TTag>, options?: { readonly waitForReconnect?: boolean }) {
   const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
   yield* Effect.annotateCurrentSpan({
     "environment.id": supervisor.target.environmentId,
     "rpc.method": tag,
   });
-  const session = yield* currentSession();
+  const session = yield* currentSession(options?.waitForReconnect);
   yield* authorizeRequest(tag, input);
   const observer = yield* EnvironmentRpcRequestObserver;
   const method = session.client[tag] as (
@@ -437,7 +454,8 @@ export function subscribe<TTag extends EnvironmentSubscriptionRpcTag>(
 export const request = <TTag extends Exclude<EnvironmentUnaryRpcTag, ClientGuardedRpcTag>>(
   tag: TTag,
   input: EnvironmentRpcInput<TTag>,
-) => requestGuarded(tag, input);
+  options?: { readonly waitForReconnect?: boolean },
+) => requestGuarded(tag, input, options);
 
 export const runStream = <
   TTag extends Exclude<EnvironmentStreamCommandRpcTag, ClientGuardedRpcTag>,
