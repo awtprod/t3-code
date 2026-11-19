@@ -32,6 +32,18 @@ export const PinnedGitHubCredential = Context.Reference<{
   defaultValue: () => null,
 });
 
+/** Optional host-owned credential routing for reads by PR head. */
+export const BranchLookupCredential = Context.Reference<
+  | ((repository: {
+      readonly host: string;
+      readonly owner: string;
+      readonly name: string;
+    }) => Effect.Effect<GitHubHeldCredential | null, Error>)
+  | null
+>("@t3tools/source-control-github/server/GitHubRequestPolicy/BranchLookupCredential", {
+  defaultValue: () => null,
+});
+
 export class GitHubApiRequestError extends Schema.TaggedError<GitHubApiRequestError>()(
   "GitHubApiRequestError",
   { host: Schema.String, operation: Schema.String, cause: Schema.Defect() },
