@@ -4,8 +4,10 @@ import type {
 } from "@t3tools/source-control-core/server/driver";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import * as GitHubRequestPolicy from "@t3tools/source-control-github/server/GitHubRequestPolicy";
+import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 
 import * as GitHubProfileAuth from "./GitHubProfileAuth.ts";
@@ -25,11 +27,21 @@ export class SourceControlDrivers extends Context.Service<
 
 const make = Effect.gen(function* () {
   const profiles = yield* GitHubProfileAuth.GitHubProfileAuth;
+  // Coalesce branch reads for each owner without caching credentials for other operations.
+  const branchProfiles = yield* Cache.makeWith(profiles.get, {
+    capacity: 16,
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? "5 minutes" : "10 seconds"),
+  });
+  const cachedProfiles = GitHubProfileAuth.GitHubProfileAuth.of({
+    get: Effect.fn("GitHubProfileAuth.getCachedForBranchLookup")((owner) =>
+      Cache.get(branchProfiles, owner),
+    ),
+  });
   return yield* Effect.forEach(BUILT_IN_SOURCE_CONTROL_DRIVER_LIST, (driver) =>
     driver.make.pipe(
       Effect.provideService(GitHubRequestPolicy.BranchLookupCredential, ({ host, owner, name }) =>
         GitHubProfileAuth.forRepository({ host, repository: `${owner}/${name}` }).pipe(
-          Effect.provideService(GitHubProfileAuth.GitHubProfileAuth, profiles),
+          Effect.provideService(GitHubProfileAuth.GitHubProfileAuth, cachedProfiles),
         ),
       ),
       Effect.map((instance) => ({ driver, instance })),
