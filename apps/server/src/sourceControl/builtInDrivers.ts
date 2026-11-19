@@ -3,10 +3,14 @@ import type {
   SourceControlDriverInstance,
 } from "@t3tools/source-control-core/server/driver";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
+import * as GitHubRequestPolicy from "@t3tools/source-control-github/server/GitHubRequestPolicy";
+import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 
+import * as GitHubProfileAuth from "./GitHubProfileAuth.ts";
 import * as ServerSourceControlHost from "./ServerSourceControlHost.ts";
 import { BUILT_IN_SOURCE_CONTROL_DRIVER_LIST } from "./sourceControlDefinitions.ts";
 
@@ -21,11 +25,32 @@ export class SourceControlDrivers extends Context.Service<
   ReadonlyArray<SourceControlDriverEntry>
 >()("@awtprod/command-center/sourceControl/builtInDrivers/SourceControlDrivers") {}
 
-const make = Effect.forEach(BUILT_IN_SOURCE_CONTROL_DRIVER_LIST, (driver) =>
-  driver.make.pipe(Effect.map((instance) => ({ driver, instance }))),
-);
+const make = Effect.gen(function* () {
+  const profiles = yield* GitHubProfileAuth.GitHubProfileAuth;
+  // Coalesce branch reads for each owner without caching credentials for other operations.
+  const branchProfiles = yield* Cache.makeWith(profiles.get, {
+    capacity: 16,
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? "5 minutes" : "10 seconds"),
+  });
+  const cachedProfiles = GitHubProfileAuth.GitHubProfileAuth.of({
+    get: Effect.fn("GitHubProfileAuth.getCachedForBranchLookup")((owner) =>
+      Cache.get(branchProfiles, owner),
+    ),
+  });
+  return yield* Effect.forEach(BUILT_IN_SOURCE_CONTROL_DRIVER_LIST, (driver) =>
+    driver.make.pipe(
+      Effect.provideService(GitHubRequestPolicy.BranchLookupCredential, ({ host, owner, name }) =>
+        GitHubProfileAuth.forRepository({ host, repository: `${owner}/${name}` }).pipe(
+          Effect.provideService(GitHubProfileAuth.GitHubProfileAuth, cachedProfiles),
+        ),
+      ),
+      Effect.map((instance) => ({ driver, instance })),
+    ),
+  );
+});
 
 export const layer = Layer.effect(SourceControlDrivers, make).pipe(
   Layer.provideMerge(ServerSourceControlHost.layer),
   Layer.provideMerge(SourceControlRateLimit.layer),
+  Layer.provide(GitHubProfileAuth.layer),
 );

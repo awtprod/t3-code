@@ -450,6 +450,7 @@ export const make = Effect.gen(function* () {
   const environment = yield* HostProcess.Environment;
   const git = sourceControlHost.git;
   const fileSystem = yield* FileSystem.FileSystem;
+  const branchLookupCredential = yield* GitHubRequestPolicy.BranchLookupCredential;
 
   const gitRead = (cwd: string, args: ReadonlyArray<string>) =>
     process.run({
@@ -544,10 +545,26 @@ export const make = Effect.gen(function* () {
     readonly allowReserve: boolean;
   }) {
     const locator = yield* resolveRepository(input);
+    const pinned = yield* GitHubRequestPolicy.PinnedGitHubCredential;
+    let credential: GitHubRequestPolicy.GitHubHeldCredential | null = null;
+    if (branchLookupCredential !== null && pinned === null) {
+      const settings = yield* sourceControlHost.settings.get.pipe(
+        Effect.mapError((error) => failure("GitHub host settings could not be read.", error)),
+      );
+      if (
+        readSourceControlHostSettings(GitHubClient.settings, settings.sourceControlHosts.github)
+          .hosts[locator.host]?.enabled === false
+      ) {
+        return yield* failure("GitHub is turned off in Settings → Source Control.");
+      }
+      credential = yield* branchLookupCredential(locator).pipe(
+        Effect.mapError((error) => failure(error.message, error)),
+      );
+    }
     const limit = Math.min(Math.max(Math.trunc(input.limit), 1), 100);
     const ownerMatch = /^([^:/\s]+):(.+)$/u.exec(input.headSelector.trim());
     const headRefName = ownerMatch?.[2] ?? input.headSelector.trim();
-    const result = yield* graphqlRead(
+    const lookup = graphqlRead(
       {
         host: locator.host,
         operation: "listPullRequestsByHead",
@@ -567,6 +584,16 @@ export const make = Effect.gen(function* () {
         input.allowReserve ? interactiveHeadResolver : backgroundHeadResolver,
       ),
     );
+    const result = yield* credential === null
+      ? lookup
+      : lookup.pipe(
+          Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, {
+            host: locator.host,
+            token: credential.token,
+            credentialFingerprint: credential.fingerprint,
+          }),
+          Effect.provideService(SourceControlRateLimit.CredentialScope, credential.fingerprint),
+        );
     if (result.repository === null) return yield* notFound("The repository could not be read.");
     const rows = (result.repository.pullRequests.nodes ?? []).flatMap((entry) => {
       const node = Option.getOrNull(decodePullRequestNode(entry));

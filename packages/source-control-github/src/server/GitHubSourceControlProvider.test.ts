@@ -89,6 +89,7 @@ const node = (number: number, headRefName: string, owner = "acme") => ({
 
 interface GraphQlCall {
   readonly host: string;
+  readonly authorization: string | undefined;
   readonly operationName: string;
   readonly query: string;
   readonly lookups: ReadonlyArray<Readonly<Record<string, unknown>>>;
@@ -126,6 +127,7 @@ function graphQlHttp(respond: GraphQlRespond, calls: Array<GraphQlCall>) {
             );
       const call: GraphQlCall = {
         host: new URL(request.url).hostname.replace(/^api\./, ""),
+        authorization: request.headers.authorization,
         operationName: sent.operationName,
         query: sent.query,
         lookups,
@@ -262,6 +264,46 @@ const githubContext = (host: string) => ({
 });
 
 describe("GitHubSourceControlProvider repository resolution", () => {
+  it.effect("uses the resolved base repository's credential for a branch lookup", () => {
+    const { layer, graphqlCalls } = harness({
+      remotes: remotesOutput(
+        ["origin", "git@github.com:me/web.git"],
+        ["upstream", "https://github.com/acme/web.git"],
+      ),
+      credential: (host) => Effect.fail(new GitHubCredentials.GitHubNotSignedInError({ host })),
+      graphql: () => ({ pullRequests: { nodes: [node(42, "feature", "me")] } }),
+    });
+    return Effect.gen(function* () {
+      let credentialReads = 0;
+      const provider = yield* GitHubSourceControlProvider.make.pipe(
+        Effect.provideService(GitHubRequestPolicy.BranchLookupCredential, (repository) => {
+          credentialReads += 1;
+          assert.deepStrictEqual(repository, { host: "github.com", owner: "acme", name: "web" });
+          return Effect.succeed({ token: Redacted.make("acme-profile"), fingerprint: "acme" });
+        }),
+      );
+      const lookup = () =>
+        provider.listChangeRequests({ cwd: "/repo", headSelector: "me:feature", state: "all" });
+      const pending = yield* lookup().pipe(Effect.forkChild);
+      yield* TestClock.adjust("500 millis");
+      const matches = yield* Fiber.join(pending);
+      assert.deepStrictEqual(
+        matches.map((pr) => pr.number),
+        [42],
+      );
+      assert.strictEqual(graphqlCalls[0]?.authorization, "Bearer acme-profile");
+
+      const settings = yield* TestSourceControlHost.TestSourceControlHostSettings;
+      yield* settings.update({
+        sourceControlHosts: { github: { hosts: { "github.com": { enabled: false } } } },
+      });
+      const error = yield* Effect.flip(lookup());
+      assert.include(error.message, "turned off");
+      assert.strictEqual(credentialReads, 1);
+      assert.strictEqual(graphqlCalls.length, 1);
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("reads the repository gh would pick from the remotes", () => {
     const paths: string[] = [];
     const { layer } = harness({
