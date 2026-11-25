@@ -42,7 +42,7 @@ import {
   type ReviewDiffPreviewSource,
   type VcsRef,
 } from "@t3tools/contracts";
-import { dedupeRemoteBranchesWithLocalMatches } from "@t3tools/shared/git";
+import { dedupeRemoteBranchesWithLocalMatches, normalizeGitRemoteUrl } from "@t3tools/shared/git";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { compactTraceAttributes } from "@t3tools/shared/observability";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
@@ -2817,12 +2817,40 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       );
     });
 
+  const commitIdentityForRepository = Effect.fn("commitIdentityForRepository")(function* (
+    cwd: string,
+  ) {
+    const remote = yield* resolvePrimaryRemoteName(cwd).pipe(Effect.orElseSucceed(() => null));
+    if (remote === null) return null;
+    const url = yield* runGitStdout("GitVcsDriver.commit.remote", cwd, [
+      "remote",
+      "get-url",
+      "--push",
+      "--",
+      remote,
+    ]);
+    const [host, owner, name, ...rest] = normalizeGitRemoteUrl(url.trim()).split("/");
+    if (host !== "github.com" || !owner || !name || rest.length > 0) return null;
+    return yield* Effect.try({
+      try: () => GitHubProfileAuth.gitHubCommitIdentity(owner),
+      catch: (cause) =>
+        new GitCommandError({
+          operation: "GitVcsDriver.commit.commit",
+          command: "git commit",
+          cwd,
+          detail: "GitHub profile map is invalid.",
+          cause,
+        }),
+    });
+  });
+
   const commit: GitVcsDriver.GitVcsDriver["Service"]["commit"] = Effect.fn("commit")(function* (
     cwd,
     subject,
     body,
     options?: GitVcsDriver.GitCommitOptions,
   ) {
+    const identity = yield* commitIdentityForRepository(cwd);
     if (options?.stage !== undefined) {
       yield* stageCommitChanges(cwd, options.stage.filePaths);
     }
@@ -2842,6 +2870,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               options.progress?.onOutputLine?.({ stream: "stderr", text: line }) ?? Effect.void,
           };
     yield* executeGit("GitVcsDriver.commit.commit", cwd, args, {
+      ...(identity && {
+        env: {
+          GIT_AUTHOR_NAME: identity.name,
+          GIT_AUTHOR_EMAIL: identity.email,
+          GIT_COMMITTER_NAME: identity.name,
+          GIT_COMMITTER_EMAIL: identity.email,
+        },
+      }),
       ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       ...(progress ? { progress } : {}),
     }).pipe(Effect.asVoid);
