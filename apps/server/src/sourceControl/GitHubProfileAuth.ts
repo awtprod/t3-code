@@ -21,6 +21,7 @@ interface ConfiguredGitHubProfile {
   readonly owner: string;
   readonly profile: string;
   readonly login: string;
+  readonly id?: string;
 }
 
 /**
@@ -54,18 +55,18 @@ function configuredProfileForOwner(
       typeof mapped.profile !== "string" ||
       !/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/u.test(mapped.profile) ||
       typeof mapped.login !== "string" ||
-      !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u.test(mapped.login)
+      !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u.test(mapped.login) ||
+      (mapped.id !== undefined &&
+        (typeof mapped.id !== "string" || !/^[0-9]{1,20}$/u.test(mapped.id)))
     ) {
       throw new Error("GitHub profile map is invalid.");
     }
   }
   const normalizedOwner = owner.toLowerCase();
   const value = Object.hasOwn(parsed, normalizedOwner)
-    ? (parsed as Record<string, { profile: string; login: string }>)[normalizedOwner]
+    ? (parsed as Record<string, Omit<ConfiguredGitHubProfile, "owner">>)[normalizedOwner]
     : undefined;
-  return value === undefined
-    ? null
-    : { owner: normalizedOwner, profile: value.profile, login: value.login };
+  return value === undefined ? null : { ...value, owner: normalizedOwner };
 }
 
 export function approvedGitHubProfileForOwner(
@@ -73,6 +74,12 @@ export function approvedGitHubProfileForOwner(
   configuration?: string,
 ): ApprovedGitHubProfile | null {
   return configuredProfileForOwner(owner, configuration)?.owner ?? null;
+}
+
+export function gitHubCommitIdentity(owner: string): { name: string; email: string } | null {
+  const profile = configuredProfileForOwner(owner);
+  if (profile?.id === undefined) return null;
+  return { name: profile.login, email: `${profile.id}+${profile.login}@users.noreply.github.com` };
 }
 
 export type RunProfileCli = (executable: string, args: readonly string[]) => Promise<string>;

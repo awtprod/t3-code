@@ -68,13 +68,30 @@ const previousProfileMap = process.env.COMMAND_CENTER_GITHUB_PROFILE_MAP;
 beforeAll(() => {
   process.env.COMMAND_CENTER_GITHUB_PROFILE_MAP = JSON.stringify({
     exampleowner: { profile: "primary", login: "exampleowner" },
-    exampleorg: { profile: "secondary", login: "examplelogin" },
+    exampleorg: { profile: "secondary", login: "examplelogin", id: "123" },
   });
 });
 afterAll(() => {
   if (previousProfileMap === undefined) delete process.env.COMMAND_CENTER_GITHUB_PROFILE_MAP;
   else process.env.COMMAND_CENTER_GITHUB_PROFILE_MAP = previousProfileMap;
 });
+
+it.effect("authors and commits a GitHub change as its repository's configured account", () =>
+  Effect.gen(function* () {
+    const cwd = yield* makeTmpDir();
+    yield* initRepoWithCommit(cwd);
+    yield* git(cwd, ["remote", "add", "origin", "https://github.com/ExampleOrg/sample.git"]);
+    yield* writeTextFile(cwd, "identity.txt", "test");
+    const driver = yield* GitVcsDriver.GitVcsDriver;
+    yield* driver.commit(cwd, "Add a file", "", { stage: {} });
+    const result = yield* git(cwd, ["log", "-1", "--format=%an%n%cn%n%ae%n%ce"]);
+    const [author, committer, authorEmail, committerEmail] = result.split("\n");
+    assert.equal(author, "examplelogin");
+    assert.equal(committer, author);
+    assert.deepEqual(authorEmail?.split("@"), ["123+examplelogin", "users.noreply.github.com"]);
+    assert.equal(committerEmail, authorEmail);
+  }).pipe(Effect.provide(layerTest)),
+);
 
 it.effect.each(["exampleowner", "exampleorg"] as const)(
   "uses the %s profile for only the exact HTTPS GitHub push URL",
